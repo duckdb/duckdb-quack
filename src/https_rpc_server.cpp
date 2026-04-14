@@ -56,6 +56,16 @@ void HttpsRpcServer::Listen(const RpcUri &uri) {
 	server->Get("/", [=](const duckdb_httplib_openssl::Request &req, duckdb_httplib_openssl::Response &res) {
 		res.set_content("This is a DuckDB Quack RPC endpoint. Use ATTACH 'quack:...' to connect here.\n", "text/plain");
 	});
+
+	// TODO: this is very liberal, and there might be reasonable cases to restrict to trusted domains (note, this is only
+	// relevant from within a Web browser, since other actors can just ignore the CORS convention
+	server->Options("/rpc", [](const duckdb_httplib_openssl::Request &, duckdb_httplib_openssl::Response &res) {
+		res.set_header("Access-Control-Allow-Origin", "*");
+		res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+		res.set_header("Access-Control-Allow-Headers", "*");
+		res.status = 204;
+	});
+
 	server->Post("/rpc", [&](const duckdb_httplib_openssl::Request &req, duckdb_httplib_openssl::Response &res,
 	                         const duckdb_httplib_openssl::ContentReader &content_reader) {
 		MemoryStream stream;
@@ -65,6 +75,7 @@ void HttpsRpcServer::Listen(const RpcUri &uri) {
 		});
 		HandleMessage(*ProtocolMessage::FromMemoryStream(stream))->ToMemoryStream(stream);
 		res.set_content((const char *)stream.GetData(), stream.GetPosition(), "application/duckdb");
+		res.set_header("Access-Control-Allow-Origin", "*");
 	});
 
 	if (!server->is_valid()) {
