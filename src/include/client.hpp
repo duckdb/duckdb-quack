@@ -4,11 +4,8 @@
 #include "rpc_log_type.hpp"
 #include "rpc_uri.hpp"
 
+#include "duckdb/common/http_util.hpp"
 #include "duckdb/logging/logger.hpp"
-
-namespace duckdb_httplib_openssl {
-class Client;
-}
 
 namespace duckdb {
 
@@ -119,7 +116,11 @@ private:
 	unique_ptr<ProtocolMessage> RequestInternal(unique_ptr<ProtocolMessage> request_message) override;
 
 private:
-	unique_ptr<duckdb_httplib_openssl::Client> https_client;
+	void EnsureClient();
+
+private:
+	unique_ptr<HTTPParams> http_params;
+	unique_ptr<HTTPClient> http_client;
 };
 
 } // namespace duckdb
