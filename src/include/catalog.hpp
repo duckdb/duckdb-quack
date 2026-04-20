@@ -17,19 +17,17 @@ class RpcTransaction : public Transaction {
 public:
 	RpcTransaction(RpcCatalog &rpc_catalog_p, TransactionManager &manager_p, ClientContext &context_p);
 	~RpcTransaction() override;
-	// TODO
-	void Start();
 	void Commit();
 	void Rollback();
-	//
-	// optional_ptr<CatalogEntry> GetCatalogEntry(const string &table_name);
-	// void DropEntry(CatalogType type, const string &table_name, bool cascade);
-	// void ClearTableEntry(const string &table_name);
-	//
+	void EnsureBegun();
+
 	static RpcTransaction &Get(ClientContext &context, Catalog &catalog);
+	static void EnsureActive(CatalogTransaction &transaction);
+	static void EnsureActive(ClientContext &context, Catalog &catalog);
 
 private:
 	RpcCatalog &rpc_catalog;
+	bool begun = false;
 	case_insensitive_map_t<unique_ptr<CatalogEntry>> catalog_entries;
 };
 
@@ -47,11 +45,6 @@ private:
 	RpcCatalog &rpc_catalog;
 	mutex transaction_lock;
 	reference_map_t<Transaction, unique_ptr<RpcTransaction>> transactions;
-};
-
-struct RpcSchemaInfo : CreateSchemaInfo {
-	string schema_name;
-	string catalog_name;
 };
 
 class RpcTableCatalogEntry : public TableCatalogEntry {
@@ -96,10 +89,20 @@ public:
 private:
 	optional_ptr<CatalogEntry> TryLoadBuiltInFunction(const string &entry_name);
 	optional_ptr<CatalogEntry> LoadBuiltInFunction(DefaultTableMacro macro);
+	optional_ptr<CatalogEntry> ReloadTableEntry(const string &table_name);
+
+public:
+	void LoadTableCache();
+	void AddToTableCache(const string &table_name, unique_ptr<CatalogEntry> entry);
+	void RemoveFromTableCache(const string &table_name);
 
 private:
 	mutex default_function_lock;
 	case_insensitive_map_t<unique_ptr<CatalogEntry>> default_function_map;
+
+	mutex table_cache_lock;
+	bool table_cache_loaded = false;
+	case_insensitive_map_t<unique_ptr<CatalogEntry>> table_cache;
 };
 
 class RpcCatalog : public Catalog {
@@ -139,6 +142,7 @@ public:
 	unique_ptr<ColumnDataCollection> ExecuteCommand(const string &query);
 	const RpcUri &GetServerUri();
 	const string &GetConnectionId();
+	ClientContext &GetContext();
 
 	RpcClient &GetRawClient();
 
@@ -147,6 +151,7 @@ private:
 	RpcUri server_uri;
 	unique_ptr<RpcClient> client;
 	string connection_id;
+	ClientContext *client_context;
 	unordered_map<string, unique_ptr<RpcSchemaCatalogEntry>> schemas;
 };
 

@@ -30,12 +30,8 @@ class RpcInsertGlobalState : public GlobalSinkState {
 public:
 	explicit RpcInsertGlobalState(RpcTableCatalogEntry &table_p) : table(table_p), insert_count(0) {
 	}
-	explicit RpcInsertGlobalState(unique_ptr<CatalogEntry> owned_entry_p)
-	    : table(owned_entry_p->Cast<RpcTableCatalogEntry>()), owned_entry(std::move(owned_entry_p)), insert_count(0) {
-	}
 
 	RpcTableCatalogEntry &table;
-	unique_ptr<CatalogEntry> owned_entry;
 	idx_t insert_count;
 };
 
@@ -43,9 +39,11 @@ unique_ptr<GlobalSinkState> RpcInsert::GetGlobalSinkState(ClientContext &context
 	if (table) {
 		return make_uniq<RpcInsertGlobalState>(table.get_mutable()->Cast<RpcTableCatalogEntry>());
 	}
-	// CREATE TABLE AS path: create the table on the remote side first
+	// CREATE TABLE AS path: create the table on the remote side, stash it in the schema's
+	// table cache, and hand the sink a reference into the cache. The cache owns lifetime.
 	auto &rpc_schema = schema.get_mutable()->Cast<RpcSchemaCatalogEntry>();
 	auto &rpc_catalog = rpc_schema.catalog.Cast<RpcCatalog>();
+	RpcTransaction::EnsureActive(context, rpc_catalog);
 
 	auto create_table_info = info->Base().Copy();
 	create_table_info->catalog = rpc_schema.GetInfo()->catalog;
@@ -55,9 +53,12 @@ unique_ptr<GlobalSinkState> RpcInsert::GetGlobalSinkState(ClientContext &context
 	    make_uniq<CatalogRequestMessage>(rpc_catalog.GetConnectionId(), std::move(create_table_info));
 	auto catalog_response =
 	    rpc_catalog.GetRawClient().Request<CatalogResponseMessage>(std::move(catalog_request_message));
-	auto entry = make_uniq_base<CatalogEntry, RpcTableCatalogEntry>(
-	    rpc_schema.catalog, rpc_schema, catalog_response->GetParseInfo()->Cast<CreateTableInfo>());
-	return make_uniq<RpcInsertGlobalState>(std::move(entry));
+
+	auto entry = make_uniq<RpcTableCatalogEntry>(rpc_schema.catalog, rpc_schema,
+	                                             catalog_response->GetParseInfo()->Cast<CreateTableInfo>());
+	auto &cache_ref = *entry;
+	rpc_schema.AddToTableCache(info->Base().table, std::move(entry));
+	return make_uniq<RpcInsertGlobalState>(cache_ref);
 }
 
 //===--------------------------------------------------------------------===//

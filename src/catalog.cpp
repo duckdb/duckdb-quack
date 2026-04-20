@@ -21,20 +21,37 @@ RpcTransaction::RpcTransaction(RpcCatalog &rpc_catalog_p, TransactionManager &ma
     : Transaction(manager_p, context_p), rpc_catalog(rpc_catalog_p) {
 }
 
-void RpcTransaction::Start() {
-	rpc_catalog.ExecuteCommand("BEGIN TRANSACTION");
+void RpcTransaction::EnsureBegun() {
+	if (!begun) {
+		rpc_catalog.ExecuteCommand("BEGIN TRANSACTION");
+		begun = true;
+	}
 }
 
 void RpcTransaction::Commit() {
-	rpc_catalog.ExecuteCommand("COMMIT");
+	if (begun) {
+		rpc_catalog.ExecuteCommand("COMMIT");
+	}
 }
 
 void RpcTransaction::Rollback() {
-	rpc_catalog.ExecuteCommand("ROLLBACK");
+	if (begun) {
+		rpc_catalog.ExecuteCommand("ROLLBACK");
+	}
 }
 
 RpcTransaction &RpcTransaction::Get(ClientContext &context, Catalog &catalog) {
 	return Transaction::Get(context, catalog).Cast<RpcTransaction>();
+}
+
+void RpcTransaction::EnsureActive(CatalogTransaction &transaction) {
+	if (transaction.transaction) {
+		transaction.transaction->Cast<RpcTransaction>().EnsureBegun();
+	}
+}
+
+void RpcTransaction::EnsureActive(ClientContext &context, Catalog &catalog) {
+	RpcTransaction::Get(context, catalog).EnsureBegun();
 }
 
 RpcTransaction::~RpcTransaction() {
@@ -46,7 +63,6 @@ RpcTransactionManager::RpcTransactionManager(AttachedDatabase &db_p, RpcCatalog 
 
 Transaction &RpcTransactionManager::StartTransaction(ClientContext &context) {
 	auto transaction = make_uniq<RpcTransaction>(rpc_catalog, *this, context);
-	transaction->Start();
 	auto &result = *transaction;
 	lock_guard<mutex> l(transaction_lock);
 	transactions[result] = std::move(transaction);
@@ -72,7 +88,7 @@ void RpcTransactionManager::Checkpoint(ClientContext &context, bool force) {
 }
 
 RpcCatalog::RpcCatalog(AttachedDatabase &db_p, const RpcUri &server_uri_p, ClientContext &context)
-    : Catalog(db_p), server_uri(server_uri_p), client(RpcClient::GetClient(server_uri)) {
+    : Catalog(db_p), server_uri(server_uri_p), client(RpcClient::GetClient(server_uri)), client_context(&context) {
 	client->SetContext(&context);
 
 	// evil copy paste
@@ -92,11 +108,14 @@ RpcCatalog::RpcCatalog(AttachedDatabase &db_p, const RpcUri &server_uri_p, Clien
 	                               "catalog_name NOT IN ('system', 'temp') ORDER BY ALL");
 	auto row_collection = make_uniq<ColumnDataRowCollection>(schemata->GetRows());
 	for (idx_t row_idx = 0; row_idx < row_collection->size(); row_idx++) {
-		RpcSchemaInfo info;
-		info.catalog_name = row_collection->GetValue(0, row_idx).GetValue<string>();
-		info.schema_name = row_collection->GetValue(1, row_idx).GetValue<string>();
+		CreateSchemaInfo info;
+		info.catalog = row_collection->GetValue(0, row_idx).GetValue<string>();
+		info.schema = row_collection->GetValue(1, row_idx).GetValue<string>();
 		// TODO this will fail if there are two schemas with the same name in different catalogs :/
-		schemas[info.schema_name] = make_uniq<RpcSchemaCatalogEntry>(*this, info);
+		schemas[info.schema] = make_uniq<RpcSchemaCatalogEntry>(*this, info);
+	}
+	for (auto &schema : schemas) {
+		schema.second->LoadTableCache();
 	}
 }
 
@@ -150,13 +169,12 @@ const string &RpcCatalog::GetConnectionId() {
 	return connection_id;
 }
 
+ClientContext &RpcCatalog::GetContext() {
+	return *client_context;
+}
+
 optional_ptr<CatalogEntry> RpcSchemaCatalogEntry::LookupEntry(CatalogTransaction transaction,
                                                               const EntryLookupInfo &lookup_info) {
-	auto &schema_create_info = GetInfo()->Cast<RpcSchemaInfo>();
-
-	CreateTableInfo create_info(*this, lookup_info.GetEntryName());
-	auto &rpc_catalog = catalog.Cast<RpcCatalog>();
-
 	auto catalog_type = lookup_info.GetCatalogType();
 	auto &entry_name = lookup_info.GetEntryName();
 	if (catalog_type == CatalogType::TABLE_FUNCTION_ENTRY) {
@@ -166,17 +184,19 @@ optional_ptr<CatalogEntry> RpcSchemaCatalogEntry::LookupEntry(CatalogTransaction
 		}
 	}
 
-	try {
-		auto bind_response =
-		    rpc_catalog.GetRawClient().Request<PrepareResponseMessage>(make_uniq<PrepareRequestMessage>(
-		        rpc_catalog.GetConnectionId(), StringUtil::Format("FROM %s", lookup_info.GetEntryName()), false));
-		for (idx_t i = 0; i < bind_response->Types().size(); i++) {
-			create_info.columns.AddColumn(ColumnDefinition(bind_response->Names()[i], bind_response->Types()[i]));
-		}
-		return new RpcTableCatalogEntry(catalog, *this, create_info);
-	} catch (IOException &ex) { // FIXME this should not be a catch on IOError
+	if (catalog_type != CatalogType::TABLE_ENTRY) {
 		return nullptr;
 	}
+
+	LoadTableCache();
+	{
+		lock_guard<mutex> guard(table_cache_lock);
+		auto it = table_cache.find(entry_name);
+		if (it != table_cache.end()) {
+			return it->second.get();
+		}
+	}
+	return ReloadTableEntry(entry_name);
 }
 
 TableFunction RpcTableCatalogEntry::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data_p) {
@@ -194,18 +214,23 @@ TableFunction RpcTableCatalogEntry::GetScanFunction(ClientContext &context, uniq
 }
 
 optional_ptr<CatalogEntry> RpcCatalog::CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) {
+	RpcTransaction::EnsureActive(transaction);
 	auto create_schema_info = info.Copy();
 	create_schema_info->catalog = "memory";
 
 	auto catalog_request_message = make_uniq<CatalogRequestMessage>(GetConnectionId(), std::move(create_schema_info));
 	auto catalog_response = GetRawClient().Request<CatalogResponseMessage>(std::move(catalog_request_message));
-	return make_uniq_base<CatalogEntry, RpcSchemaCatalogEntry>(
-	    *this, catalog_response->GetParseInfo()->Cast<CreateSchemaInfo>());
+
+	auto &response_info = catalog_response->GetParseInfo()->Cast<CreateSchemaInfo>();
+	auto entry = make_uniq<RpcSchemaCatalogEntry>(*this, response_info);
+	auto result = entry.get();
+	schemas[response_info.schema] = std::move(entry);
+	return result;
 }
 
 void RpcCatalog::ScanSchemas(ClientContext &context, std::function<void(SchemaCatalogEntry &)> callback) {
 	for (auto &schema : schemas) {
-		// callback(*schema.second);
+		callback(*schema.second);
 	}
 }
 
@@ -240,12 +265,108 @@ void RpcCatalog::DropSchema(ClientContext &context, DropInfo &info) {
 	throw NotImplementedException("DropSchema not implemented yet");
 }
 
+void RpcSchemaCatalogEntry::AddToTableCache(const string &table_name, unique_ptr<CatalogEntry> entry) {
+	lock_guard<mutex> guard(table_cache_lock);
+	table_cache[table_name] = std::move(entry);
+}
+
+void RpcSchemaCatalogEntry::RemoveFromTableCache(const string &table_name) {
+	lock_guard<mutex> guard(table_cache_lock);
+	table_cache.erase(table_name);
+}
+
+optional_ptr<CatalogEntry> RpcSchemaCatalogEntry::ReloadTableEntry(const string &table_name) {
+	auto &rpc_catalog = catalog.Cast<RpcCatalog>();
+	auto &context = rpc_catalog.GetContext();
+
+	auto query = StringUtil::Format("SELECT column_name, data_type "
+	                                "FROM duckdb_columns() "
+	                                "WHERE schema_name = %s AND table_name = %s AND NOT internal "
+	                                "ORDER BY column_index",
+	                                KeywordHelper::WriteQuoted(name, '\''),
+	                                KeywordHelper::WriteQuoted(table_name, '\''));
+	auto result = rpc_catalog.ExecuteCommand(query);
+	auto rows = make_uniq<ColumnDataRowCollection>(result->GetRows());
+
+	if (rows->size() == 0) {
+		return nullptr;
+	}
+
+	CreateTableInfo create_info(*this, table_name);
+	for (idx_t i = 0; i < rows->size(); i++) {
+		create_info.columns.AddColumn(ColumnDefinition(rows->GetValue(0, i).GetValue<string>(),
+		                                               TransformStringToLogicalType(rows->GetValue(1, i).GetValue<string>(), context)));
+	}
+	auto entry = make_uniq<RpcTableCatalogEntry>(catalog, *this, create_info);
+	auto result_ptr = entry.get();
+	AddToTableCache(table_name, std::move(entry));
+	return result_ptr;
+}
+
+void RpcSchemaCatalogEntry::LoadTableCache() {
+	{
+		lock_guard<mutex> guard(table_cache_lock);
+		if (table_cache_loaded) {
+			return;
+		}
+	}
+
+	auto &rpc_catalog = catalog.Cast<RpcCatalog>();
+	auto &context = rpc_catalog.GetContext();
+
+	auto query = StringUtil::Format("SELECT table_name, column_name, data_type "
+	                                "FROM duckdb_columns() "
+	                                "WHERE schema_name = %s AND NOT internal "
+	                                "ORDER BY table_name, column_index",
+	                                KeywordHelper::WriteQuoted(name, '\''));
+	auto result = rpc_catalog.ExecuteCommand(query);
+	auto rows = make_uniq<ColumnDataRowCollection>(result->GetRows());
+
+	case_insensitive_map_t<unique_ptr<CatalogEntry>> new_entries;
+	string current_table;
+	unique_ptr<CreateTableInfo> current_info;
+
+	for (idx_t i = 0; i < rows->size(); i++) {
+		auto table_name = rows->GetValue(0, i).GetValue<string>();
+		auto col_name = rows->GetValue(1, i).GetValue<string>();
+		auto type_str = rows->GetValue(2, i).GetValue<string>();
+
+		if (table_name != current_table) {
+			if (current_info) {
+				new_entries[current_table] = make_uniq<RpcTableCatalogEntry>(catalog, *this, *current_info);
+			}
+			current_table = table_name;
+			current_info = make_uniq<CreateTableInfo>(*this, table_name);
+		}
+		current_info->columns.AddColumn(
+		    ColumnDefinition(col_name, TransformStringToLogicalType(type_str, context)));
+	}
+	if (current_info) {
+		new_entries[current_table] = make_uniq<RpcTableCatalogEntry>(catalog, *this, *current_info);
+	}
+
+	lock_guard<mutex> guard(table_cache_lock);
+	if (table_cache_loaded) {
+		return;
+	}
+	table_cache = std::move(new_entries);
+	table_cache_loaded = true;
+}
+
 void RpcSchemaCatalogEntry::Scan(ClientContext &context, CatalogType type,
                                  const std::function<void(CatalogEntry &)> &callback) {
-	// TODO
+	Scan(type, callback);
 }
+
 void RpcSchemaCatalogEntry::Scan(CatalogType type, const std::function<void(CatalogEntry &)> &callback) {
-	// TODO
+	if (type != CatalogType::TABLE_ENTRY) {
+		return;
+	}
+	LoadTableCache();
+	lock_guard<mutex> guard(table_cache_lock);
+	for (auto &entry : table_cache) {
+		callback(*entry.second);
+	}
 }
 
 optional_ptr<CatalogEntry> RpcSchemaCatalogEntry::CreateIndex(CatalogTransaction transaction, CreateIndexInfo &info,
@@ -259,6 +380,7 @@ optional_ptr<CatalogEntry> RpcSchemaCatalogEntry::CreateFunction(CatalogTransact
 
 optional_ptr<CatalogEntry> RpcSchemaCatalogEntry::CreateTable(CatalogTransaction transaction,
                                                               BoundCreateTableInfo &info) {
+	RpcTransaction::EnsureActive(transaction);
 	auto &rpc_catalog = catalog.Cast<RpcCatalog>();
 
 	auto create_table_info = info.Base().Copy();
@@ -269,8 +391,12 @@ optional_ptr<CatalogEntry> RpcSchemaCatalogEntry::CreateTable(CatalogTransaction
 	    make_uniq<CatalogRequestMessage>(rpc_catalog.GetConnectionId(), std::move(create_table_info));
 	auto catalog_response =
 	    rpc_catalog.GetRawClient().Request<CatalogResponseMessage>(std::move(catalog_request_message));
-	return make_uniq_base<CatalogEntry, RpcTableCatalogEntry>(
-	    catalog, *this, catalog_response->GetParseInfo()->Cast<CreateTableInfo>());
+
+	auto entry = make_uniq<RpcTableCatalogEntry>(catalog, *this,
+	                                             catalog_response->GetParseInfo()->Cast<CreateTableInfo>());
+	auto result = entry.get();
+	AddToTableCache(info.Base().table, std::move(entry));
+	return result;
 }
 
 optional_ptr<CatalogEntry> RpcSchemaCatalogEntry::CreateView(CatalogTransaction transaction, CreateViewInfo &info) {
@@ -302,6 +428,7 @@ optional_ptr<CatalogEntry> RpcSchemaCatalogEntry::CreateType(CatalogTransaction 
 }
 
 void RpcSchemaCatalogEntry::DropEntry(ClientContext &context, DropInfo &info_p) {
+	RpcTransaction::EnsureActive(context, catalog);
 	auto &rpc_catalog = catalog.Cast<RpcCatalog>();
 	auto drop_info = info_p.Copy();
 	drop_info->catalog = GetInfo()->catalog;
@@ -311,6 +438,7 @@ void RpcSchemaCatalogEntry::DropEntry(ClientContext &context, DropInfo &info_p) 
 	    make_uniq<CatalogRequestMessage>(rpc_catalog.GetConnectionId(), std::move(drop_info));
 
 	rpc_catalog.GetRawClient().Request<CatalogResponseMessage>(std::move(catalog_request_message));
+	RemoveFromTableCache(info_p.name);
 }
 void RpcSchemaCatalogEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 	throw NotImplementedException("Alter not implemented yet, Alter!");
@@ -321,7 +449,9 @@ unique_ptr<BaseStatistics> RpcTableCatalogEntry::GetStatistics(ClientContext &co
 }
 
 TableStorageInfo RpcTableCatalogEntry::GetStorageInfo(ClientContext &context) {
-	throw NotImplementedException("GetStorageInfo not implemented yet");
+	// Minimal info: cardinality is unknown, and we have no local index/column segment metadata
+	// to report. Returning a default-constructed value is enough for SHOW TABLES / duckdb_tables().
+	return TableStorageInfo();
 }
 
 // clang-format off

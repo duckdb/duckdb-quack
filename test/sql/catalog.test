@@ -1,0 +1,62 @@
+# name: test/sql/catalog.test
+# description: SHOW TABLES / duckdb_tables() on an attached RPC catalog
+# group: [sql]
+#
+# Reproducer for the missing catalog enumeration path.
+#
+# Expected behaviour: SHOW TABLES against the attached RPC catalog should list
+# the remote tables. Today RpcCatalog::ScanSchemas has its callback commented
+# out (src/catalog.cpp:206-210) and both RpcSchemaCatalogEntry::Scan overloads
+# are empty stubs (src/catalog.cpp:243-249), so the query either returns no
+# rows or crashes depending on which code path DuckDB takes to enumerate.
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+statement ok
+create table fuu as values(42, 43);
+
+statement ok
+create table bar as values(1, 2);
+
+foreach server 'quack:localhost'
+
+foreach ssl  true
+
+statement ok con1
+call rpc_start({server}, disable_ssl={ssl});
+
+statement ok con2
+attach {server} as rpc (disable_ssl {ssl})
+
+# Baseline: a direct lookup works (LookupEntry is wired up).
+query II con2
+from rpc.fuu;
+----
+42	43
+
+# Enumeration: this is the failing path. Expect the remote tables to appear.
+query I con2
+select table_name from duckdb_tables() where database_name = 'rpc' order by table_name;
+----
+bar
+fuu
+
+query I con2
+show tables from rpc;
+----
+bar
+fuu
+
+statement ok con2
+detach rpc;
+
+statement ok con1
+call rpc_stop({server});
+
+endloop
+
+endloop
