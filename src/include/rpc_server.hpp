@@ -33,6 +33,9 @@ public:
 	// TODO should listen be part of the constructor?
 	virtual void Listen(const RpcUri &uri) {};
 
+	//! Synchronously stop accepting connections and join the listener threads.
+	virtual void Close() {};
+
 	optional_ptr<RpcConnection> GetConnection(const string &connection_id);
 	string CreateNewConnection(const string &session_id);
 	// TODO need something to destroy connections
@@ -58,6 +61,7 @@ public:
 	HttpRpcServer(ClientContext &context_p) : RpcServer(context_p) {
 	}
 	void Listen(const RpcUri &uri) override;
+	void Close() override;
 
 	~HttpRpcServer() override;
 

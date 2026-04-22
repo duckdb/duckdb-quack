@@ -1,0 +1,70 @@
+# name: test/sql/pgbench.test
+# description: test rpc extension
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+
+statement ok con1
+CREATE TABLE pgbench_accounts(aid INTEGER, bid INTEGER, abalance INTEGER, filler VARCHAR);
+
+statement ok con1
+CREATE TABLE pgbench_branches(bid INTEGER, bbalance INTEGER, filler VARCHAR);
+
+statement ok con1
+CREATE TABLE pgbench_history(tid INTEGER, bid INTEGER, aid INTEGER, delta INTEGER, mtime TIMESTAMP, filler VARCHAR);
+
+statement ok con1
+CREATE TABLE pgbench_tellers(tid INTEGER, bid INTEGER, tbalance INTEGER, filler VARCHAR);
+
+statement ok
+set rpc_default_token='asdf'
+
+statement ok con1
+call rpc_start('quack:localhost', disable_ssl=true);
+
+statement ok con2
+attach 'quack:localhost' as rpc (disable_ssl true)
+
+statement ok con2
+CALL enable_logging('RPC');
+
+# 100 times
+foreach i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i i
+
+statement ok con2
+begin transaction
+
+statement ok con2
+from rpc.call('UPDATE pgbench_accounts SET abalance = abalance + 2655 WHERE aid = 5445192;')
+
+statement ok con2
+from rpc.call('SELECT abalance FROM pgbench_accounts WHERE aid = 5445192;')
+
+statement ok con2
+from rpc.call('UPDATE pgbench_tellers SET tbalance = tbalance + 2655 WHERE tid = 120;')
+
+statement ok con2
+from rpc.call('UPDATE pgbench_branches SET bbalance = bbalance + 2655 WHERE bid = 3;')
+
+statement ok con2
+from rpc.call('INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES (120, 3, 5445192, 2655, CURRENT_TIMESTAMP);')
+
+statement ok con2
+commit
+
+endloop
+
+# we send 100 times 7 queries, so 700 messages
+query I con2
+select count(*) from duckdb_logs where type = 'RPC' and scope = 'CONNECTION'
+----
+700
+
+
+statement ok con1
+call rpc_stop('quack:localhost');

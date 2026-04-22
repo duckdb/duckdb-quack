@@ -27,6 +27,22 @@ from rpc_call({server}, 'select 42', disable_ssl={ssl})
 ----
 42
 
+# we return the last result set - for now
+query I con2
+from rpc_call({server}, 'select 42; select 43', disable_ssl={ssl})
+----
+42
+
+query I con2
+from rpc_call({server}, 'set variable x=44; select getvariable(''x'')', disable_ssl={ssl})
+----
+44
+
+# we can run whole goddamn transactions in here
+query I con2
+from rpc_call({server}, 'create table fuu2 (i integer); begin transaction; insert into fuu2 values(45); rollback; from fuu2', disable_ssl={ssl})
+----
+
 #
 # statement error con2
 # from rpc_call({server}, 'select 42', disable_ssl=(NOT {ssl}))
@@ -35,6 +51,12 @@ from rpc_call({server}, 'select 42', disable_ssl={ssl})
 
 statement error con2
 from rpc_call({server}, '', disable_ssl={ssl})
+----
+Error
+
+
+statement error con2
+from rpc_call({server}, NULL, disable_ssl={ssl})
 ----
 Error
 
@@ -63,6 +85,11 @@ query I ok con2
 from rpc_call({server}, 'from fuu', disable_ssl={ssl})
 ----
 42
+
+statement error con2
+from rpc_call({server}, 'from yyyy', disable_ssl={ssl})
+----
+does not exist
 
 statement ok con2
 from rpc_call({server}, 'drop table fuu', disable_ssl={ssl})

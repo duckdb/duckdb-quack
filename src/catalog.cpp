@@ -5,6 +5,8 @@
 #include "rpc_insert.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/main/secret/secret.hpp"
+#include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
@@ -12,6 +14,8 @@
 #include "duckdb/planner/operator/logical_insert.hpp"
 #include "duckdb/storage/database_size.hpp"
 #include "duckdb/catalog/catalog_entry/table_macro_catalog_entry.hpp"
+#include "duckdb/main/connection.hpp"
+#include "duckdb/main/database.hpp"
 
 // FIXME bunch of stuff copied from postgres scanner, can probably be simplified!
 
@@ -92,16 +96,26 @@ RpcCatalog::RpcCatalog(AttachedDatabase &db_p, const RpcUri &server_uri_p, Clien
     : Catalog(db_p), server_uri(server_uri_p), client(RpcClient::GetClient(server_uri)), client_context(context) {
 	client->SetContext(&context);
 
-	// evil copy paste
-	Value default_token_val;
-	auto &config = DBConfig::GetConfig(db_p.GetDatabase());
+	// Resolve auth token: prefer a quack secret scoped to this URI; fall back to the
+	// global rpc_default_token setting.
+	string token;
+	auto &secret_manager = SecretManager::Get(context);
+	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
+	auto match = secret_manager.LookupSecret(transaction, server_uri.Uri(), "quack");
+	if (match.HasMatch()) {
+		const auto &kv = dynamic_cast<const KeyValueSecret &>(*match.secret_entry->secret);
+		token = kv.TryGetValue("token", true).ToString();
+	} else {
+		Value default_token_val;
+		auto &config = DBConfig::GetConfig(db_p.GetDatabase());
+		auto lookup_result_token = config.TryGetCurrentSetting("rpc_default_token", default_token_val);
+		D_ASSERT(lookup_result_token);
+		if (!default_token_val.IsNull()) {
+			token = default_token_val.GetValue<string>();
+		}
+	}
 
-	// TODO there could be a race condition here, lock this
-	auto lookup_result_token = config.TryGetCurrentSetting("rpc_default_token", default_token_val);
-	D_ASSERT(lookup_result_token);
-
-	auto connection_response = client->Request<ConnectionResponseMessage>(
-	    make_uniq<ConnectionRequestMessage>(default_token_val.GetValue<string>()));
+	auto connection_response = client->Request<ConnectionResponseMessage>(make_uniq<ConnectionRequestMessage>(token));
 	connection_id = connection_response->ConnectionId();
 
 	// TODO a tiiny bit clunky this
@@ -146,18 +160,13 @@ const RpcUri &RpcCatalog::GetServerUri() {
 }
 
 unique_ptr<ColumnDataCollection> RpcCatalog::ExecuteCommand(const string &query) {
+	// FIXME this will break with many results!
 	auto chunk_collection = make_uniq<ColumnDataCollection>(Allocator::DefaultAllocator());
 	auto response =
 	    client->Request<PrepareResponseMessage>(make_uniq<PrepareRequestMessage>(connection_id, query, true));
 	chunk_collection->Initialize(response->Types());
-	while (true) {
-		auto fetch_response = client->Request<FetchResponseMessage>(make_uniq<FetchRequestMessage>(connection_id));
-		if (!fetch_response || fetch_response->Chunks().empty()) {
-			break;
-		}
-		for (auto &chunk : fetch_response->Chunks()) {
-			chunk_collection->Append(*chunk);
-		}
+	for (auto &chunk : response->MutableChunks()) {
+		chunk_collection->Append(*chunk);
 	}
 	return chunk_collection;
 }
@@ -176,6 +185,10 @@ ClientContext &RpcCatalog::GetContext() {
 
 optional_ptr<CatalogEntry> RpcSchemaCatalogEntry::LookupEntry(CatalogTransaction transaction,
                                                               const EntryLookupInfo &lookup_info) {
+	auto &schema_create_info = GetInfo()->Cast<RpcSchemaInfo>();
+
+	CreateTableInfo create_info(*this, lookup_info.GetEntryName());
+	auto &rpc_catalog = catalog.Cast<RpcCatalog>();
 	auto catalog_type = lookup_info.GetCatalogType();
 	auto &entry_name = lookup_info.GetEntryName();
 	if (catalog_type == CatalogType::TABLE_FUNCTION_ENTRY) {
@@ -185,19 +198,18 @@ optional_ptr<CatalogEntry> RpcSchemaCatalogEntry::LookupEntry(CatalogTransaction
 		}
 	}
 
-	if (catalog_type != CatalogType::TABLE_ENTRY) {
+	try {
+		auto bind_response =
+		    rpc_catalog.GetRawClient().Request<PrepareResponseMessage>(make_uniq<PrepareRequestMessage>(
+		        rpc_catalog.GetConnectionId(), StringUtil::Format("FROM %s WHERE FALSE", lookup_info.GetEntryName()),
+		        true));
+		for (idx_t i = 0; i < bind_response->Types().size(); i++) {
+			create_info.columns.AddColumn(ColumnDefinition(bind_response->Names()[i], bind_response->Types()[i]));
+		}
+		return new RpcTableCatalogEntry(catalog, *this, create_info);
+	} catch (IOException &ex) { // FIXME this should not be a catch on IOError
 		return nullptr;
 	}
-
-	LoadTableCache();
-	{
-		lock_guard<mutex> guard(table_cache_lock);
-		auto it = table_cache.find(entry_name);
-		if (it != table_cache.end()) {
-			return it->second.get();
-		}
-	}
-	return ReloadTableEntry(entry_name);
 }
 
 TableFunction RpcTableCatalogEntry::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data_p) {

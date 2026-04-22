@@ -69,8 +69,6 @@ static void RpcStartFun(ClientContext &context, TableFunctionInput &data_p, Data
 
 		// TODO there could be a race condition here, lock this
 		auto lookup_result_token = config.TryGetCurrentSetting("rpc_default_token", default_token_val);
-		D_ASSERT(lookup_result_token);
-
 		if (default_token_val.IsNull()) {
 			config.SetOptionByName("rpc_default_token", Value(RpcServer::GenerateSessionId()));
 		}
@@ -87,11 +85,9 @@ static void RpcStartFun(ClientContext &context, TableFunctionInput &data_p, Data
 }
 
 TableFunction RpcStartFunction::GetFunction() {
-	// TODO add a named parameter to specify where the keys are
 	auto fun = TableFunction("rpc_start", {LogicalType::VARCHAR}, RpcStartFun, RpcStartBind);
 	fun.named_parameters["disable_ssl"] = LogicalType::BOOLEAN;
 	fun.named_parameters["allow_other_hostname"] = LogicalType::BOOLEAN;
-
 	return fun;
 }
 
@@ -103,7 +99,7 @@ static unique_ptr<FunctionData> RpcStopBind(ClientContext &context, TableFunctio
 		throw InvalidInputException("Invalid listen string specified");
 	}
 	bind_data->listen_uri =
-	    RpcUri(uri_value.GetValue<string>(), /* not really but we don't want to ask the user again */ true);
+	    RpcUri(uri_value.GetValue<string>(), /* not really, but we don't want to ask the user again */ true);
 	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("status");
 
@@ -135,11 +131,3 @@ struct RpcGenerateKeysFunctionData : public TableFunctionData {
 
 	bool finished = false;
 };
-
-static unique_ptr<FunctionData> RpcGenerateKeysBind(ClientContext &context, TableFunctionBindInput &input,
-                                                    vector<LogicalType> &return_types, vector<string> &names) {
-	auto result = make_uniq<RpcGenerateKeysFunctionData>();
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("Status");
-	return std::move(result);
-}

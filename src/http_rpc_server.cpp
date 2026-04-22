@@ -8,14 +8,22 @@
 
 using namespace duckdb;
 
-HttpRpcServer::~HttpRpcServer() {
+void HttpRpcServer::Close() {
+	// Stops accepting new connections and joins the listener threads (NOT the
+	// httplib worker pool)
 	server->stop();
 	try {
 		for (auto &thread : listen_threads) {
-			thread.join();
+			if (thread.joinable()) {
+				thread.join();
+			}
 		}
 	} catch (std::exception &) {
 	}
+}
+
+HttpRpcServer::~HttpRpcServer() {
+	Close();
 }
 
 void HttpRpcServer::ListenThread(HttpRpcServer *rpc_server, const string &listen_host, int listen_port) {
@@ -52,6 +60,7 @@ void HttpRpcServer::Listen(const RpcUri &uri) {
 
 	server->Post("/rpc", [&](const duckdb_httplib::Request &, duckdb_httplib::Response &res,
 	                         const duckdb_httplib::ContentReader &content_reader) {
+		res.set_header("Access-Control-Allow-Origin", "*");
 		MemoryStream stream;
 		content_reader([&](const char *data, size_t data_length) {
 			stream.WriteData((data_ptr_t)data, data_length);
@@ -59,7 +68,6 @@ void HttpRpcServer::Listen(const RpcUri &uri) {
 		});
 		HandleMessage(*ProtocolMessage::FromMemoryStream(stream))->ToMemoryStream(stream);
 		res.set_content((const char *)stream.GetData(), stream.GetPosition(), "application/duckdb");
-		res.set_header("Access-Control-Allow-Origin", "*");
 	});
 
 	if (!server->is_valid()) {

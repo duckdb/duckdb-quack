@@ -48,6 +48,11 @@ private:
 	reference_map_t<Transaction, unique_ptr<RpcTransaction>> transactions;
 };
 
+struct RpcSchemaInfo : CreateSchemaInfo {
+	string schema_name;
+	string catalog_name;
+};
+
 class RpcTableCatalogEntry : public TableCatalogEntry {
 public:
 	RpcTableCatalogEntry(Catalog &catalog_p, SchemaCatalogEntry &schema_p, CreateTableInfo &info_p)

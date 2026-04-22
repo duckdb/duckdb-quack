@@ -1,0 +1,97 @@
+# name: test/sql/whoami.test
+# description: whoami() / quack_identify contract
+# group: [sql]
+
+mode skip
+
+require quack
+
+require json
+
+require httpfs
+
+# --- baseline: fresh session, no identity set ---
+# name/provider/hostname/region are NULL; uptime is non-negative; meta auto-filled.
+
+query I
+SELECT name IS NULL FROM whoami();
+----
+true
+
+query I
+SELECT provider IS NULL FROM whoami();
+----
+true
+
+query I
+SELECT uptime >= INTERVAL 0 SECOND FROM whoami();
+----
+true
+
+query I
+SELECT meta->>'duckdb_version' IS NOT NULL FROM whoami();
+----
+true
+
+query I
+SELECT meta->>'platform' IS NOT NULL FROM whoami();
+----
+true
+
+# --- quack_identify sets individual fields ---
+
+statement ok
+CALL quack_identify(name => 'test-node', region => 'eu-west-1');
+
+query II
+SELECT name, region FROM whoami();
+----
+test-node	eu-west-1
+
+# --- provider / hostname still NULL (only set ones updated) ---
+
+query I
+SELECT provider IS NULL FROM whoami();
+----
+true
+
+# --- user-supplied meta merges with auto-computed; user wins on key conflict ---
+
+statement ok
+CALL quack_identify(meta => '{"role": "worker", "platform": "override"}');
+
+query I
+SELECT meta->>'role' FROM whoami();
+----
+worker
+
+query I
+SELECT meta->>'platform' FROM whoami();
+----
+override
+
+# duckdb_version survives (not overridden by user)
+query I
+SELECT meta->>'duckdb_version' IS NOT NULL FROM whoami();
+----
+true
+
+# --- whoami_started_at override changes uptime ---
+
+statement ok
+SET VARIABLE whoami_started_at = TIMESTAMP '2020-01-01 00:00:00';
+
+query I
+SELECT uptime > INTERVAL 365 DAY FROM whoami();
+----
+true
+
+# --- direct SET VARIABLE also works (quack_identify is sugar, not gatekeeper) ---
+
+statement ok
+SET VARIABLE whoami_name = 'hand-set';
+
+query I
+SELECT name FROM whoami();
+----
+hand-set

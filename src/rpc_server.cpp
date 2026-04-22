@@ -165,11 +165,30 @@ unique_ptr<ProtocolMessage> RpcServer::HandleMessage(ProtocolMessage &received_m
 	return response;
 }
 
+static vector<unique_ptr<DataChunk>> CreateBatch(unique_ptr<QueryResult> &query_result, idx_t max_chunks) {
+	vector<unique_ptr<DataChunk>> batch;
+	while (batch.size() < max_chunks) {
+		auto result_chunk = query_result->Fetch();
+		// error case
+		if (!result_chunk && query_result->HasError()) {
+			batch.clear();
+			return std::move(batch);
+		}
+		// we are done case
+		if (!result_chunk || result_chunk->size() == 0) {
+			query_result.reset();
+			break;
+		}
+		batch.push_back(std::move(result_chunk));
+	}
+	return std::move(batch);
+}
+
 unique_ptr<ProtocolMessage> RpcServer::HandleMessageInternal(ProtocolMessage &received_message) {
 	switch (received_message.Type()) {
 	case MessageType::CONNECTION_REQUEST: {
 		auto &connection_request_message = received_message.Cast<ConnectionRequestMessage>();
-		string session_id = RpcServer::GenerateSessionId();
+		string session_id = GenerateSessionId();
 		if (!EvaluateAuthQuery(
 		        *db, StringUtil::Format("SELECT %s(?, ?)", GetSettingString(*db, "rpc_authentication_function")),
 		        Value(session_id), Value(connection_request_message.AuthString()))) {
@@ -193,23 +212,43 @@ unique_ptr<ProtocolMessage> RpcServer::HandleMessageInternal(ProtocolMessage &re
 		std::unique_lock<std::mutex> lock(rpc_connection->lock);
 		rpc_connection->duckdb_query_result.reset();
 
-		auto statement = rpc_connection->duckdb_connection->Prepare(prepare_request_message.Query());
-		if (statement->HasError()) {
-			return make_uniq<ErrorMessage>(statement->GetError());
+		if (!prepare_request_message.ImmediatelyExecute()) {
+			return make_uniq<ErrorMessage>("EEEK");
 		}
-		if (prepare_request_message.ImmediatelyExecute()) {
-			vector<Value> params; // TODO allow parameters here?
-			auto query_result = statement->PendingQuery(params, true)->Execute();
+
+		{
+			auto query_result = rpc_connection->duckdb_connection->SendQuery(prepare_request_message.Query());
 			if (query_result->HasError()) {
 				return make_uniq<ErrorMessage>(query_result->GetError());
 			}
+			if (query_result->names.empty()) {
+				return make_uniq<ErrorMessage>("Query did not return any columns");
+			}
+
 			rpc_connection->duckdb_query_result = std::move(query_result);
-			// Fresh query → restart batch numbering. Clients' local state is re-initialized on
-			// a new PREPARE, so indices start at 0 again.
-			rpc_connection->next_batch_index = 0;
 		}
-		return make_uniq<PrepareResponseMessage>(statement->GetTypes(), statement->GetNames(),
-		                                         GetEstimatedCardinality(*rpc_connection->duckdb_connection->context));
+		// Fresh query → restart batch numbering. Clients' local state is re-initialized on
+		// a new PREPARE, so indices start at 0 again.
+		rpc_connection->next_batch_index = 0;
+
+		Value max_chunks_val;
+		DBConfig::GetConfig(*db).TryGetCurrentSetting("quack_fetch_batch_chunks", max_chunks_val);
+		auto max_chunks_per_batch = max_chunks_val.GetValue<uint64_t>();
+
+		auto names = rpc_connection->duckdb_query_result->names;
+		auto types = rpc_connection->duckdb_query_result->types;
+
+		auto batch = CreateBatch(rpc_connection->duckdb_query_result, max_chunks_per_batch);
+		if (rpc_connection->duckdb_query_result && rpc_connection->duckdb_query_result->HasError()) {
+			auto error_message = rpc_connection->duckdb_query_result->GetError();
+			rpc_connection->duckdb_query_result.reset();
+			return make_uniq<ErrorMessage>(error_message);
+		}
+		auto needs_more_fetch = batch.size() == max_chunks_per_batch;
+
+		return make_uniq<PrepareResponseMessage>(types, names,
+		                                         GetEstimatedCardinality(*rpc_connection->duckdb_connection->context),
+		                                         std::move(batch), needs_more_fetch);
 	}
 
 	case MessageType::FETCH_REQUEST: {
@@ -228,27 +267,14 @@ unique_ptr<ProtocolMessage> RpcServer::HandleMessageInternal(ProtocolMessage &re
 		}
 
 		Value max_chunks_val;
-		Value max_bytes_val;
 		DBConfig::GetConfig(*db).TryGetCurrentSetting("quack_fetch_batch_chunks", max_chunks_val);
-		DBConfig::GetConfig(*db).TryGetCurrentSetting("quack_fetch_batch_bytes", max_bytes_val);
 		auto max_chunks_per_batch = max_chunks_val.GetValue<uint64_t>();
-		auto max_bytes_per_batch = max_bytes_val.GetValue<uint64_t>();
 
-		vector<unique_ptr<DataChunk>> batch;
-		idx_t bytes_est = 0;
-		while (batch.size() < max_chunks_per_batch && bytes_est < max_bytes_per_batch) {
-			auto result_chunk = rpc_connection->duckdb_query_result->Fetch();
-			if (!result_chunk && rpc_connection->duckdb_query_result->HasError()) {
-				auto error = make_uniq<ErrorMessage>(rpc_connection->duckdb_query_result->GetError());
-				rpc_connection->duckdb_query_result.reset();
-				return error;
-			}
-			if (!result_chunk || result_chunk->size() == 0) {
-				rpc_connection->duckdb_query_result.reset();
-				break;
-			}
-			bytes_est += result_chunk->size() * result_chunk->ColumnCount() * 8;
-			batch.push_back(std::move(result_chunk));
+		auto batch = CreateBatch(rpc_connection->duckdb_query_result, max_chunks_per_batch);
+		if (rpc_connection->duckdb_query_result && rpc_connection->duckdb_query_result->HasError()) {
+			auto error_message = rpc_connection->duckdb_query_result->GetError();
+			rpc_connection->duckdb_query_result.reset();
+			return make_uniq<ErrorMessage>(error_message);
 		}
 		auto assigned_batch_index = rpc_connection->next_batch_index++;
 		return make_uniq<FetchResponseMessage>(std::move(batch), optional_idx(assigned_batch_index));

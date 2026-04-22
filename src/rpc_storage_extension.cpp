@@ -39,10 +39,11 @@ bool RpcStorageExtensionInfo::StopServer(ClientContext &context, const RpcUri &l
 		to_destroy = std::move(it->second);
 		servers.erase(it);
 	}
-	// Destroy off the calling thread so that when rpc_stop is invoked from inside one
-	// of the server's own worker threads (typical: rpc_call(<self>, 'rpc_stop(<self>)')),
-	// ~HttpsRpcServer doesn't end up joining the httplib worker pool that contains the
-	// current thread → pthread_join(self) → EDEADLK → terminate.
+	// Synchronously free the listening port so that clients racing a subsequent
+	// connect() after rpc_stop observe a real refusal rather than a stale socket.
+	to_destroy->Close();
+	// Full destruction (httplib worker-pool join) runs off-thread so that when
+	// rpc_stop is invoked from inside one of the server's own worker threads
 	std::thread([srv = std::move(to_destroy)]() mutable { srv.reset(); }).detach();
 	return true;
 }

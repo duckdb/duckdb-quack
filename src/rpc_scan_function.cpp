@@ -5,6 +5,7 @@
 #include "duckdb/function/table_function.hpp"
 #include "rpc_bind_data.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/secret/secret.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/planner/table_filter.hpp"
 #include "duckdb/planner/filter/conjunction_filter.hpp"
@@ -29,17 +30,28 @@ static unique_ptr<FunctionData> RpcBind(ClientContext &context, TableFunctionBin
 	bind_data->initial_client = RpcClient::GetClient(bind_data->server_uri);
 	bind_data->initial_client->SetContext(&context);
 
-	Value default_token_val;
-	auto &config = DBConfig::GetConfig(context);
-
-	auto lookup_result_token = config.TryGetCurrentSetting("rpc_default_token", default_token_val);
-	D_ASSERT(lookup_result_token);
-	if (default_token_val.IsNull() || default_token_val.type().id() != LogicalTypeId::VARCHAR) {
-		throw InvalidConfigurationException("No RPC token found");
+	// Resolve auth token: prefer a quack secret scoped to this URI; fall back to the
+	// global rpc_default_token setting. Mirrors the logic in RpcCatalog::RpcCatalog.
+	string token;
+	auto &secret_manager = SecretManager::Get(context);
+	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
+	auto match = secret_manager.LookupSecret(transaction, bind_data->server_uri.Uri(), "quack");
+	if (match.HasMatch()) {
+		const auto &kv = dynamic_cast<const KeyValueSecret &>(*match.secret_entry->secret);
+		token = kv.TryGetValue("token", true).ToString();
+	} else {
+		Value default_token_val;
+		auto &config = DBConfig::GetConfig(context);
+		auto lookup_result_token = config.TryGetCurrentSetting("rpc_default_token", default_token_val);
+		D_ASSERT(lookup_result_token);
+		if (default_token_val.IsNull() || default_token_val.type().id() != LogicalTypeId::VARCHAR) {
+			throw InvalidConfigurationException("No RPC token found");
+		}
+		token = default_token_val.GetValue<string>();
 	}
 
-	auto connection_request_response = bind_data->initial_client->Request<ConnectionResponseMessage>(
-	    make_uniq<ConnectionRequestMessage>(default_token_val.GetValue<string>()));
+	auto connection_request_response =
+	    bind_data->initial_client->Request<ConnectionResponseMessage>(make_uniq<ConnectionRequestMessage>(token));
 	bind_data->connection_id = connection_request_response->ConnectionId();
 
 	auto bind_response = bind_data->initial_client->Request<PrepareResponseMessage>(
@@ -48,6 +60,12 @@ static unique_ptr<FunctionData> RpcBind(ClientContext &context, TableFunctionBin
 	bind_data->estimated_cardinality = bind_response->EstimatedCardinality();
 	return_types = bind_response->Types();
 	names = bind_response->Names();
+
+	bind_data->needs_more_fetch = true;
+	if (bind_response->HasResults()) {
+		bind_data->initial_results = std::move(bind_response->MutableChunks());
+		bind_data->needs_more_fetch = bind_response->NeedsMoreFetch();
+	}
 
 	return bind_data;
 }
@@ -92,6 +110,12 @@ static unique_ptr<FunctionData> RpcBindCatalogName(ClientContext &context, Table
 	return_types = bind_response->Types();
 	names = bind_response->Names();
 
+	// new stuff
+	bind_data->needs_more_fetch = true;
+	if (bind_response->HasResults()) {
+		bind_data->initial_results = std::move(bind_response->MutableChunks());
+		bind_data->needs_more_fetch = bind_response->NeedsMoreFetch();
+	}
 	return bind_data;
 }
 
@@ -207,19 +231,24 @@ static string BuildPushdownQuery(const RpcBindData &bind_data, const TableFuncti
 }
 
 unique_ptr<GlobalTableFunctionState> RpcInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
-	auto &bind_data = input.bind_data->Cast<RpcBindData>();
+	auto &bind_data = input.bind_data->CastNoConst<RpcBindData>();
 
 	// For the catalog path (ATTACH), LookupEntry only prepares without executing
 	// to avoid the server-side result being overwritten by subsequent lookups.
 	// We execute the query here, right before scanning, so the result is fresh.
+
 	if (!bind_data.table_name.empty()) {
 		auto query = BuildPushdownQuery(bind_data, input);
 		auto client = RpcClient::GetClient(bind_data.server_uri);
 		client->SetContext(&context);
-		client->Request<PrepareResponseMessage>(make_uniq<PrepareRequestMessage>(bind_data.connection_id, query, true));
+		auto response_message = client->Request<PrepareResponseMessage>(
+		    make_uniq<PrepareRequestMessage>(bind_data.connection_id, query, true));
+		bind_data.needs_more_fetch = response_message->NeedsMoreFetch();
+		bind_data.initial_results = std::move(response_message->MutableChunks());
 	}
 
-	return make_uniq<RpcGlobalState>(GlobalTableFunctionState::MAX_THREADS);
+	// FIXME
+	return make_uniq<RpcGlobalState>(1);
 }
 
 unique_ptr<LocalTableFunctionState> RpcInitLocal(ExecutionContext &context, TableFunctionInitInput &input,
@@ -229,15 +258,23 @@ unique_ptr<LocalTableFunctionState> RpcInitLocal(ExecutionContext &context, Tabl
 	if (global_state.done) {
 		return nullptr;
 	}
+
 	auto local_state = make_uniq<RpcLocalState>();
 	// re-use initial client from bind if possible
-	if (bind_data.initial_client) { // TODO possible race here?
+	if (bind_data.initial_client) { // TODO possible race here, too?
 		local_state->client = unique_ptr<RpcClient>(bind_data.initial_client.release());
 	} else {
 		local_state->client = RpcClient::GetClient(bind_data.server_uri);
 		local_state->client->SetContext(&context.client);
 	}
 
+	// TODO we need a lock here
+	if (!bind_data.initial_results.empty()) {
+		for (auto &chunk : bind_data.initial_results) {
+			local_state->pending.push(std::move(chunk));
+		}
+		bind_data.initial_results.clear();
+	}
 	return local_state;
 }
 
@@ -249,7 +286,8 @@ static void RpcScan(ClientContext &context, TableFunctionInput &input, DataChunk
 	// Only issue a new FETCH if we've drained our local batch and the stream
 	// hasn't signalled end. global_state.done is an optimization hint that
 	// skips wasted FETCHes — it must not pre-empt draining local pending.
-	if (local_state.pending.empty() && !local_state.server_exhausted && !global_state.done) {
+	if (local_state.pending.empty() && !local_state.server_exhausted && !global_state.done &&
+	    bind_data.needs_more_fetch) {
 		auto fetch_response =
 		    local_state.client->Request<FetchResponseMessage>(make_uniq<FetchRequestMessage>(bind_data.connection_id));
 		if (fetch_response->Chunks().empty()) {
@@ -303,6 +341,15 @@ static OperatorPartitionData RpcGetPartitionData(ClientContext &, TableFunctionG
 	return OperatorPartitionData(idx);
 }
 
+InsertionOrderPreservingMap<string> RpcCallToString(TableFunctionToStringInput &input) {
+	auto &bind_data = input.bind_data->Cast<RpcBindData>();
+	InsertionOrderPreservingMap<string> result;
+	result["Server"] = bind_data.server_uri.Uri();
+	result["Cardinality"] =
+	    bind_data.estimated_cardinality.IsValid() ? to_string(bind_data.estimated_cardinality.GetIndex()) : "?";
+	return result;
+}
+
 TableFunction RpcScanFunction::GetFunction() {
 	auto fun = TableFunction("rpc_call", {LogicalType::VARCHAR, LogicalType::VARCHAR}, RpcScan, RpcBind, RpcInitGlobal,
 	                         RpcInitLocal);
@@ -310,6 +357,7 @@ TableFunction RpcScanFunction::GetFunction() {
 	fun.cardinality = RpcCardinality;
 	fun.projection_pushdown = true;
 	fun.get_partition_data = RpcGetPartitionData;
+	fun.to_string = RpcCallToString;
 	// fun.filter_pushdown = true;
 	// fun.filter_prune = true;
 	return fun;
@@ -321,6 +369,8 @@ TableFunction RpcScanByNameFunction::GetFunction() {
 	fun.cardinality = RpcCardinality;
 	fun.projection_pushdown = true;
 	fun.get_partition_data = RpcGetPartitionData;
+	fun.to_string = RpcCallToString;
+
 	// fun.filter_pushdown = true;
 	// fun.filter_prune = true;
 	return fun;

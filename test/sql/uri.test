@@ -4,6 +4,8 @@
 
 require quack
 
+require httpfs
+
 query IIIII
 select unnest(rpc_uri_parser('quack:localhost', true));
 ----
