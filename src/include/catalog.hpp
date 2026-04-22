@@ -95,8 +95,6 @@ public:
 private:
 	optional_ptr<CatalogEntry> TryLoadBuiltInFunction(const string &entry_name);
 	optional_ptr<CatalogEntry> LoadBuiltInFunction(DefaultTableMacro macro);
-	optional_ptr<CatalogEntry> ReloadTableEntry(const string &table_name);
-
 public:
 	void LoadTableCache();
 	void AddToTableCache(const string &table_name, unique_ptr<CatalogEntry> entry);

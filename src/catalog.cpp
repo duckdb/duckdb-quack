@@ -289,34 +289,6 @@ void RpcSchemaCatalogEntry::RemoveFromTableCache(const string &table_name) {
 	table_cache.erase(table_name);
 }
 
-optional_ptr<CatalogEntry> RpcSchemaCatalogEntry::ReloadTableEntry(const string &table_name) {
-	auto &rpc_catalog = catalog.Cast<RpcCatalog>();
-	auto &context = rpc_catalog.GetContext();
-
-	auto query = StringUtil::Format("SELECT column_name, data_type "
-	                                "FROM duckdb_columns() "
-	                                "WHERE schema_name = %s AND table_name = %s AND NOT internal "
-	                                "ORDER BY column_index",
-	                                KeywordHelper::WriteQuoted(name, '\''),
-	                                KeywordHelper::WriteQuoted(table_name, '\''));
-	auto result = rpc_catalog.ExecuteCommand(query);
-	auto rows = result->GetRows();
-
-	if (rows.size() == 0) {
-		return nullptr;
-	}
-
-	CreateTableInfo create_info(*this, table_name);
-	for (idx_t i = 0; i < rows.size(); i++) {
-		create_info.columns.AddColumn(ColumnDefinition(rows.GetValue(0, i).GetValue<string>(),
-		                                               TransformStringToLogicalType(rows.GetValue(1, i).GetValue<string>(), context)));
-	}
-	auto entry = make_uniq<RpcTableCatalogEntry>(catalog, *this, create_info);
-	auto result_ptr = entry.get();
-	AddToTableCache(table_name, std::move(entry));
-	return result_ptr;
-}
-
 void RpcSchemaCatalogEntry::LoadTableCache() {
 	{
 		lock_guard<mutex> guard(table_cache_lock);
