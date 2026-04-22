@@ -88,7 +88,7 @@ void RpcTransactionManager::Checkpoint(ClientContext &context, bool force) {
 }
 
 RpcCatalog::RpcCatalog(AttachedDatabase &db_p, const RpcUri &server_uri_p, ClientContext &context)
-    : Catalog(db_p), server_uri(server_uri_p), client(RpcClient::GetClient(server_uri)), client_context(&context) {
+    : Catalog(db_p), server_uri(server_uri_p), client(RpcClient::GetClient(server_uri)), client_context(context) {
 	client->SetContext(&context);
 
 	// evil copy paste
@@ -170,7 +170,7 @@ const string &RpcCatalog::GetConnectionId() {
 }
 
 ClientContext &RpcCatalog::GetContext() {
-	return *client_context;
+	return client_context;
 }
 
 optional_ptr<CatalogEntry> RpcSchemaCatalogEntry::LookupEntry(CatalogTransaction transaction,
@@ -221,7 +221,8 @@ optional_ptr<CatalogEntry> RpcCatalog::CreateSchema(CatalogTransaction transacti
 	auto catalog_request_message = make_uniq<CatalogRequestMessage>(GetConnectionId(), std::move(create_schema_info));
 	auto catalog_response = GetRawClient().Request<CatalogResponseMessage>(std::move(catalog_request_message));
 
-	auto &response_info = catalog_response->GetParseInfo()->Cast<CreateSchemaInfo>();
+	auto response_parse_info = catalog_response->GetParseInfo();
+	auto &response_info = response_parse_info->Cast<CreateSchemaInfo>();
 	auto entry = make_uniq<RpcSchemaCatalogEntry>(*this, response_info);
 	auto result = entry.get();
 	schemas[response_info.schema] = std::move(entry);
@@ -286,16 +287,16 @@ optional_ptr<CatalogEntry> RpcSchemaCatalogEntry::ReloadTableEntry(const string 
 	                                KeywordHelper::WriteQuoted(name, '\''),
 	                                KeywordHelper::WriteQuoted(table_name, '\''));
 	auto result = rpc_catalog.ExecuteCommand(query);
-	auto rows = make_uniq<ColumnDataRowCollection>(result->GetRows());
+	auto rows = result->GetRows();
 
-	if (rows->size() == 0) {
+	if (rows.size() == 0) {
 		return nullptr;
 	}
 
 	CreateTableInfo create_info(*this, table_name);
-	for (idx_t i = 0; i < rows->size(); i++) {
-		create_info.columns.AddColumn(ColumnDefinition(rows->GetValue(0, i).GetValue<string>(),
-		                                               TransformStringToLogicalType(rows->GetValue(1, i).GetValue<string>(), context)));
+	for (idx_t i = 0; i < rows.size(); i++) {
+		create_info.columns.AddColumn(ColumnDefinition(rows.GetValue(0, i).GetValue<string>(),
+		                                               TransformStringToLogicalType(rows.GetValue(1, i).GetValue<string>(), context)));
 	}
 	auto entry = make_uniq<RpcTableCatalogEntry>(catalog, *this, create_info);
 	auto result_ptr = entry.get();
@@ -320,16 +321,16 @@ void RpcSchemaCatalogEntry::LoadTableCache() {
 	                                "ORDER BY table_name, column_index",
 	                                KeywordHelper::WriteQuoted(name, '\''));
 	auto result = rpc_catalog.ExecuteCommand(query);
-	auto rows = make_uniq<ColumnDataRowCollection>(result->GetRows());
+	auto rows = result->GetRows();
 
 	case_insensitive_map_t<unique_ptr<CatalogEntry>> new_entries;
 	string current_table;
 	unique_ptr<CreateTableInfo> current_info;
 
-	for (idx_t i = 0; i < rows->size(); i++) {
-		auto table_name = rows->GetValue(0, i).GetValue<string>();
-		auto col_name = rows->GetValue(1, i).GetValue<string>();
-		auto type_str = rows->GetValue(2, i).GetValue<string>();
+	for (idx_t i = 0; i < rows.size(); i++) {
+		auto table_name = rows.GetValue(0, i).GetValue<string>();
+		auto col_name = rows.GetValue(1, i).GetValue<string>();
+		auto type_str = rows.GetValue(2, i).GetValue<string>();
 
 		if (table_name != current_table) {
 			if (current_info) {

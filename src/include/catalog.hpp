@@ -151,7 +151,7 @@ private:
 	RpcUri server_uri;
 	unique_ptr<RpcClient> client;
 	string connection_id;
-	ClientContext *client_context;
+	ClientContext &client_context;
 	unordered_map<string, unique_ptr<RpcSchemaCatalogEntry>> schemas;
 };
 
