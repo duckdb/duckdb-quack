@@ -17,7 +17,7 @@ create table fuu as values(42, 43);
 statement ok
 create table moo.fuu2 as values(44, 45);
 
-foreach server 'quack:localhost'
+foreach server 'quack:localhost:20110'
 
 foreach ssl  true
 

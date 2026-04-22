@@ -22,7 +22,7 @@ create table fuu as values(42, 43);
 statement ok
 create table bar as values(1, 2);
 
-foreach server 'quack:localhost'
+foreach server 'quack:localhost:20112'
 
 foreach ssl  true
 

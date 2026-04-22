@@ -14,7 +14,7 @@ create table t1 as select range i from range(100);
 statement ok con1
 create table t2 as select range j from range(200);
 
-foreach server 'quack:localhost'
+foreach server 'quack:localhost:20114'
 
 foreach ssl true
 

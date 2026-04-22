@@ -11,8 +11,10 @@ set ignore_error_messages __none__
 statement ok
 set rpc_default_token='asdf'
 
+foreach server 'quack:localhost:20113'
+
 statement ok con1
-call rpc_start('quack:localhost', disable_ssl=true);
+call rpc_start({server}, disable_ssl=true);
 
 sleep 100 millisecond
 
@@ -23,7 +25,7 @@ CALL enable_logging('RPC');
 
 # rpc_call should produce RPC log entries
 query I con2
-from rpc_call('quack:localhost', 'select 42 as answer', disable_ssl=true)
+from rpc_call({server}, 'select 42 as answer', disable_ssl=true)
 ----
 42
 
@@ -102,7 +104,7 @@ statement ok con2
 CALL truncate_duckdb_logs();
 
 statement error con2
-from rpc_call('quack:localhost', 'selexxxct 42', disable_ssl=true)
+from rpc_call({server}, 'selexxxct 42', disable_ssl=true)
 ----
 Error
 
@@ -123,7 +125,7 @@ statement ok con2
 CALL enable_logging('HTTP');
 
 query I con2
-from rpc_call('quack:localhost', 'select 1', disable_ssl=true)
+from rpc_call({server}, 'select 1', disable_ssl=true)
 ----
 1
 
@@ -150,4 +152,6 @@ statement ok con2
 CALL disable_logging();
 
 statement ok con1
-call rpc_stop('quack:localhost');
+call rpc_stop({server});
+
+endloop

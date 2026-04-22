@@ -24,11 +24,13 @@ CREATE TABLE pgbench_tellers(tid INTEGER, bid INTEGER, tbalance INTEGER, filler 
 statement ok
 set rpc_default_token='asdf'
 
+foreach server 'quack:localhost:20115'
+
 statement ok con1
-call rpc_start('quack:localhost', disable_ssl=true);
+call rpc_start({server}, disable_ssl=true);
 
 statement ok con2
-attach 'quack:localhost' as rpc (disable_ssl true)
+attach {server} as rpc (disable_ssl true)
 
 statement ok con2
 CALL enable_logging('RPC');
@@ -67,4 +69,6 @@ select count(*) from duckdb_logs where type = 'RPC' and scope = 'CONNECTION'
 
 
 statement ok con1
-call rpc_stop('quack:localhost');
+call rpc_stop({server});
+
+endloop

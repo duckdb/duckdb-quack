@@ -8,7 +8,7 @@ require httpfs
 
 set ignore_error_messages __none__
 
-foreach server 'quack:localhost'
+foreach server 'quack:localhost:20111'
 
 
 statement ok
