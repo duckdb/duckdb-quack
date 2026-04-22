@@ -21,21 +21,27 @@ RpcTransaction::RpcTransaction(RpcCatalog &rpc_catalog_p, TransactionManager &ma
     : Transaction(manager_p, context_p), rpc_catalog(rpc_catalog_p) {
 }
 
-void RpcTransaction::EnsureBegun() {
-	if (!begun) {
-		rpc_catalog.ExecuteCommand("BEGIN TRANSACTION");
-		begun = true;
+RpcClient &RpcTransaction::GetClient() {
+	if (transaction_state == RpcTransactionState::TRANSACTION_FINISHED) {
+		throw InternalException("Cannot use RPC transaction after commit/rollback");
 	}
+	if (transaction_state == RpcTransactionState::TRANSACTION_NOT_YET_STARTED) {
+		rpc_catalog.ExecuteCommand("BEGIN TRANSACTION");
+		transaction_state = RpcTransactionState::TRANSACTION_STARTED;
+	}
+	return rpc_catalog.GetRawClient();
 }
 
 void RpcTransaction::Commit() {
-	if (begun) {
+	if (transaction_state == RpcTransactionState::TRANSACTION_STARTED) {
+		transaction_state = RpcTransactionState::TRANSACTION_FINISHED;
 		rpc_catalog.ExecuteCommand("COMMIT");
 	}
 }
 
 void RpcTransaction::Rollback() {
-	if (begun) {
+	if (transaction_state == RpcTransactionState::TRANSACTION_STARTED) {
+		transaction_state = RpcTransactionState::TRANSACTION_FINISHED;
 		rpc_catalog.ExecuteCommand("ROLLBACK");
 	}
 }
@@ -44,14 +50,9 @@ RpcTransaction &RpcTransaction::Get(ClientContext &context, Catalog &catalog) {
 	return Transaction::Get(context, catalog).Cast<RpcTransaction>();
 }
 
-void RpcTransaction::EnsureActive(CatalogTransaction &transaction) {
-	if (transaction.transaction) {
-		transaction.transaction->Cast<RpcTransaction>().EnsureBegun();
-	}
-}
-
-void RpcTransaction::EnsureActive(ClientContext &context, Catalog &catalog) {
-	RpcTransaction::Get(context, catalog).EnsureBegun();
+RpcTransaction &RpcTransaction::Get(CatalogTransaction &transaction) {
+	D_ASSERT(transaction.transaction);
+	return transaction.transaction->Cast<RpcTransaction>();
 }
 
 RpcTransaction::~RpcTransaction() {
@@ -214,12 +215,12 @@ TableFunction RpcTableCatalogEntry::GetScanFunction(ClientContext &context, uniq
 }
 
 optional_ptr<CatalogEntry> RpcCatalog::CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) {
-	RpcTransaction::EnsureActive(transaction);
+	auto &txn = RpcTransaction::Get(transaction);
 	auto create_schema_info = info.Copy();
 	create_schema_info->catalog = "memory";
 
 	auto catalog_request_message = make_uniq<CatalogRequestMessage>(GetConnectionId(), std::move(create_schema_info));
-	auto catalog_response = GetRawClient().Request<CatalogResponseMessage>(std::move(catalog_request_message));
+	auto catalog_response = txn.GetClient().Request<CatalogResponseMessage>(std::move(catalog_request_message));
 
 	auto response_parse_info = catalog_response->GetParseInfo();
 	auto &response_info = response_parse_info->Cast<CreateSchemaInfo>();
@@ -381,7 +382,7 @@ optional_ptr<CatalogEntry> RpcSchemaCatalogEntry::CreateFunction(CatalogTransact
 
 optional_ptr<CatalogEntry> RpcSchemaCatalogEntry::CreateTable(CatalogTransaction transaction,
                                                               BoundCreateTableInfo &info) {
-	RpcTransaction::EnsureActive(transaction);
+	auto &txn = RpcTransaction::Get(transaction);
 	auto &rpc_catalog = catalog.Cast<RpcCatalog>();
 
 	auto create_table_info = info.Base().Copy();
@@ -391,7 +392,7 @@ optional_ptr<CatalogEntry> RpcSchemaCatalogEntry::CreateTable(CatalogTransaction
 	auto catalog_request_message =
 	    make_uniq<CatalogRequestMessage>(rpc_catalog.GetConnectionId(), std::move(create_table_info));
 	auto catalog_response =
-	    rpc_catalog.GetRawClient().Request<CatalogResponseMessage>(std::move(catalog_request_message));
+	    txn.GetClient().Request<CatalogResponseMessage>(std::move(catalog_request_message));
 
 	auto entry = make_uniq<RpcTableCatalogEntry>(catalog, *this,
 	                                             catalog_response->GetParseInfo()->Cast<CreateTableInfo>());
@@ -429,7 +430,7 @@ optional_ptr<CatalogEntry> RpcSchemaCatalogEntry::CreateType(CatalogTransaction 
 }
 
 void RpcSchemaCatalogEntry::DropEntry(ClientContext &context, DropInfo &info_p) {
-	RpcTransaction::EnsureActive(context, catalog);
+	auto &txn = RpcTransaction::Get(context, catalog);
 	auto &rpc_catalog = catalog.Cast<RpcCatalog>();
 	auto drop_info = info_p.Copy();
 	drop_info->catalog = GetInfo()->catalog;
@@ -438,7 +439,7 @@ void RpcSchemaCatalogEntry::DropEntry(ClientContext &context, DropInfo &info_p) 
 	auto catalog_request_message =
 	    make_uniq<CatalogRequestMessage>(rpc_catalog.GetConnectionId(), std::move(drop_info));
 
-	rpc_catalog.GetRawClient().Request<CatalogResponseMessage>(std::move(catalog_request_message));
+	txn.GetClient().Request<CatalogResponseMessage>(std::move(catalog_request_message));
 	RemoveFromTableCache(info_p.name);
 }
 void RpcSchemaCatalogEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {

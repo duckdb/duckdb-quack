@@ -43,7 +43,7 @@ unique_ptr<GlobalSinkState> RpcInsert::GetGlobalSinkState(ClientContext &context
 	// table cache, and hand the sink a reference into the cache. The cache owns lifetime.
 	auto &rpc_schema = schema.get_mutable()->Cast<RpcSchemaCatalogEntry>();
 	auto &rpc_catalog = rpc_schema.catalog.Cast<RpcCatalog>();
-	RpcTransaction::EnsureActive(context, rpc_catalog);
+	auto &txn = RpcTransaction::Get(context, rpc_catalog);
 
 	auto create_table_info = info->Base().Copy();
 	create_table_info->catalog = rpc_schema.GetInfo()->catalog;
@@ -52,7 +52,7 @@ unique_ptr<GlobalSinkState> RpcInsert::GetGlobalSinkState(ClientContext &context
 	auto catalog_request_message =
 	    make_uniq<CatalogRequestMessage>(rpc_catalog.GetConnectionId(), std::move(create_table_info));
 	auto catalog_response =
-	    rpc_catalog.GetRawClient().Request<CatalogResponseMessage>(std::move(catalog_request_message));
+	    txn.GetClient().Request<CatalogResponseMessage>(std::move(catalog_request_message));
 
 	auto entry = make_uniq<RpcTableCatalogEntry>(rpc_schema.catalog, rpc_schema,
 	                                             catalog_response->GetParseInfo()->Cast<CreateTableInfo>());
@@ -68,12 +68,13 @@ SinkResultType RpcInsert::Sink(ExecutionContext &context, DataChunk &chunk, Oper
 	auto &global_state = input.global_state.Cast<RpcInsertGlobalState>();
 	auto &tbl = global_state.table;
 	auto &rpc_catalog = tbl.catalog.Cast<RpcCatalog>();
+	auto &txn = RpcTransaction::Get(context.client, rpc_catalog);
 	auto append_chunk = make_uniq<DataChunk>();
 	append_chunk->Initialize(context.client, chunk.GetTypes());
 	append_chunk->Reference(chunk);
 	auto append_message = make_uniq<AppendRequestMessage>(rpc_catalog.GetConnectionId(), tbl.schema.name, tbl.name,
 	                                                      std::move(append_chunk));
-	rpc_catalog.GetRawClient().Request<AppendResponseMessage>(std::move(append_message));
+	txn.GetClient().Request<AppendResponseMessage>(std::move(append_message));
 	global_state.insert_count += chunk.size();
 	return SinkResultType::NEED_MORE_INPUT;
 }

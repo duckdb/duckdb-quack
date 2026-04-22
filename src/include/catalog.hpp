@@ -13,22 +13,23 @@ namespace duckdb {
 
 class RpcCatalog;
 
+enum class RpcTransactionState { TRANSACTION_NOT_YET_STARTED, TRANSACTION_STARTED, TRANSACTION_FINISHED };
+
 class RpcTransaction : public Transaction {
 public:
 	RpcTransaction(RpcCatalog &rpc_catalog_p, TransactionManager &manager_p, ClientContext &context_p);
 	~RpcTransaction() override;
 	void Commit();
 	void Rollback();
-	void EnsureBegun();
+
+	RpcClient &GetClient();
 
 	static RpcTransaction &Get(ClientContext &context, Catalog &catalog);
-	static void EnsureActive(CatalogTransaction &transaction);
-	static void EnsureActive(ClientContext &context, Catalog &catalog);
+	static RpcTransaction &Get(CatalogTransaction &transaction);
 
 private:
 	RpcCatalog &rpc_catalog;
-	bool begun = false;
-	case_insensitive_map_t<unique_ptr<CatalogEntry>> catalog_entries;
+	RpcTransactionState transaction_state = RpcTransactionState::TRANSACTION_NOT_YET_STARTED;
 };
 
 class RpcTransactionManager : public TransactionManager {
