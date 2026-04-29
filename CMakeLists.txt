@@ -8,8 +8,6 @@ set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 
 project(${TARGET_NAME})
 
-set(CMAKE_CXX_STANDARD 17)
-
 include_directories(src/include duckdb/third_party/httplib duckdb/extension/autocomplete/include)
 
 set(EXTENSION_SOURCES src/quack_extension.cpp src/rpc_server.cpp src/http_rpc_server.cpp src/message.cpp src/client.cpp src/rpc_scan_function.cpp src/rpc_start_function.cpp src/rpc_storage_extension.cpp  src/catalog.cpp src/rpc_insert.cpp src/rpc_log_type.cpp)
