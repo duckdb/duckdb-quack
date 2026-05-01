@@ -18,6 +18,12 @@ class QueryResult;
 class DatabaseInstance;
 class PreparedStatement;
 
+// Cache for APPEND authz result, as to avoid multiple callbacks.
+struct AppendAuthzCacheEntry {
+	bool allowed = false;
+	string reject_message;
+};
+
 struct RpcConnection {
 	mutex lock;
 	unique_ptr<Connection> duckdb_connection;
@@ -25,6 +31,7 @@ struct RpcConnection {
 	unique_ptr<QueryResult> duckdb_query_result;
 	//! Monotonic counter assigned per FETCH batch — enables order-preserving parallel scans on
 	idx_t next_batch_index = 0;
+	unordered_map<string, AppendAuthzCacheEntry> append_authz_cache;
 };
 
 class RpcServer {
