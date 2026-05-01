@@ -70,6 +70,48 @@ static bool EvaluateAuthQuery(DatabaseInstance &db, const string &sql, ARGS... v
 	return true;
 }
 
+// Run the configured authorization callback as `SELECT <fn>(?, ?, ?)` and
+// return the VARCHAR it produced. Throws on any error from the callback (e.g.
+// `error('msg')`), on missing rows, or on a non-VARCHAR/NULL return.
+static string EvaluateAuthorize(DatabaseInstance &db, const string &sid, const string &op_kind,
+                                const string &payload) {
+	Connection dummy_connection(db);
+	auto sql = StringUtil::Format("SELECT %s(?, ?, ?)", GetSettingString(db, "rpc_authorization_function"));
+	auto result = dummy_connection.Query(sql, Value(sid), Value(op_kind), Value(payload));
+	if (!result || result->HasError()) {
+		throw InvalidInputException(result ? result->GetError() : "authorization callback failed");
+	}
+	auto chunk = result->Fetch();
+	if (!chunk || chunk->size() == 0) {
+		throw InvalidInputException("authorization callback returned no rows");
+	}
+	auto val = chunk->GetValue(0, 0);
+	if (val.IsNull() || val.type().id() != LogicalTypeId::VARCHAR) {
+		throw InvalidInputException("authorization callback must return VARCHAR");
+	}
+	return val.GetValue<string>();
+}
+
+// Cached APPEND authz: fires the callback once per (connection, schema.table),
+// this is to avoid repeated calls for every chunk in a large append.
+static const AppendAuthzCacheEntry &AuthorizeAppendCached(DatabaseInstance &db, RpcConnection &conn,
+                                                          const string &sid, const string &target) {
+	auto it = conn.append_authz_cache.find(target);
+	if (it != conn.append_authz_cache.end()) {
+		return it->second;
+	}
+	AppendAuthzCacheEntry entry;
+	try {
+		EvaluateAuthorize(db, sid, "append", target);
+		entry.allowed = true;
+	} catch (const std::exception &e) {
+		entry.allowed = false;
+		entry.reject_message = string("Authorization failed: ") + e.what();
+	}
+	auto inserted = conn.append_authz_cache.emplace(target, std::move(entry));
+	return inserted.first->second;
+}
+
 string RpcServer::GenerateSessionId() {
 	return StringUtil::GenerateRandomName(32);
 }
@@ -175,10 +217,12 @@ unique_ptr<ProtocolMessage> RpcServer::HandleMessageInternal(ProtocolMessage &re
 			return make_uniq<ErrorMessage>("Invalid connection id");
 		}
 
-		if (!EvaluateAuthQuery(
-		        *db, StringUtil::Format("SELECT %s(?, ?)", GetSettingString(*db, "rpc_authorization_function")),
-		        Value(prepare_request_message.ConnectionId()), Value(prepare_request_message.Query()))) {
-			return make_uniq<ErrorMessage>("Authorization failed");
+		string query_to_run;
+		try {
+			query_to_run = EvaluateAuthorize(*db, prepare_request_message.ConnectionId(), "query",
+			                                 prepare_request_message.Query());
+		} catch (const std::exception &e) {
+			return make_uniq<ErrorMessage>(string("Authorization failed: ") + e.what());
 		}
 
 		std::unique_lock<std::mutex> lock(rpc_connection->lock);
@@ -189,7 +233,7 @@ unique_ptr<ProtocolMessage> RpcServer::HandleMessageInternal(ProtocolMessage &re
 		}
 
 		{
-			auto query_result = rpc_connection->duckdb_connection->SendQuery(prepare_request_message.Query());
+			auto query_result = rpc_connection->duckdb_connection->SendQuery(query_to_run);
 			if (query_result->HasError()) {
 				return make_uniq<ErrorMessage>(query_result->GetError());
 			}
@@ -270,6 +314,12 @@ unique_ptr<ProtocolMessage> RpcServer::HandleMessageInternal(ProtocolMessage &re
 			auto &catalog = Catalog::GetCatalog(context, create_info.catalog);
 			switch (create_info.type) {
 			case CatalogType::TABLE_ENTRY: {
+				try {
+					EvaluateAuthorize(*db, catalog_request_message.ConnectionId(), "create_table",
+					                  create_info.ToString());
+				} catch (const std::exception &e) {
+					return make_uniq<ErrorMessage>(string("Authorization failed: ") + e.what());
+				}
 				unique_ptr<CreateTableInfo> create_table_info(
 				    reinterpret_cast<CreateTableInfo *>(parse_info.release()));
 				auto &meta_transaction = MetaTransaction::Get(context);
@@ -278,6 +328,12 @@ unique_ptr<ProtocolMessage> RpcServer::HandleMessageInternal(ProtocolMessage &re
 				return make_uniq<CatalogResponseMessage>(create_result->GetInfo());
 			}
 			case CatalogType::SCHEMA_ENTRY: {
+				try {
+					EvaluateAuthorize(*db, catalog_request_message.ConnectionId(), "create_schema",
+					                  create_info.ToString());
+				} catch (const std::exception &e) {
+					return make_uniq<ErrorMessage>(string("Authorization failed: ") + e.what());
+				}
 				auto &meta_transaction = MetaTransaction::Get(context);
 				meta_transaction.ModifyDatabase(catalog.GetAttached(), DatabaseModificationType::CREATE_CATALOG_ENTRY);
 				auto create_result = catalog.CreateSchema(context, parse_info->Cast<CreateSchemaInfo>());
@@ -293,6 +349,12 @@ unique_ptr<ProtocolMessage> RpcServer::HandleMessageInternal(ProtocolMessage &re
 			auto &catalog = Catalog::GetCatalog(context, drop_info.catalog);
 			switch (drop_info.type) {
 			case CatalogType::TABLE_ENTRY: {
+				try {
+					EvaluateAuthorize(*db, catalog_request_message.ConnectionId(), "drop_table",
+					                  drop_info.ToString());
+				} catch (const std::exception &e) {
+					return make_uniq<ErrorMessage>(string("Authorization failed: ") + e.what());
+				}
 				auto &meta_transaction = MetaTransaction::Get(context);
 				meta_transaction.ModifyDatabase(catalog.GetAttached(), DatabaseModificationType::DROP_CATALOG_ENTRY);
 				catalog.DropEntry(context, drop_info);
@@ -310,7 +372,18 @@ unique_ptr<ProtocolMessage> RpcServer::HandleMessageInternal(ProtocolMessage &re
 	case MessageType::APPEND_REQUEST: {
 		auto &append_request_message = received_message.Cast<AppendRequestMessage>();
 		optional_ptr<RpcConnection> rpc_connection = GetConnection(append_request_message.ConnectionId());
+		if (!rpc_connection) {
+			return make_uniq<ErrorMessage>("Invalid connection id");
+		}
 		std::unique_lock<std::mutex> lock(rpc_connection->lock);
+
+		auto target = append_request_message.SchemaName() + "." + append_request_message.TableName();
+		auto &authz_outcome =
+		    AuthorizeAppendCached(*db, *rpc_connection, append_request_message.ConnectionId(), target);
+		if (!authz_outcome.allowed) {
+			return make_uniq<ErrorMessage>(authz_outcome.reject_message);
+		}
+
 		auto &context = *rpc_connection->duckdb_connection->context;
 		auto table_info = context.TableInfo(append_request_message.SchemaName(), append_request_message.TableName());
 		ColumnDataCollection collection(Allocator::Get(context), append_request_message.AppendChunk().GetTypes());
