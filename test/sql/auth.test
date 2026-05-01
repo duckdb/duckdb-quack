@@ -1,0 +1,40 @@
+# name: test/sql/auth.test
+# description: custom rpc_authentication_function override
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+# Server: a custom auth that admits exactly the literal token 'magic'.
+statement ok con1
+create macro my_auth(sid, tok) as (tok = 'magic')
+
+statement ok con1
+set global rpc_authentication_function = 'my_auth'
+
+statement ok con1
+call rpc_start('quack:localhost:20201')
+
+# Client supplies the matching token via rpc_default_token.
+statement ok con2
+set rpc_default_token = 'magic'
+
+query I con2
+from rpc_call('quack:localhost:20201', 'select 1')
+----
+1
+
+# Wrong token is rejected.
+statement ok con2
+set rpc_default_token = 'nope'
+
+statement error con2
+from rpc_call('quack:localhost:20201', 'select 1')
+----
+Authentication failed
+
+statement ok con1
+call rpc_stop('quack:localhost:20201')

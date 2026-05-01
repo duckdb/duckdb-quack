@@ -1,0 +1,118 @@
+# name: test/sql/authz.test
+# description: rpc_authorization_function (3-arg, VARCHAR-returning) on PREPARE / CATALOG / APPEND paths
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+statement ok con1
+call rpc_start('quack:localhost:20202')
+
+statement ok con1
+create table allowed_tbl(i integer)
+
+statement ok con1
+create table readonly_tbl(i integer)
+
+# --- 1. default passthrough on every path ---
+
+statement ok con2
+attach 'quack:localhost:20202' as r
+
+query I con2
+from rpc_call('quack:localhost:20202', 'select 42')
+----
+42
+
+statement ok con2
+create table r.via_attach(i integer)
+
+statement ok con2
+insert into r.via_attach values (1)
+
+query I con2
+from r.via_attach
+----
+1
+
+statement ok con2
+drop table r.via_attach
+
+# --- 2. custom authz: switches on op_kind ---
+
+statement ok con1
+create macro authz(sid, op, q) as (
+    case
+        when op = 'query'        and q like '%blocked_view%'   then error('query blocked')
+        when op = 'create_table' or op = 'create_schema'       then error('ddl blocked')
+        when op = 'drop_table'                                 then error('drops disabled')
+        when op = 'append'       and q = 'main.readonly_tbl'   then error('append blocked')
+        else q
+    end
+)
+
+statement ok con1
+set global rpc_authorization_function = 'authz'
+
+# 2a. PREPARE via rpc_call: harmless query passes (else arm returns it unchanged).
+query I con2
+from rpc_call('quack:localhost:20202', 'select 7')
+----
+7
+
+# 2b. PREPARE rejection — the thrown message surfaces to the client.
+statement error con2
+from rpc_call('quack:localhost:20202', 'select 1 as blocked_view')
+----
+query blocked
+
+# 2c. CATALOG: CREATE TABLE rejected by table name.
+statement error con2
+create table r.forbidden_thing(i integer)
+----
+ddl blocked
+
+# 2d. CATALOG: DROP TABLE always rejected.
+statement error con2
+drop table r.allowed_tbl
+----
+drops disabled
+
+# 2e. APPEND: INSERT into the gated target rejected.
+statement error con2
+insert into r.readonly_tbl values (1)
+----
+append blocked
+
+# 2f. APPEND into a non-gated target still works.
+statement ok con2
+insert into r.allowed_tbl values (1)
+
+query I con2
+from r.allowed_tbl
+----
+1
+
+# --- 3. rewrite: PREPARE return value is honored as the executed query ---
+
+statement ok con1
+create macro add_limit(sid, op, q) as (
+    case when op = 'query' then q || ' limit 1' else q end
+)
+
+statement ok con1
+set global rpc_authorization_function = 'add_limit'
+
+query I con2
+from rpc_call('quack:localhost:20202', 'from range(10)')
+----
+0
+
+statement ok con2
+detach r
+
+statement ok con1
+call rpc_stop('quack:localhost:20202')
