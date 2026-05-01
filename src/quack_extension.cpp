@@ -99,8 +99,9 @@ static void RpcAuthToken(const DataChunk &args, ExpressionState &state, Vector &
 	result.SetValue(0, Value(auth_str == default_token));
 }
 
-static void RpcDummyAuthorization(const DataChunk &args, ExpressionState &, Vector &result) {
-	result.SetValue(0, Value(true)); // choose life
+// Default authorization callback. Signature: (sid, op_kind, query), all VARCHAR.
+static void RpcDefaultAuthorization(const DataChunk &args, ExpressionState &, Vector &result) {
+	result.SetValue(0, args.GetValue(2, 0)); // returns the query by default
 }
 
 static void RpcUriParser(const DataChunk &args, ExpressionState &, Vector &result) {
@@ -163,9 +164,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	rpc_auth_token.SetVolatile();
 	loader.RegisterFunction(rpc_auth_token);
 
-	ScalarFunction rpc_authorization("rpc_dummy_authorization",
-	                                 {/* session id */ LogicalType::VARCHAR, /* query string */ LogicalType::VARCHAR},
-	                                 LogicalType::BOOLEAN, RpcDummyAuthorization);
+	ScalarFunction rpc_authorization("rpc_default_authorization",
+	                                 {/* session id */ LogicalType::VARCHAR,
+	                                  /* op_kind   */ LogicalType::VARCHAR,
+	                                  /* query     */ LogicalType::VARCHAR},
+	                                 LogicalType::VARCHAR, RpcDefaultAuthorization);
 	rpc_authorization.SetVolatile();
 	loader.RegisterFunction(rpc_authorization);
 
@@ -192,7 +195,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("rpc_authentication_function", "Name of a callback function for authentication",
 	                          LogicalType::VARCHAR, Value("rpc_auth_token"));
 	config.AddExtensionOption("rpc_authorization_function", "Name of a callback function for authorization",
-	                          LogicalType::VARCHAR, Value("rpc_dummy_authorization"));
+	                          LogicalType::VARCHAR, Value("rpc_default_authorization"));
 
 	// TODO make this readonly from SQL?
 	config.AddExtensionOption("rpc_default_token", "Authorization token used by default", LogicalType::VARCHAR, Value(),
