@@ -56,15 +56,18 @@ static string GetSettingString(DatabaseInstance &db, const string &setting_name)
 	return setting_str;
 }
 
-template <typename... ARGS>
-static bool EvaluateAuthQuery(DatabaseInstance &db, const string &sql, ARGS... values) {
+// Run the configured authentication callback as `SELECT <fn>(?, ?)` and return
+// its BOOLEAN result. Errors thrown by the callback are swallowed as `false`;
+// callers surface a generic "Authentication failed" message.
+static bool EvaluateAuthenticate(DatabaseInstance &db, const string &sid, const string &auth_string) {
 	Connection dummy_connection(db);
-	auto auth_result = dummy_connection.Query(sql, values...);
-	if (!auth_result || auth_result->HasError()) {
+	auto sql = StringUtil::Format("SELECT %s(?, ?)", GetSettingString(db, "rpc_authentication_function"));
+	auto result = dummy_connection.Query(sql, Value(sid), Value(auth_string));
+	if (!result || result->HasError()) {
 		return false;
 	}
-	auto auth_result_chunk = auth_result->Fetch();
-	if (!auth_result_chunk || !auth_result_chunk->GetValue(0, 0).template GetValue<bool>()) {
+	auto chunk = result->Fetch();
+	if (!chunk || !chunk->GetValue(0, 0).GetValue<bool>()) {
 		return false;
 	}
 	return true;
@@ -203,9 +206,7 @@ unique_ptr<ProtocolMessage> RpcServer::HandleMessageInternal(ProtocolMessage &re
 	case MessageType::CONNECTION_REQUEST: {
 		auto &connection_request_message = received_message.Cast<ConnectionRequestMessage>();
 		string session_id = GenerateSessionId();
-		if (!EvaluateAuthQuery(
-		        *db, StringUtil::Format("SELECT %s(?, ?)", GetSettingString(*db, "rpc_authentication_function")),
-		        Value(session_id), Value(connection_request_message.AuthString()))) {
+		if (!EvaluateAuthenticate(*db, session_id, connection_request_message.AuthString())) {
 			return make_uniq<ErrorMessage>("Authentication failed");
 		}
 		return make_uniq<ConnectionResponseMessage>(CreateNewConnection(session_id));
