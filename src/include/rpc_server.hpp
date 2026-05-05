@@ -43,6 +43,9 @@ public:
 
 	string GenerateSessionId();
 
+	bool EvaluateAuthn(const Value &v1, const Value &v2);
+	bool EvaluateAuthz(const Value &v1, const Value &v2);
+
 	virtual ~RpcServer();
 
 protected:
@@ -58,6 +61,23 @@ protected:
 
 	mutex session_id_rng_mutex;
 	shared_ptr<EncryptionState> session_id_rng;
+
+	//! Separate Connection + cached PreparedStatement for each callback —
+	//! authn and authz are isolated so a misbehaving authn callback (e.g.
+	//! one that leaves transaction state behind) can't poison the authz
+	//! path. SQL string is stashed alongside the prepared statement so a
+	//! setting change (`rpc_authentication_function` etc.) triggers a
+	//! re-prepare on the next call. Each lock serializes its own callback
+	//! across worker threads but doesn't block the other.
+	mutex authn_mutex;
+	unique_ptr<Connection> authn_connection;
+	unique_ptr<PreparedStatement> authn_stmt;
+	string authn_stmt_sql;
+
+	mutex authz_mutex;
+	unique_ptr<Connection> authz_connection;
+	unique_ptr<PreparedStatement> authz_stmt;
+	string authz_stmt_sql;
 };
 
 class HttpRpcServer : public RpcServer {

@@ -190,10 +190,16 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                           ext);
 
 	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
+	// GLOBAL scope: the server runs these callbacks on its own cached
+	// Connection, which reads from the database-wide config. A session-local
+	// SET would change the calling session's view but not the server's
+	// (silently no-op) — forcing GLOBAL makes the only valid form
+	// `SET GLOBAL rpc_authentication_function = '...'` and ensures changes
+	// actually take effect.
 	config.AddExtensionOption("rpc_authentication_function", "Name of a callback function for authentication",
-	                          LogicalType::VARCHAR, Value("rpc_auth_token"));
+	                          LogicalType::VARCHAR, Value("rpc_auth_token"), nullptr, SetScope::GLOBAL);
 	config.AddExtensionOption("rpc_authorization_function", "Name of a callback function for authorization",
-	                          LogicalType::VARCHAR, Value("rpc_dummy_authorization"));
+	                          LogicalType::VARCHAR, Value("rpc_dummy_authorization"), nullptr, SetScope::GLOBAL);
 
 	// TODO make this readonly from SQL?
 	config.AddExtensionOption("rpc_default_token", "Authorization token used by default", LogicalType::VARCHAR, Value(),

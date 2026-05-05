@@ -14,6 +14,7 @@
 
 #include "duckdb/common/types/blob.hpp"
 #include "duckdb/common/encryption_state.hpp"
+#include "duckdb/main/prepared_statement.hpp"
 
 using namespace duckdb;
 
@@ -57,18 +58,56 @@ static string GetSettingString(DatabaseInstance &db, const string &setting_name)
 	return setting_str;
 }
 
-template <typename... ARGS>
-static bool EvaluateAuthQuery(DatabaseInstance &db, const string &sql, ARGS... values) {
-	Connection dummy_connection(db);
-	auto auth_result = dummy_connection.Query(sql, values...);
-	if (!auth_result || auth_result->HasError()) {
+// Shared evaluator for callbacks shaped like `SELECT fn(?, ?)` returning
+// BOOLEAN. Caller owns the Connection / PreparedStatement / SQL slots so
+// authn and authz can be isolated from each other (separate connections,
+// separate locks). On any execution-level error the cached connection +
+// prepared statement are reset so the next call rebuilds from scratch —
+// avoids handing out a connection left in a degraded state by a misbehaving
+// callback. A callback that returns `false` (rejection) is not an error and
+// does not trigger a reset.
+static bool EvaluateBoolCallback(DatabaseInstance &db, unique_ptr<Connection> &conn,
+                                 unique_ptr<PreparedStatement> &stmt, string &stmt_sql, const string &sql,
+                                 const Value &v1, const Value &v2) {
+	auto reset_cache = [&]() {
+		stmt.reset();
+		stmt_sql.clear();
+		conn.reset();
+	};
+	if (!conn) {
+		conn = make_uniq<Connection>(db);
+	}
+	if (!stmt || stmt_sql != sql) {
+		stmt = conn->Prepare(sql);
+		if (!stmt || stmt->HasError()) {
+			reset_cache();
+			return false;
+		}
+		stmt_sql = sql;
+	}
+	auto result = stmt->Execute(v1, v2);
+	if (!result || result->HasError()) {
+		reset_cache();
 		return false;
 	}
-	auto auth_result_chunk = auth_result->Fetch();
-	if (!auth_result_chunk || !auth_result_chunk->GetValue(0, 0).template GetValue<bool>()) {
+	auto chunk = result->Fetch();
+	if (!chunk) {
+		reset_cache();
 		return false;
 	}
-	return true;
+	return chunk->GetValue(0, 0).GetValue<bool>();
+}
+
+bool RpcServer::EvaluateAuthn(const Value &v1, const Value &v2) {
+	auto sql = StringUtil::Format("SELECT %s(?, ?)", GetSettingString(*db, "rpc_authentication_function"));
+	std::lock_guard<std::mutex> lock(authn_mutex);
+	return EvaluateBoolCallback(*db, authn_connection, authn_stmt, authn_stmt_sql, sql, v1, v2);
+}
+
+bool RpcServer::EvaluateAuthz(const Value &v1, const Value &v2) {
+	auto sql = StringUtil::Format("SELECT %s(?, ?)", GetSettingString(*db, "rpc_authorization_function"));
+	std::lock_guard<std::mutex> lock(authz_mutex);
+	return EvaluateBoolCallback(*db, authz_connection, authz_stmt, authz_stmt_sql, sql, v1, v2);
 }
 
 string RpcServer::GenerateSessionId() {
@@ -184,9 +223,7 @@ unique_ptr<ProtocolMessage> RpcServer::HandleMessageInternal(ProtocolMessage &re
 	case MessageType::CONNECTION_REQUEST: {
 		auto &connection_request_message = received_message.Cast<ConnectionRequestMessage>();
 		string session_id = GenerateSessionId();
-		if (!EvaluateAuthQuery(
-		        *db, StringUtil::Format("SELECT %s(?, ?)", GetSettingString(*db, "rpc_authentication_function")),
-		        Value(session_id), Value(connection_request_message.AuthString()))) {
+		if (!EvaluateAuthn(Value(session_id), Value(connection_request_message.AuthString()))) {
 			return make_uniq<ErrorMessage>("Authentication failed");
 		}
 		return make_uniq<ConnectionResponseMessage>(CreateNewConnection(session_id));
@@ -199,9 +236,7 @@ unique_ptr<ProtocolMessage> RpcServer::HandleMessageInternal(ProtocolMessage &re
 		}
 
 		// TODO do not do this if there is no fun set
-		if (!EvaluateAuthQuery(
-		        *db, StringUtil::Format("SELECT %s(?, ?)", GetSettingString(*db, "rpc_authorization_function")),
-		        Value(prepare_request_message.ConnectionId()), Value(prepare_request_message.Query()))) {
+		if (!EvaluateAuthz(Value(prepare_request_message.ConnectionId()), Value(prepare_request_message.Query()))) {
 			return make_uniq<ErrorMessage>("Authorization failed");
 		}
 
