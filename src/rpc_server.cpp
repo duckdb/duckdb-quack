@@ -345,6 +345,37 @@ unique_ptr<ProtocolMessage> RpcServer::HandleMessageInternal(ProtocolMessage &re
 		rpc_connection->duckdb_connection->Append(*table_info, collection);
 		return make_uniq<AppendResponseMessage>();
 	}
+	case MessageType::BATCH_REQUEST: {
+		// FIXME: not every sequence of inner messages makes sense; e.g.
+		//   [PREPARE, CONNECT], multiple CONNECTs, [CONNECT, FETCH] (FETCH
+		//   without a PREPARE), or a Batch containing a Batch. The handler
+		//   currently processes whatever the client sent and surfaces errors
+		//   from the underlying handlers (invalid connection_id, etc.). A
+		//   future pass should validate the batch shape up front and reject
+		//   nonsensical sequences with a clear message.
+		auto &batch = received_message.Cast<BatchRequestMessage>();
+		string chained_sid;
+		vector<unique_ptr<ProtocolMessage>> responses;
+		for (auto &inner_msg : batch.MutableMessages()) {
+			if (inner_msg->Type() == MessageType::BATCH_REQUEST) {
+				responses.push_back(make_uniq<ErrorMessage>("Nested BATCH_REQUEST is not supported"));
+				break;
+			}
+			if (batch.ChainConnectionId() && !chained_sid.empty()) {
+				inner_msg->TrySubstituteConnectionId(chained_sid);
+			}
+			auto resp = HandleMessageInternal(*inner_msg);
+			bool is_error = resp->Type() == MessageType::ERROR;
+			if (resp->Type() == MessageType::CONNECTION_RESPONSE) {
+				chained_sid = resp->Cast<ConnectionResponseMessage>().ConnectionId();
+			}
+			responses.push_back(std::move(resp));
+			if (is_error) {
+				break;
+			}
+		}
+		return make_uniq<BatchResponseMessage>(std::move(responses));
+	}
 	default: {
 		return make_uniq<ErrorMessage>(
 		    StringUtil::Format("Unimplemented message type %s", MessageTypeToString(received_message.Type())));

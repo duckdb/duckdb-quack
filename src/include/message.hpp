@@ -19,6 +19,8 @@ enum class MessageType : uint8_t {
 	CATALOG_RESPONSE = 10,
 	APPEND_REQUEST = 11,
 	APPEND_RESPONSE = 12,
+	BATCH_REQUEST = 13,
+	BATCH_RESPONSE = 14,
 	ERROR = 100
 };
 
@@ -60,6 +62,13 @@ public:
 		client_query_id = query_id;
 	}
 
+	//! Used by BATCH_REQUEST processing on the server: if this message carries a
+	//! connection_id field and that field is empty, fill it from the supplied
+	//! sid (typically the one produced by an earlier CONNECTION_RESPONSE in the
+	//! same batch). Default no-op for messages that don't carry a connection_id.
+	virtual void TrySubstituteConnectionId(const string &connection_id) {
+	}
+
 	virtual ~ProtocolMessage() {
 	}
 
@@ -90,6 +99,12 @@ public:
 
 	bool ImmediatelyExecute() const {
 		return immediately_execute;
+	}
+
+	void TrySubstituteConnectionId(const string &cid) override {
+		if (connection_id.empty()) {
+			connection_id = cid;
+		}
 	}
 
 private:
@@ -180,6 +195,12 @@ public:
 	explicit FetchRequestMessage(const string &connection_id_p)
 	    : ProtocolMessage(TYPE), connection_id(connection_id_p) {};
 
+	void TrySubstituteConnectionId(const string &cid) override {
+		if (connection_id.empty()) {
+			connection_id = cid;
+		}
+	}
+
 	// TODO what was this for again?
 	// TODO contain the query ref
 private:
@@ -242,6 +263,12 @@ public:
 		return connection_id;
 	}
 
+	void TrySubstituteConnectionId(const string &cid) override {
+		if (connection_id.empty()) {
+			connection_id = cid;
+		}
+	}
+
 private:
 	string connection_id;
 	unique_ptr<ParseInfo> parse_info;
@@ -288,6 +315,12 @@ public:
 		return table_name;
 	}
 
+	void TrySubstituteConnectionId(const string &cid) override {
+		if (connection_id.empty()) {
+			connection_id = cid;
+		}
+	}
+
 private:
 	string connection_id;
 	string schema_name;
@@ -320,6 +353,65 @@ public:
 private:
 	ErrorMessage() : ProtocolMessage(TYPE) {};
 	string error_message;
+};
+
+//! Bundles N inner messages into a single round-trip. The server processes them
+//! sequentially. If chain_connection_id is true, an empty connection_id field
+//! on inner messages is filled in from the most recent CONNECTION_RESPONSE
+//! produced earlier in the same batch.
+class BatchRequestMessage : public ProtocolMessage {
+public:
+	static constexpr MessageType TYPE = MessageType::BATCH_REQUEST;
+
+	BatchRequestMessage() : ProtocolMessage(TYPE), chain_connection_id(true) {
+	}
+	BatchRequestMessage(vector<unique_ptr<ProtocolMessage>> messages_p, bool chain_connection_id_p = true)
+	    : ProtocolMessage(TYPE), messages(std::move(messages_p)), chain_connection_id(chain_connection_id_p) {
+	}
+
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<ProtocolMessage> Deserialize(Deserializer &deserializer);
+
+	const vector<unique_ptr<ProtocolMessage>> &Messages() const {
+		return messages;
+	}
+	vector<unique_ptr<ProtocolMessage>> &MutableMessages() {
+		return messages;
+	}
+	bool ChainConnectionId() const {
+		return chain_connection_id;
+	}
+
+private:
+	vector<unique_ptr<ProtocolMessage>> messages;
+	bool chain_connection_id;
+};
+
+//! Container of inner responses, one per processed inner request. May be
+//! shorter than the request's message list if processing stopped on error;
+//! in that case the last response is an ERROR.
+class BatchResponseMessage : public ProtocolMessage {
+public:
+	static constexpr MessageType TYPE = MessageType::BATCH_RESPONSE;
+
+	BatchResponseMessage() : ProtocolMessage(TYPE) {
+	}
+	explicit BatchResponseMessage(vector<unique_ptr<ProtocolMessage>> responses_p)
+	    : ProtocolMessage(TYPE), responses(std::move(responses_p)) {
+	}
+
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<ProtocolMessage> Deserialize(Deserializer &deserializer);
+
+	const vector<unique_ptr<ProtocolMessage>> &Responses() const {
+		return responses;
+	}
+	vector<unique_ptr<ProtocolMessage>> &MutableResponses() {
+		return responses;
+	}
+
+private:
+	vector<unique_ptr<ProtocolMessage>> responses;
 };
 
 } // namespace duckdb

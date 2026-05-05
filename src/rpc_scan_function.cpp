@@ -56,18 +56,36 @@ static unique_ptr<FunctionData> RpcBind(ClientContext &context, TableFunctionBin
 		token = default_token_val.GetValue<string>();
 	}
 
-	auto connection_request_response =
-	    bind_data->initial_client->Request<ConnectionResponseMessage>(make_uniq<ConnectionRequestMessage>(token));
-	bind_data->connection_id = connection_request_response->ConnectionId();
+	// Bundle CONNECT + PREPARE in a single round-trip. Empty connection_id on
+	// PREPARE is filled in server-side from the CONNECTION_RESPONSE produced
+	// by the CONNECT message earlier in the batch (chain_connection_id).
+	vector<unique_ptr<ProtocolMessage>> batch_messages;
+	batch_messages.push_back(make_uniq<ConnectionRequestMessage>(token));
+	batch_messages.push_back(make_uniq<PrepareRequestMessage>("", query, true));
 
-	auto bind_response = bind_data->initial_client->Request<PrepareResponseMessage>(
-	    make_uniq<PrepareRequestMessage>(bind_data->connection_id, query, true));
+	auto batch_response = bind_data->initial_client->Request<BatchResponseMessage>(
+	    make_uniq<BatchRequestMessage>(std::move(batch_messages), /*chain_connection_id*/ true));
 
-	return_types = bind_response->Types();
-	names = bind_response->Names();
+	auto &responses = batch_response->MutableResponses();
+	if (responses.empty()) {
+		throw IOException("Batch response was empty");
+	}
+	// If the server stopped on error, the last entry is an ERROR.
+	if (responses.back()->Type() == MessageType::ERROR) {
+		throw IOException(responses.back()->Cast<ErrorMessage>().Error());
+	}
+	if (responses.size() != 2 || responses[0]->Type() != MessageType::CONNECTION_RESPONSE ||
+	    responses[1]->Type() != MessageType::PREPARE_RESPONSE) {
+		throw IOException("Unexpected batch response shape");
+	}
+	bind_data->connection_id = responses[0]->Cast<ConnectionResponseMessage>().ConnectionId();
+	auto &bind_response = responses[1]->Cast<PrepareResponseMessage>();
 
-	bind_data->results = std::move(bind_response->MutableResults());
-	bind_data->needs_more_fetch = bind_response->NeedsMoreFetch();
+	return_types = bind_response.Types();
+	names = bind_response.Names();
+
+	bind_data->results = std::move(bind_response.MutableResults());
+	bind_data->needs_more_fetch = bind_response.NeedsMoreFetch();
 
 	return bind_data;
 }

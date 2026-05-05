@@ -27,6 +27,10 @@ string duckdb::MessageTypeToString(MessageType type) {
 		return "APPEND_REQUEST";
 	case MessageType::APPEND_RESPONSE:
 		return "APPEND_RESPONSE";
+	case MessageType::BATCH_REQUEST:
+		return "BATCH_REQUEST";
+	case MessageType::BATCH_RESPONSE:
+		return "BATCH_RESPONSE";
 	case MessageType::ERROR:
 		return "ERROR";
 	case MessageType::INVALID:
@@ -79,6 +83,10 @@ unique_ptr<ProtocolMessage> ProtocolMessage::Deserialize(Deserializer &deseriali
 		return AppendRequestMessage::Deserialize(deserializer);
 	case MessageType::APPEND_RESPONSE:
 		return AppendResponseMessage::Deserialize(deserializer);
+	case MessageType::BATCH_REQUEST:
+		return BatchRequestMessage::Deserialize(deserializer);
+	case MessageType::BATCH_RESPONSE:
+		return BatchResponseMessage::Deserialize(deserializer);
 	case MessageType::ERROR:
 		return ErrorMessage::Deserialize(deserializer);
 	default:
@@ -280,4 +288,36 @@ void AppendResponseMessage::Serialize(Serializer &serializer) const {
 
 unique_ptr<ProtocolMessage> AppendResponseMessage::Deserialize(Deserializer &deserializer) {
 	return make_uniq<AppendResponseMessage>();
+}
+
+void BatchRequestMessage::Serialize(Serializer &serializer) const {
+	ProtocolMessage::Serialize(serializer);
+	serializer.WriteProperty<bool>(50, "chain_connection_id", chain_connection_id);
+	serializer.WriteList(51, "messages", messages.size(), [&](Serializer::List &list, idx_t i) {
+		list.WriteObject([&](Serializer &inner) { messages[i]->Serialize(inner); });
+	});
+}
+
+unique_ptr<ProtocolMessage> BatchRequestMessage::Deserialize(Deserializer &deserializer) {
+	auto chain = deserializer.ReadProperty<bool>(50, "chain_connection_id");
+	vector<unique_ptr<ProtocolMessage>> messages;
+	deserializer.ReadList(51, "messages", [&](Deserializer::List &list, idx_t i) {
+		list.ReadObject([&](Deserializer &inner) { messages.push_back(ProtocolMessage::Deserialize(inner)); });
+	});
+	return make_uniq<BatchRequestMessage>(std::move(messages), chain);
+}
+
+void BatchResponseMessage::Serialize(Serializer &serializer) const {
+	ProtocolMessage::Serialize(serializer);
+	serializer.WriteList(50, "responses", responses.size(), [&](Serializer::List &list, idx_t i) {
+		list.WriteObject([&](Serializer &inner) { responses[i]->Serialize(inner); });
+	});
+}
+
+unique_ptr<ProtocolMessage> BatchResponseMessage::Deserialize(Deserializer &deserializer) {
+	vector<unique_ptr<ProtocolMessage>> responses;
+	deserializer.ReadList(50, "responses", [&](Deserializer::List &list, idx_t i) {
+		list.ReadObject([&](Deserializer &inner) { responses.push_back(ProtocolMessage::Deserialize(inner)); });
+	});
+	return make_uniq<BatchResponseMessage>(std::move(responses));
 }
