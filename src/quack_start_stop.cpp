@@ -120,6 +120,60 @@ TableFunction QuackStopFunction::GetFunction() {
 	return TableFunction("quack_stop", {LogicalType::VARCHAR}, QuackStop, QuackStopBind);
 }
 
+struct QuackStopEachFunctionData : public TableFunctionData {
+	idx_t listen_uri_col = DConstants::INVALID_INDEX;
+};
+
+static unique_ptr<FunctionData> QuackStopEachBind(ClientContext &context, TableFunctionBindInput &input,
+                                                 vector<LogicalType> &return_types, vector<string> &names) {
+	auto bind_data = make_uniq<QuackStopEachFunctionData>();
+	for (idx_t i = 0; i < input.input_table_names.size(); i++) {
+		if (StringUtil::Lower(input.input_table_names[i]) == "listen_uri") {
+			if (input.input_table_types[i].id() != LogicalTypeId::VARCHAR) {
+				throw BinderException("quack_stop_each: input column 'listen_uri' must be VARCHAR");
+			}
+			bind_data->listen_uri_col = i;
+			break;
+		}
+	}
+	if (bind_data->listen_uri_col == DConstants::INVALID_INDEX) {
+		throw BinderException("quack_stop_each: input table must contain a 'listen_uri' VARCHAR column");
+	}
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("listen_uri");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("status");
+	return std::move(bind_data);
+}
+
+static OperatorResultType QuackStopEach(ExecutionContext &context, TableFunctionInput &data_p, DataChunk &input,
+                                       DataChunk &output) {
+	auto &bind_data = data_p.bind_data->CastNoConst<QuackStopEachFunctionData>();
+	auto &state = QuackStorageExtensionInfo::GetState(*context.client.db);
+
+	output.SetCardinality(input.size());
+	for (idx_t row = 0; row < input.size(); row++) {
+		auto uri_val = input.GetValue(bind_data.listen_uri_col, row);
+		if (uri_val.IsNull()) {
+			throw InvalidInputException("quack_stop_each: listen_uri must not be NULL");
+		}
+		auto uri_str = uri_val.GetValue<string>();
+		QuackUri listen_uri(uri_str, /* not really */ true);
+		string status = state.StopServer(context.client, listen_uri)
+		                    ? StringUtil::Format("Stopped listening on %s", listen_uri.Uri())
+		                    : StringUtil::Format("No server found listening on %s", listen_uri.Uri());
+		output.SetValue(0, row, Value(uri_str));
+		output.SetValue(1, row, Value(status));
+	}
+	return OperatorResultType::NEED_MORE_INPUT;
+}
+
+TableFunction QuackStopEachFunction::GetFunction() {
+	TableFunction fun("quack_stop_each", {LogicalType::TABLE}, nullptr, QuackStopEachBind);
+	fun.in_out_function = QuackStopEach;
+	return fun;
+}
+
 struct QuackServerListFunctionData : public TableFunctionData {
 	bool finished = false;
 };

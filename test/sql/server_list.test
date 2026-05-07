@@ -61,3 +61,32 @@ query I
 SELECT count(*) FROM quack_server_list();
 ----
 0
+
+# quack_stop_each: stop every running server via a table-input subquery
+statement ok
+FROM quack_serve('quack:127.0.0.1:9494', token='abcd');
+
+statement ok
+FROM quack_serve('quack:127.0.0.1:9495', token='abcd');
+
+query I
+SELECT count(*) FROM quack_stop_each((FROM quack_server_list()));
+----
+2
+
+query I
+SELECT count(*) FROM quack_server_list();
+----
+0
+
+# quack_stop_each: idempotent on empty
+query I
+SELECT count(*) FROM quack_stop_each((FROM quack_server_list()));
+----
+0
+
+# quack_stop_each: input table without listen_uri fails at bind time
+statement error
+FROM quack_stop_each((SELECT 1 AS x));
+----
+input table must contain a 'listen_uri' VARCHAR column
