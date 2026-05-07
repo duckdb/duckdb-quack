@@ -64,6 +64,15 @@ public:
 		return token;
 	}
 
+	const QuackUri &ListenUri() const {
+		return uri;
+	}
+
+	idx_t ActiveConnectionCount() {
+		std::lock_guard<std::mutex> lock(active_connections_mutex);
+		return active_connections.size();
+	}
+
 	virtual ~QuackServer();
 
 protected:

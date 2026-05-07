@@ -14,4 +14,9 @@ public:
 	static TableFunction GetFunction();
 };
 
+class QuackServerListFunction {
+public:
+	static TableFunction GetFunction();
+};
+
 } // namespace duckdb

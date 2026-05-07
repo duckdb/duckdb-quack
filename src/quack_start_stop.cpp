@@ -119,3 +119,57 @@ static void QuackStop(ClientContext &context, TableFunctionInput &data_p, DataCh
 TableFunction QuackStopFunction::GetFunction() {
 	return TableFunction("quack_stop", {LogicalType::VARCHAR}, QuackStop, QuackStopBind);
 }
+
+struct QuackServerListFunctionData : public TableFunctionData {
+	bool finished = false;
+};
+
+static unique_ptr<FunctionData> QuackServerListBind(ClientContext &context, TableFunctionBindInput &input,
+                                                    vector<LogicalType> &return_types, vector<string> &names) {
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("listen_uri");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("listen_url");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("host");
+	return_types.emplace_back(LogicalType::USMALLINT);
+	names.emplace_back("port");
+	return_types.emplace_back(LogicalType::UBIGINT);
+	names.emplace_back("active_connections");
+	return_types.emplace_back(LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR));
+	names.emplace_back("info");
+	return make_uniq<QuackServerListFunctionData>();
+}
+
+static void QuackServerList(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &bind_data = data_p.bind_data->CastNoConst<QuackServerListFunctionData>();
+	if (bind_data.finished) {
+		return;
+	}
+	auto snapshots = QuackStorageExtensionInfo::GetState(*context.db).ListServers();
+	idx_t row = 0;
+	for (auto &s : snapshots) {
+		output.SetValue(0, row, Value(s.listen_uri));
+		output.SetValue(1, row, Value(s.listen_url));
+		output.SetValue(2, row, Value(s.host));
+		output.SetValue(3, row, Value::USMALLINT(s.port));
+		output.SetValue(4, row, Value::UBIGINT(s.active_connections));
+		vector<Value> keys;
+		vector<Value> values;
+		keys.reserve(s.info.size());
+		values.reserve(s.info.size());
+		for (auto &kv : s.info) {
+			keys.emplace_back(Value(kv.first));
+			values.emplace_back(Value(kv.second));
+		}
+		output.SetValue(5, row,
+		                Value::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR, std::move(keys), std::move(values)));
+		row++;
+	}
+	output.SetCardinality(row);
+	bind_data.finished = true;
+}
+
+TableFunction QuackServerListFunction::GetFunction() {
+	return TableFunction("quack_server_list", {}, QuackServerList, QuackServerListBind);
+}

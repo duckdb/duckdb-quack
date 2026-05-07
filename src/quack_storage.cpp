@@ -32,6 +32,24 @@ QuackServer &QuackStorageExtensionInfo::CreateServer(ClientContext &context, con
 	return *servers[key];
 }
 
+vector<QuackStorageExtensionInfo::ServerSnapshot> QuackStorageExtensionInfo::ListServers() {
+	vector<ServerSnapshot> result;
+	std::lock_guard<std::mutex> lock(servers_mutex);
+	result.reserve(servers.size());
+	for (auto &kv : servers) {
+		auto &uri = kv.second->ListenUri();
+		ServerSnapshot snap;
+		snap.listen_uri = uri.Uri();
+		snap.listen_url = uri.Http();
+		snap.host = uri.Host();
+		snap.port = uri.Port();
+		snap.active_connections = kv.second->ActiveConnectionCount();
+		snap.info.emplace_back("ipv6", uri.IPv6() ? "true" : "false");
+		result.push_back(std::move(snap));
+	}
+	return result;
+}
+
 bool QuackStorageExtensionInfo::StopServer(ClientContext &context, const QuackUri &listen_uri) {
 	unique_ptr<QuackServer> to_destroy;
 	{

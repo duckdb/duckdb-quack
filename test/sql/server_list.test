@@ -1,0 +1,63 @@
+# name: test/sql/server_list.test
+# description: quack_server_list returns rows for active servers
+# group: [quack]
+
+require quack
+
+require httpfs
+
+# empty initially
+query I
+SELECT count(*) FROM quack_server_list();
+----
+0
+
+# one server
+statement ok
+FROM quack_serve('quack:127.0.0.1:9494', token='abcd');
+
+query I
+SELECT count(*) FROM quack_server_list();
+----
+1
+
+query IIIII
+SELECT listen_uri, listen_url, host, port, active_connections FROM quack_server_list();
+----
+quack:127.0.0.1:9494	http://127.0.0.1:9494	127.0.0.1	9494	0
+
+# info map carries ipv6 flag
+query I
+SELECT info['ipv6'] FROM quack_server_list();
+----
+false
+
+# add a second server, verify count and ordering-agnostic content
+statement ok
+FROM quack_serve('quack:127.0.0.1:9495', token='abcd');
+
+query I
+SELECT count(*) FROM quack_server_list();
+----
+2
+
+query I
+SELECT count(*) FROM quack_server_list() WHERE listen_uri = 'quack:127.0.0.1:9494';
+----
+1
+
+query I
+SELECT count(*) FROM quack_server_list() WHERE listen_uri = 'quack:127.0.0.1:9495';
+----
+1
+
+statement ok
+CALL quack_stop('quack:127.0.0.1:9494');
+
+statement ok
+CALL quack_stop('quack:127.0.0.1:9495');
+
+query I
+SELECT count(*) FROM quack_server_list();
+----
+0
