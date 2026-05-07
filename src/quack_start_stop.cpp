@@ -23,14 +23,14 @@ static unique_ptr<FunctionData> QuackServeBind(ClientContext &context, TableFunc
 		throw InvalidInputException("Invalid listen string specified");
 	}
 
-	auto allow_other_hostname = input.named_parameters.find("allow_other_hostname") != input.named_parameters.end() &&
-	                            input.named_parameters["allow_other_hostname"].GetValue<bool>();
+	auto allow_unsafe_hostname = input.named_parameters.find("allow_unsafe_hostname") != input.named_parameters.end() &&
+	                            input.named_parameters["allow_unsafe_hostname"].GetValue<bool>();
 
 	bind_data->listen_uri =
 	    QuackUri(uri_value.GetValue<string>(), /* the server will always listen without SSL */ false);
-	if (!allow_other_hostname && !bind_data->listen_uri.IsLocal()) {
+	if (!allow_unsafe_hostname && !bind_data->listen_uri.IsLocal()) {
 		throw InvalidInputException(
-		    "Only localhost is allowed as a Quack RPC hostname by default, set allow_other_hostname=true to override. "
+		    "Only localhost is allowed as a Quack RPC hostname by default, set allow_unsafe_hostname=true to override. "
 		    "We strongly recommend reverse-proxying the Quack RPC when making it publicly available.");
 	}
 
@@ -80,7 +80,7 @@ static void QuackServe(ClientContext &context, TableFunctionInput &data_p, DataC
 TableFunction QuackServeFunction::GetFunction() {
 	auto fun = TableFunction("quack_serve", {LogicalType::VARCHAR}, QuackServe, QuackServeBind);
 	fun.named_parameters["disable_ssl"] = LogicalType::BOOLEAN;
-	fun.named_parameters["allow_other_hostname"] = LogicalType::BOOLEAN;
+	fun.named_parameters["allow_unsafe_hostname"] = LogicalType::BOOLEAN;
 	fun.named_parameters["token"] = LogicalType::VARCHAR;
 
 	return fun;
