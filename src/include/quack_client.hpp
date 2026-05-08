@@ -19,6 +19,11 @@ public:
 
 	template <class TARGET>
 	unique_ptr<TARGET> Request(optional_ptr<ClientContext> context, unique_ptr<QuackMessage> request_message) {
+		// Stamp the per-connection negotiated version on the outgoing message. The
+		// CONNECTION_REQUEST branch in ToMemoryStream ignores this and always uses
+		// HANDSHAKE_SERIALIZATION_VERSION, so a freshly-constructed QuackClient with
+		// the default value still produces a decodable handshake.
+		request_message->SetOutgoingSerializationVersion(negotiated_serialization_version);
 		auto response_message = RequestInternal(context, std::move(request_message));
 		if (response_message->Type() != TARGET::TYPE) {
 			if (response_message->Type() == MessageType::ERROR_RESPONSE) {
@@ -31,6 +36,10 @@ public:
 		return unique_ptr_cast<QuackMessage, TARGET>(std::move(response_message));
 	}
 
+	void SetNegotiatedSerializationVersion(idx_t version) {
+		negotiated_serialization_version = version;
+	}
+
 	static unique_ptr<QuackClient> GetClient(DatabaseInstance &db, const QuackUri &uri);
 	static unique_ptr<QuackClient> GetClient(ClientContext &context, const QuackUri &uri);
 
@@ -41,6 +50,7 @@ protected:
 	MemoryStream read_stream, write_stream;
 	DatabaseInstance &db;
 	QuackUri uri;
+	idx_t negotiated_serialization_version = QuackMessage::HANDSHAKE_SERIALIZATION_VERSION;
 
 private:
 	virtual unique_ptr<QuackMessage> RequestInternal(optional_ptr<ClientContext> context,
@@ -50,6 +60,7 @@ private:
 class QuackClientConnection : public enable_shared_from_this<QuackClientConnection> {
 public:
 	explicit QuackClientConnection(unique_ptr<QuackClient> client_p, QuackUri uri_p, string connection_id_p,
+	                               idx_t negotiated_serialization_version_p,
 	                               idx_t max_connections_cached = 1);
 	~QuackClientConnection();
 
@@ -58,6 +69,9 @@ public:
 	}
 	const QuackUri &ServerURI() const {
 		return uri;
+	}
+	idx_t NegotiatedSerializationVersion() const {
+		return negotiated_serialization_version;
 	}
 
 	//! Get a client (either a cached one, or open a new one if required)
@@ -68,6 +82,7 @@ public:
 private:
 	QuackUri uri;
 	string connection_id;
+	idx_t negotiated_serialization_version;
 	mutable mutex lock;
 	mutable vector<unique_ptr<QuackClient>> cached_clients;
 	idx_t max_connections_cached;

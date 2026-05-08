@@ -60,8 +60,21 @@ struct MessageHeader {
 
 class QuackMessage {
 public:
+	//! Highest serialization version v1.5.x supports. CONNECTION_REQUEST is always
+	//! encoded at this version so a v1.5.x peer can decode the handshake before any
+	//! version negotiation has happened.
+	static constexpr idx_t HANDSHAKE_SERIALIZATION_VERSION = 7;
+
 	void ToMemoryStream(MemoryStream &write_stream) const;
 	static unique_ptr<QuackMessage> FromMemoryStream(MemoryStream &read_stream);
+
+	//! Per-message override of the serialization version used by ToMemoryStream.
+	void SetOutgoingSerializationVersion(idx_t version) {
+		outgoing_serialization_version = version;
+	}
+	idx_t OutgoingSerializationVersion() const {
+		return outgoing_serialization_version;
+	}
 
 	template <class TARGET>
 	TARGET &Cast() {
@@ -113,6 +126,7 @@ protected:
 
 private:
 	MessageHeader header;
+	idx_t outgoing_serialization_version = HANDSHAKE_SERIALIZATION_VERSION;
 };
 
 class PrepareRequestMessage : public QuackMessage {
@@ -207,6 +221,9 @@ public:
 	const idx_t MaximumSupportedQuackVersion() const {
 		return max_supported_quack_version;
 	}
+	idx_t ClientMaxSerializationVersion() const {
+		return client_max_serialization_version;
+	}
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<ConnectionRequestMessage> Deserialize(Deserializer &deserializer);
 
@@ -220,13 +237,14 @@ private:
 	string client_platform;
 	idx_t min_supported_quack_version;
 	idx_t max_supported_quack_version;
+	idx_t client_max_serialization_version;
 };
 
 class ConnectionResponseMessage : public QuackMessage {
 public:
 	static constexpr MessageType TYPE = MessageType::CONNECTION_RESPONSE;
 
-	explicit ConnectionResponseMessage(string connection_id_p);
+	ConnectionResponseMessage(string connection_id_p, idx_t negotiated_serialization_version_p);
 
 protected:
 	ConnectionResponseMessage() : QuackMessage(TYPE) {
@@ -242,6 +260,9 @@ public:
 	idx_t QuackVersion() const {
 		return quack_version;
 	}
+	idx_t NegotiatedSerializationVersion() const {
+		return negotiated_serialization_version;
+	}
 
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<ConnectionResponseMessage> Deserialize(Deserializer &deserializer);
@@ -250,6 +271,7 @@ private:
 	string server_duckdb_version;
 	string server_platform;
 	idx_t quack_version;
+	idx_t negotiated_serialization_version;
 };
 
 class FetchRequestMessage : public QuackMessage {

@@ -91,7 +91,12 @@ const char *EnumUtil::ToChars<MessageType>(MessageType value) {
 void QuackMessage::ToMemoryStream(MemoryStream &write_stream) const {
 	write_stream.Rewind();
 	SerializationOptions options;
-	options.serialization_compatibility = SerializationCompatibility::FromIndex(10);
+	// CONNECTION_REQUEST is always encoded at HANDSHAKE_SERIALIZATION_VERSION so an
+	// older peer can decode the handshake; everything else uses the per-connection
+	// negotiated version that the sender stamped on the message before serializing.
+	idx_t version = header.type == MessageType::CONNECTION_REQUEST ? HANDSHAKE_SERIALIZATION_VERSION
+	                                                               : outgoing_serialization_version;
+	options.serialization_compatibility = SerializationCompatibility::FromIndex(version);
 	BinarySerializer serializer(write_stream, options);
 
 	// write the header
@@ -150,12 +155,15 @@ unique_ptr<QuackMessage> QuackMessage::DeserializeMessage(BinaryDeserializer &de
 ConnectionRequestMessage::ConnectionRequestMessage(const string &auth_string_p)
     : QuackMessage(TYPE), auth_string(auth_string_p), client_duckdb_version(DuckDB::LibraryVersion()),
       client_platform(DuckDB::Platform()), min_supported_quack_version(QuackServer::QUACK_VERSION),
-      max_supported_quack_version(QuackServer::QUACK_VERSION) {
+      max_supported_quack_version(QuackServer::QUACK_VERSION),
+      client_max_serialization_version(SerializationCompatibility::Latest().serialization_version) {
 }
 
-ConnectionResponseMessage::ConnectionResponseMessage(string connection_id_p)
+ConnectionResponseMessage::ConnectionResponseMessage(string connection_id_p,
+                                                     idx_t negotiated_serialization_version_p)
     : QuackMessage(TYPE, std::move(connection_id_p)), server_duckdb_version(DuckDB::LibraryVersion()),
-      server_platform(DuckDB::Platform()), quack_version(QuackServer::QUACK_VERSION) {
+      server_platform(DuckDB::Platform()), quack_version(QuackServer::QUACK_VERSION),
+      negotiated_serialization_version(negotiated_serialization_version_p) {
 }
 
 unique_ptr<QuackMessage> QuackMessage::FromMemoryStream(MemoryStream &read_stream) {

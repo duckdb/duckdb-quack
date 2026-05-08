@@ -5,6 +5,7 @@
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 
+#include "quack_message.hpp"
 #include "quack_uri.hpp"
 
 #include "httplib.hpp" // TODO forward declare
@@ -32,6 +33,9 @@ struct QuackConnection {
 	//! Current result UUID
 	hugeint_t result_uuid;
 	string session_id;
+	//! Negotiated DuckDB serialization version for all post-handshake messages on this
+	//! connection (= min(client_max, server_max), where server_max = SerializationCompatibility::Latest()).
+	idx_t negotiated_serialization_version = QuackMessage::HANDSHAKE_SERIALIZATION_VERSION;
 };
 
 class QuackServer {
@@ -54,7 +58,7 @@ public:
 	virtual void Close() {};
 
 	shared_ptr<QuackConnection> GetConnection(const string &connection_id);
-	string CreateNewConnection(const string &session_id);
+	string CreateNewConnection(const string &session_id, idx_t negotiated_serialization_version);
 	bool DisconnectConnection(const string &session_id);
 	// TODO need something to destroy connections
 

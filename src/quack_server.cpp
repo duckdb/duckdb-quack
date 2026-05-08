@@ -44,7 +44,7 @@ shared_ptr<QuackConnection> QuackServer::GetConnection(const string &connection_
 	return nullptr;
 }
 
-string QuackServer::CreateNewConnection(const string &session_id) {
+string QuackServer::CreateNewConnection(const string &session_id, idx_t negotiated_serialization_version) {
 	std::lock_guard<std::mutex> lock(active_connections_mutex);
 
 	D_ASSERT(active_connections.find(session_id) == active_connections.end());
@@ -56,6 +56,7 @@ string QuackServer::CreateNewConnection(const string &session_id) {
 	auto new_connection = make_shared_ptr<QuackConnection>(session_id);
 	new_connection->duckdb_connection = make_uniq<Connection>(*db);
 	new_connection->duckdb_connection->context->config.enable_progress_bar = false;
+	new_connection->negotiated_serialization_version = negotiated_serialization_version;
 	// new_connection->duckdb_connection->context->config.streaming_buffer_size = 10 * 1000000; // 10 MB
 	active_connections[session_id] = std::move(new_connection);
 	return session_id;
@@ -214,6 +215,12 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
 	// process the message
 	auto response = HandleMessageInternal(*db, *received_message, connection);
 
+	// Stamp the negotiated serialization version on the response so it is sent at the
+	// per-connection version. CONNECTION_REQUEST handling stamps the response itself
+	if (connection) {
+		response->SetOutgoingSerializationVersion(connection->negotiated_serialization_version);
+	}
+
 	if (should_log) {
 		int64_t end_time = std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now())
 		                       .time_since_epoch()
@@ -266,7 +273,11 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		        Value(session_id), Value(connection_request_message.AuthString()), Value(Token()))) {
 			return make_uniq<ErrorResponse>("Authentication failed");
 		}
-		return make_uniq<ConnectionResponseMessage>(CreateNewConnection(session_id));
+		idx_t server_max = SerializationCompatibility::Latest().serialization_version;
+		idx_t negotiated = MinValue<idx_t>(connection_request_message.ClientMaxSerializationVersion(), server_max);
+		auto response = make_uniq<ConnectionResponseMessage>(CreateNewConnection(session_id, negotiated), negotiated);
+		response->SetOutgoingSerializationVersion(negotiated);
+		return response;
 	}
 	case MessageType::DISCONNECT_MESSAGE: {
 		auto &connection = *connection_p;

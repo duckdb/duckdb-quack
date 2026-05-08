@@ -137,9 +137,13 @@ unique_ptr<QuackClient> QuackClient::GetClient(ClientContext &context, const Qua
 }
 
 QuackClientConnection::QuackClientConnection(unique_ptr<QuackClient> client_p, QuackUri uri_p, string connection_id_p,
+                                             idx_t negotiated_serialization_version_p,
                                              idx_t max_connections_cached)
-    : uri(std::move(uri_p)), connection_id(std::move(connection_id_p)), max_connections_cached(max_connections_cached) {
+    : uri(std::move(uri_p)), connection_id(std::move(connection_id_p)),
+      negotiated_serialization_version(negotiated_serialization_version_p),
+      max_connections_cached(max_connections_cached) {
 	if (client_p) {
+		client_p->SetNegotiatedSerializationVersion(negotiated_serialization_version);
 		StoreClient(std::move(client_p));
 	}
 }
@@ -179,7 +183,9 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 	// success! we got a connection id
 	// construct the client connection and return it
 	auto connection_id = connection_request_response->ConnectionId();
-	return make_shared_ptr<QuackClientConnection>(std::move(client), uri, std::move(connection_id));
+	auto negotiated_serialization_version = connection_request_response->NegotiatedSerializationVersion();
+	return make_shared_ptr<QuackClientConnection>(std::move(client), uri, std::move(connection_id),
+	                                              negotiated_serialization_version);
 }
 
 unique_ptr<QuackClientWrapper> QuackClientConnection::GetClient(ClientContext &context) const {
@@ -193,6 +199,7 @@ unique_ptr<QuackClientWrapper> QuackClientConnection::GetClient(ClientContext &c
 		// instantiate a new client
 		result = QuackClient::GetClient(context, uri);
 	}
+	result->SetNegotiatedSerializationVersion(negotiated_serialization_version);
 	return make_uniq<QuackClientWrapper>(std::move(result), shared_from_this());
 }
 
