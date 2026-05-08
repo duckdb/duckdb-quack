@@ -16,7 +16,7 @@ jobs:
     name: Build extension binaries
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.5-variegata
     with:
-      duckdb_version: v1.5.2
+      duckdb_version: main
       ci_tools_version: v1.5-variegata
       extension_name: quack
       exclude_archs: 'windows_amd64_rtools;windows_amd64_mingw;linux_amd64_musl'
@@ -25,7 +25,7 @@ jobs:
     name: Code Quality Check
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@v1.5-variegata
     with:
-      duckdb_version: v1.5.2
+      duckdb_version: main
       ci_tools_version: v1.5-variegata
       extension_name: quack
       format_checks: 'format'
@@ -37,7 +37,7 @@ jobs:
     secrets: inherit
     with:
       extension_name: quack
-      duckdb_version: v1.5.2
+      duckdb_version: main
       ci_tools_version: v1.5-variegata
       exclude_archs: 'windows_amd64_rtools;windows_amd64_mingw;linux_amd64_musl'
       deploy_latest: ${{ startsWith(github.ref, 'refs/heads/v') }}
