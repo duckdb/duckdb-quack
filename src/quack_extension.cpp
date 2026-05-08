@@ -12,6 +12,7 @@
 #include "duckdb/storage/storage_extension.hpp"
 
 #include "include/storage/quack_catalog.hpp"
+#include "quack_activity.hpp"
 #include "quack_extension.hpp"
 #include "quack_log.hpp"
 #include "quack_scan.hpp"
@@ -110,6 +111,7 @@ static TableFunction GetQuackIdentifyFunction() {
 static void LoadInternal(ExtensionLoader &loader) {
 	loader.SetDescription("The DuckDB 'Quack' Client/Server Protocol");
 
+	loader.RegisterFunction(QuacktivityFunction::GetFunction());
 	loader.RegisterFunction(QuackScanFunction::GetFunction());
 	loader.RegisterFunction(QuackScanByNameFunction::GetFunction());
 	loader.RegisterFunction(QuackServeFunction::GetFunction());

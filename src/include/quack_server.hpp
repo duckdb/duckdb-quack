@@ -30,6 +30,7 @@ struct QuackConnection {
 	//! Monotonic counter assigned per FETCH batch — enables order-preserving parallel scans on
 	idx_t next_batch_index = 1;
 	string session_id;
+	string sql_query;
 };
 
 class QuackServer {
@@ -60,6 +61,12 @@ public:
 
 	//! Throw InvalidInputException if `token` doesn't meet requirements(currently, length >= 4)
 	static void ValidateToken(const string &token);
+
+	struct ConnectionSnapshot {
+		string session_id;
+		string sql_query;
+	};
+	vector<ConnectionSnapshot> CreateActiveConnectionSnap();
 
 	const string &Token() {
 		return token;

@@ -44,6 +44,15 @@ shared_ptr<QuackConnection> QuackServer::GetConnection(const string &connection_
 	return nullptr;
 }
 
+vector<QuackServer::ConnectionSnapshot> QuackServer::CreateActiveConnectionSnap() {
+	vector<ConnectionSnapshot> result;
+	std::lock_guard<std::mutex> lock(active_connections_mutex);
+	for (auto &[id, conn] : active_connections) {
+		result.push_back({conn->session_id, conn->sql_query});
+	}
+	return result;
+}
+
 string QuackServer::CreateNewConnection(const string &session_id) {
 	std::lock_guard<std::mutex> lock(active_connections_mutex);
 
@@ -296,6 +305,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			}
 
 			connection.duckdb_query_result = std::move(query_result);
+			connection.sql_query = prepare_request_message.Query();
 		}
 		// Fresh query → restart batch numbering. Clients' local state is re-initialized on
 		// a new PREPARE, so indices start at 0 again.
