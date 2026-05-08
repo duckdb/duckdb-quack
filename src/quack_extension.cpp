@@ -114,7 +114,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(QuackScanByNameFunction::GetFunction());
 	loader.RegisterFunction(QuackServeFunction::GetFunction());
 	loader.RegisterFunction(QuackStopFunction::GetFunction());
-	loader.RegisterFunction(QuackStopEachFunction::GetFunction());
 	loader.RegisterFunction(QuackServerListFunction::GetFunction());
 	loader.RegisterFunction(GetQuackIdentifyFunction());
 

@@ -86,91 +86,65 @@ TableFunction QuackServeFunction::GetFunction() {
 	return fun;
 }
 
-static unique_ptr<FunctionData> QuackStopBind(ClientContext &context, TableFunctionBindInput &input,
-                                              vector<LogicalType> &return_types, vector<string> &names) {
-	auto bind_data = make_uniq<QuackStartStopFunctionData>();
-	auto &uri_value = input.inputs[0];
-	if (uri_value.IsNull() || uri_value.GetValue<string>().empty()) {
-		throw InvalidInputException("Invalid listen string specified");
-	}
-	bind_data->listen_uri =
-	    QuackUri(uri_value.GetValue<string>(), /* not really, but we don't want to ask the user again */ true);
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("status");
+struct QuackStopFunctionData : public TableFunctionData {};
 
-	return std::move(bind_data);
-}
-
-static void QuackStop(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
-	auto &bind_data = data_p.bind_data->CastNoConst<QuackStartStopFunctionData>();
-	if (bind_data.finished) {
-		return;
-	}
-	auto &state = QuackStorageExtensionInfo::GetState(*context.db);
-	if (state.StopServer(context, bind_data.listen_uri)) {
-		output.data[0].SetValue(0, StringUtil::Format("Stopped listening on %s", bind_data.listen_uri.Uri()));
-	} else {
-		output.data[0].SetValue(0, StringUtil::Format("No server found listening on %s", bind_data.listen_uri.Uri()));
-	}
-	output.SetCardinality(1);
-	bind_data.finished = true;
-}
-
-TableFunction QuackStopFunction::GetFunction() {
-	return TableFunction("quack_stop", {LogicalType::VARCHAR}, QuackStop, QuackStopBind);
-}
-
-struct QuackStopEachFunctionData : public TableFunctionData {
-	idx_t listen_uri_col = DConstants::INVALID_INDEX;
+struct QuackStopLocalState : public LocalTableFunctionState {
+	bool consumed_current_chunk = false;
 };
 
-static unique_ptr<FunctionData> QuackStopEachBind(ClientContext &context, TableFunctionBindInput &input,
-                                                 vector<LogicalType> &return_types, vector<string> &names) {
-	auto bind_data = make_uniq<QuackStopEachFunctionData>();
-	for (idx_t i = 0; i < input.input_table_names.size(); i++) {
-		if (StringUtil::Lower(input.input_table_names[i]) == "listen_uri") {
-			if (input.input_table_types[i].id() != LogicalTypeId::VARCHAR) {
-				throw BinderException("quack_stop_each: input column 'listen_uri' must be VARCHAR");
-			}
-			bind_data->listen_uri_col = i;
-			break;
-		}
-	}
-	if (bind_data->listen_uri_col == DConstants::INVALID_INDEX) {
-		throw BinderException("quack_stop_each: input table must contain a 'listen_uri' VARCHAR column");
-	}
+static unique_ptr<FunctionData> QuackStopBind(ClientContext &context, TableFunctionBindInput &input,
+                                              vector<LogicalType> &return_types, vector<string> &names) {
 	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("listen_uri");
 	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("status");
-	return std::move(bind_data);
+	return make_uniq<QuackStopFunctionData>();
 }
 
-static OperatorResultType QuackStopEach(ExecutionContext &context, TableFunctionInput &data_p, DataChunk &input,
-                                       DataChunk &output) {
-	auto &bind_data = data_p.bind_data->CastNoConst<QuackStopEachFunctionData>();
-	auto &state = QuackStorageExtensionInfo::GetState(*context.client.db);
+static unique_ptr<LocalTableFunctionState> QuackStopLocalInit(ExecutionContext &context, TableFunctionInitInput &input,
+                                                              GlobalTableFunctionState *global_state) {
+	return make_uniq<QuackStopLocalState>();
+}
 
+// Implemented as an in_out_function (per-input-row) so the same function works both
+// as a literal call (`CALL quack_stop('quack:host')`) and as a lateral form driven by
+// any subquery — including `FROM quack_server_list() s, quack_stop(s.listen_uri)`.
+// Lateral binding of correlated columns is only allowed for in_out-style table funcs.
+//
+// PhysicalTableScan (the literal-call path) terminates only when the function returns
+// chunk.size() == 0; it currently ignores NEED_MORE_INPUT. So we track per-chunk
+// progress in local state and emit an empty chunk after the input has been consumed,
+// then reset on the next call so we keep processing chunks for the lateral path too.
+static OperatorResultType QuackStop(ExecutionContext &context, TableFunctionInput &data_p, DataChunk &input,
+                                    DataChunk &output) {
+	auto &local = data_p.local_state->Cast<QuackStopLocalState>();
+	if (local.consumed_current_chunk) {
+		local.consumed_current_chunk = false;
+		output.SetCardinality(0);
+		return OperatorResultType::NEED_MORE_INPUT;
+	}
+	auto &state = QuackStorageExtensionInfo::GetState(*context.client.db);
 	output.SetCardinality(input.size());
 	for (idx_t row = 0; row < input.size(); row++) {
-		auto uri_val = input.GetValue(bind_data.listen_uri_col, row);
-		if (uri_val.IsNull()) {
-			throw InvalidInputException("quack_stop_each: listen_uri must not be NULL");
+		auto uri_val = input.GetValue(0, row);
+		if (uri_val.IsNull() || uri_val.GetValue<string>().empty()) {
+			throw InvalidInputException("Invalid listen string specified");
 		}
 		auto uri_str = uri_val.GetValue<string>();
-		QuackUri listen_uri(uri_str, /* not really */ true);
+		QuackUri listen_uri(uri_str, /* not really, but we don't want to ask the user again */ true);
 		string status = state.StopServer(context.client, listen_uri)
 		                    ? StringUtil::Format("Stopped listening on %s", listen_uri.Uri())
 		                    : StringUtil::Format("No server found listening on %s", listen_uri.Uri());
 		output.SetValue(0, row, Value(uri_str));
 		output.SetValue(1, row, Value(status));
 	}
-	return OperatorResultType::NEED_MORE_INPUT;
+	local.consumed_current_chunk = true;
+	return OperatorResultType::HAVE_MORE_OUTPUT;
 }
 
-TableFunction QuackStopEachFunction::GetFunction() {
-	TableFunction fun("quack_stop_each", {LogicalType::TABLE}, nullptr, QuackStopEachBind);
-	fun.in_out_function = QuackStopEach;
+TableFunction QuackStopFunction::GetFunction() {
+	TableFunction fun("quack_stop", {LogicalType::VARCHAR}, nullptr, QuackStopBind, nullptr, QuackStopLocalInit);
+	fun.in_out_function = QuackStop;
 	return fun;
 }
 

@@ -14,11 +14,6 @@ public:
 	static TableFunction GetFunction();
 };
 
-class QuackStopEachFunction {
-public:
-	static TableFunction GetFunction();
-};
-
 class QuackServerListFunction {
 public:
 	static TableFunction GetFunction();
