@@ -10,6 +10,8 @@
 
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/common/index_vector.hpp"
+#include "duckdb/common/types/column/column_data_collection.hpp"
+#include "duckdb/parser/parsed_data/create_info.hpp"
 
 namespace duckdb {
 class QuackCatalog;

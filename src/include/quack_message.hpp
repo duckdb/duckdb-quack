@@ -1,6 +1,7 @@
 #pragma once
 
 #include "duckdb/common/serializer/binary_serializer.hpp"
+#include "duckdb/common/serializer/memory_stream.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/common/types/uuid.hpp"
 

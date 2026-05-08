@@ -304,7 +304,7 @@ static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChu
 						auto &index = global_state.column_ids[i];
 						if (index.IsVirtualColumn()) {
 							// TODO
-							output.data[i].Reference(Value(output.data[i].GetType()));
+							output.data[i].Reference(Value(output.data[i].GetType()), count_t(response_chunk.size()));
 							return;
 						}
 						auto col_idx = index.GetPrimaryIndex();
