@@ -66,7 +66,7 @@ public:
 		string session_id;
 		string sql_query;
 	};
-	vector<ConnectionSnapshot> CreateActiveConnectionSnap();
+	vector<ConnectionSnapshot> GetActiveConnectionSnap();
 
 	const string &Token() {
 		return token;

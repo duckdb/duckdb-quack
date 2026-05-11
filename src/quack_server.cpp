@@ -44,7 +44,7 @@ shared_ptr<QuackConnection> QuackServer::GetConnection(const string &connection_
 	return nullptr;
 }
 
-vector<QuackServer::ConnectionSnapshot> QuackServer::CreateActiveConnectionSnap() {
+vector<QuackServer::ConnectionSnapshot> QuackServer::GetActiveConnectionSnap() {
 	vector<ConnectionSnapshot> result;
 	std::lock_guard<std::mutex> lock(active_connections_mutex);
 	for (auto &[id, conn] : active_connections) {

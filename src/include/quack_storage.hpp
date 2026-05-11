@@ -29,6 +29,7 @@ public:
 		vector<std::pair<string, string>> info;
 	};
 	vector<ServerSnapshot> ListServers();
+	vector<QuackServer::ConnectionSnapshot> GetActiveConnectionSnaps();
 
 	static constexpr const char *STORAGE_EXTENSION_KEY = "quack";
 

@@ -1,0 +1,95 @@
+# name: test/sql/activity.test
+# description: test quacktivity
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+statement ok
+create table fuu as values(42, 43);
+
+foreach server 'quack:localhost'
+
+statement ok con1
+call quack_serve({server}, token='asdf');
+
+# no connections yet
+query I con1
+select count(*) from quacktivity();
+----
+0
+
+# attach creates a persistent QuackClientConnection in active_connections
+# and keeps it alive until detach — this is the "concurrent connection"
+statement ok con2
+attach {server} as rpc2 (token 'asdf');
+
+query I con1
+select count(*) from quacktivity();
+----
+1
+
+query I con1
+select connection_id != '' from quacktivity();
+----
+true
+
+# loop: run queries through the attached DB and verify the connection stays visible
+loop i 0 3
+
+query II con2
+from rpc2.fuu;
+----
+42	43
+
+query I con1
+select count(*) from quacktivity();
+----
+1
+
+query I con1
+select starts_with(query, 'SELECT') from quacktivity();
+----
+true
+
+endloop
+
+# after queries the sql_query field is populated
+query I con1
+select "query" != '' from quacktivity();
+----
+true
+
+# two clients on the same server
+statement ok con1
+attach {server} as rpc3 (token 'asdf');
+
+query I con1
+select count(*) from quacktivity();
+----
+2
+
+statement ok con1
+detach rpc3;
+
+query I con1
+select count(*) from quacktivity();
+----
+1
+
+# detach removes the session
+statement ok con2
+detach rpc2;
+
+query I con1
+select count(*) from quacktivity();
+----
+0
+
+statement ok con1
+call quack_stop({server});
+
+endloop
