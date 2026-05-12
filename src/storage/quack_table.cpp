@@ -33,29 +33,34 @@ QuackTableSet::QuackTableSet(ClientContext &context, QuackSchemaCatalogEntry &pa
 		// parse the SQL to get the table definition
 		auto type = row.GetValue(2).GetValue<string>();
 		unique_ptr<CatalogEntry> entry;
-		if (type == "table") {
-			auto sql = row.GetValue(1).GetValue<string>();
-			auto info = ParseCreateTable(sql);
-			if (info->type != CatalogType::TABLE_ENTRY) {
-				throw InternalException("Expected a CREATE TABLE");
-			}
-			// bind to resolve the types
-			auto binder = Binder::CreateBinder(context);
-			auto bound_info = binder->BindCreateTableInfo(std::move(info), schema);
-			auto table = make_uniq<QuackTableCatalogEntry>(catalog, parent, bound_info->Base());
-			entry = std::move(table);
-		} else {
-			auto view_name = row.GetValue(1).GetValue<string>();
-			// bind a remote procedure call to the view on the server side
-			// we don't actually care what the view contains server-side, we just treat it like an opaque object we can
-			// query
-			CreateViewInfo info(schema, view_name);
-			info.sql = QuackViewCatalogEntry::CreateViewSQL(catalog.GetName(), schema.name, view_name);
-			info.query = CreateViewInfo::ParseSelect(info.sql);
+		try {
+			if (type == "table") {
+				auto sql = row.GetValue(1).GetValue<string>();
+				auto info = ParseCreateTable(sql);
+				if (info->type != CatalogType::TABLE_ENTRY) {
+					throw InternalException("Expected a CREATE TABLE");
+				}
+				// bind to resolve the types
+				auto binder = Binder::CreateBinder(context);
+				auto bound_info = binder->BindCreateTableInfo(std::move(info), schema);
+				auto table = make_uniq<QuackTableCatalogEntry>(catalog, parent, bound_info->Base());
+				entry = std::move(table);
+			} else {
+				auto view_name = row.GetValue(1).GetValue<string>();
+				// bind a remote procedure call to the view on the server side
+				// we don't actually care what the view contains server-side, we just treat it like an opaque object we can
+				// query
+				CreateViewInfo info(schema, view_name);
+				info.sql = QuackViewCatalogEntry::CreateViewSQL(catalog.GetName(), schema.name, view_name);
+				info.query = CreateViewInfo::ParseSelect(info.sql);
 
-			// bind to resolve the types
-			auto view = make_uniq<QuackViewCatalogEntry>(catalog, parent, info);
-			entry = std::move(view);
+				// bind to resolve the types
+				auto view = make_uniq<QuackViewCatalogEntry>(catalog, parent, info);
+				entry = std::move(view);
+			}
+		} catch (std::exception &) {
+			// skip tables/views whose DDL cannot be parsed or bound locally
+			continue;
 		}
 		CreateEntry(std::move(entry), OnCreateConflict::REPLACE_ON_CONFLICT);
 	}
@@ -69,9 +74,11 @@ string QuackTableSet::GetLoadQuery() {
 	return R"(
 SELECT schema_name, sql, 'table'
 FROM duckdb_tables()
+WHERE internal = false AND sql IS NOT NULL
 UNION ALL
 SELECT schema_name, view_name, 'view'
 FROM duckdb_views()
+WHERE internal = false
 	)";
 }
 
