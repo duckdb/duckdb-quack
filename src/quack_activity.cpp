@@ -7,7 +7,7 @@
 
 namespace duckdb {
 
-static const char *QueryStateToString(QuackQueryState state) {
+static string QueryStateToString(QuackQueryState state) {
 	switch (state) {
 	case QuackQueryState::IDLE:
 		return "idle";
@@ -47,20 +47,22 @@ static void QuacktivityScan(ClientContext &context, TableFunctionInput &input, D
 	if (data.finished) {
 		return;
 	}
+
 	auto snapshots = QuackStorageExtensionInfo::GetState(*context.db).GetActiveConnectionSnaps();
-	idx_t count = 0;
+
+	idx_t row = 0;
 	for (auto &snap : snapshots) {
-		output.SetValue(0, count, snap.session_id);
-		output.SetValue(1, count, snap.sql_query);
-		output.SetValue(2, count, Value(QueryStateToString(snap.query_state)));
+		output.SetValue(0, row, snap.session_id);
+		output.SetValue(1, row, snap.sql_query);
+		output.SetValue(2, row, Value(QueryStateToString(snap.query_state)));
 		if (snap.query_state == QuackQueryState::IDLE) {
-			output.SetValue(3, count, Value(LogicalType::TIMESTAMP));
+			output.SetValue(3, row, Value(LogicalType::TIMESTAMP));
 		} else {
-			output.SetValue(3, count, Value::TIMESTAMP(snap.query_started_at));
+			output.SetValue(3, row, Value::TIMESTAMP(snap.query_started_at));
 		}
-		count++;
+		row++;
 	}
-	output.SetCardinality(count);
+	output.SetCardinality(row);
 	data.finished = true;
 }
 

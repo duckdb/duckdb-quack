@@ -44,16 +44,16 @@ shared_ptr<QuackConnection> QuackServer::GetConnection(const string &connection_
 	return nullptr;
 }
 
-vector<QuackServer::ConnectionSnapshot> QuackServer::GetActiveConnectionSnap() {
-	vector<ConnectionSnapshot> result;
+vector<QuackConnectionSnapshot> QuackServer::GetActiveConnectionSnap() {
+	vector<QuackConnectionSnapshot> result;
 	std::lock_guard<std::mutex> lock(active_connections_mutex);
 	for (auto &[id, conn] : active_connections) {
-		ConnectionSnapshot snap;
-		snap.session_id = conn->session_id;
-		snap.sql_query = conn->sql_query;
-		snap.query_state = conn->query_state;
-		snap.query_started_at = conn->query_started_at;
-		result.push_back(std::move(snap));
+		QuackConnectionSnapshot snapshot;
+		snapshot.session_id = conn->session_id;
+		snapshot.sql_query = conn->sql_query;
+		snapshot.query_state = conn->query_state;
+		snapshot.query_started_at = conn->query_started_at;
+		result.push_back(std::move(snapshot));
 	}
 	return result;
 }

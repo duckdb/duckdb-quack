@@ -39,6 +39,13 @@ struct QuackConnection {
 	timestamp_t query_started_at {0};
 };
 
+struct QuackConnectionSnapshot {
+	string session_id;
+	string sql_query;
+	QuackQueryState query_state = QuackQueryState::IDLE;
+	timestamp_t query_started_at {0};
+};
+
 class QuackServer {
 public:
 	static constexpr const idx_t QUACK_VERSION = 1;
@@ -71,13 +78,7 @@ public:
 	//! Throw InvalidInputException if `token` doesn't meet requirements(currently, length >= 4)
 	static void ValidateToken(const string &token);
 
-	struct ConnectionSnapshot {
-		string session_id;
-		string sql_query;
-		QuackQueryState query_state = QuackQueryState::IDLE;
-		timestamp_t query_started_at {0};
-	};
-	vector<ConnectionSnapshot> GetActiveConnectionSnap();
+	vector<QuackConnectionSnapshot> GetActiveConnectionSnap();
 
 	const string &Token() {
 		return token;

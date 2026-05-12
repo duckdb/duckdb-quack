@@ -50,12 +50,12 @@ vector<QuackStorageExtensionInfo::ServerSnapshot> QuackStorageExtensionInfo::Lis
 	return result;
 }
 
-vector<QuackServer::ConnectionSnapshot> QuackStorageExtensionInfo::GetActiveConnectionSnaps() {
-	vector<QuackServer::ConnectionSnapshot> result;
+vector<QuackConnectionSnapshot> QuackStorageExtensionInfo::GetActiveConnectionSnaps() {
+	vector<QuackConnectionSnapshot> result;
 	std::lock_guard<std::mutex> lock(servers_mutex);
 	for (auto &[uri, server] : servers) {
-		for (auto &snap : server->GetActiveConnectionSnap()) {
-			result.push_back(std::move(snap));
+		for (auto &snapshot : server->GetActiveConnectionSnap()) {
+			result.push_back(std::move(snapshot));
 		}
 	}
 	return result;

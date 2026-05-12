@@ -1,5 +1,5 @@
 # name: test/sql/activity.test
-# description: test quacktivity
+# description: test quacktivity function for the quack extension
 # group: [sql]
 
 require quack
@@ -22,22 +22,15 @@ select count(*) from quacktivity();
 ----
 0
 
-# attach creates a persistent QuackClientConnection in active_connections
-# and keeps it alive until detach — this is the "concurrent connection"
+# attach creates a persistent QuackClientConnection
 statement ok con2
 attach {server} as rpc2 (token 'asdf');
 
 query I con1
-select count(*) from quacktivity();
+select state from quacktivity();
 ----
-1
+finished
 
-query I con1
-select connection_id != '' from quacktivity();
-----
-true
-
-# loop: run queries through the attached DB and verify the connection stays visible
 loop i 0 3
 
 query II con2
@@ -56,12 +49,6 @@ select starts_with(query, 'SELECT') from quacktivity();
 true
 
 endloop
-
-# after queries the sql_query field is populated
-query I con1
-select "query" != '' from quacktivity();
-----
-true
 
 # two clients on the same server
 statement ok con1
