@@ -29,6 +29,7 @@ public:
 	void DropEntry(const string &entry_name);
 	vector<reference<CatalogEntry>> GetAllCatalogEntries();
 	optional_ptr<CatalogEntry> CreateEntry(unique_ptr<CatalogEntry> entry, OnCreateConflict on_conflict);
+	void Clear();
 
 protected:
 	QuackCatalog &catalog;

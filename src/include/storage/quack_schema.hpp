@@ -23,6 +23,8 @@ public:
 	QuackSchemaSet(ClientContext &context, QuackCatalog &catalog, const QuackLoadCatalogData &load_data);
 
 	static string GetLoadQuery();
+
+	void Reload(ClientContext &context, QuackCatalog &catalog, const QuackLoadCatalogData &load_data);
 };
 
 class QuackSchemaCatalogEntry : public SchemaCatalogEntry {

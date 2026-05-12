@@ -2,6 +2,8 @@
 # description: A client may instruct a quack server to stop itself via `CALL quack_stop(...)` over RPC. Must not deadlock or crash.
 # group: [sql]
 
+require notwindows
+
 require quack
 
 require httpfs

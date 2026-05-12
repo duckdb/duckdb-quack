@@ -13,6 +13,11 @@ namespace duckdb {
 
 QuackSchemaSet::QuackSchemaSet(ClientContext &context, QuackCatalog &catalog, const QuackLoadCatalogData &load_data)
     : QuackCatalogSet(catalog) {
+	Reload(context, catalog, load_data);
+}
+
+void QuackSchemaSet::Reload(ClientContext &context, QuackCatalog &catalog, const QuackLoadCatalogData &load_data) {
+	Clear();
 	for (auto &row : load_data.schemas->Rows()) {
 		CreateSchemaInfo info;
 		info.catalog = row.GetValue(0).GetValue<string>();

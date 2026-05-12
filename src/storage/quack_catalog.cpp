@@ -84,6 +84,11 @@ shared_ptr<QuackClientConnection> QuackCatalog::GetClientConnection() {
 	return client_connection;
 }
 
+void QuackCatalog::Refresh(ClientContext &context) {
+	auto load_info = LoadCatalog(context);
+	schemas->Reload(context, *this, load_info);
+}
+
 const string &QuackCatalog::GetConnectionId() {
 	return client_connection->ConnectionId();
 }

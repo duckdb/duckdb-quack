@@ -7,3 +7,4 @@ EXT_FLAGS=-DCMAKE_CXX_STANDARD=17
 
 # Include the Makefile from extension-ci-tools
 include extension-ci-tools/makefiles/duckdb_extension.Makefile
+include extension-ci-tools/makefiles/vcpkg.Makefile

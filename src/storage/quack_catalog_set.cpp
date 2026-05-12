@@ -35,6 +35,11 @@ void QuackCatalogSet::DropEntry(const string &entry_name) {
 	entries.erase(entry_name);
 }
 
+void QuackCatalogSet::Clear() {
+	lock_guard<mutex> l(entry_lock);
+	entries.clear();
+}
+
 optional_ptr<CatalogEntry> QuackCatalogSet::CreateEntry(unique_ptr<CatalogEntry> entry, OnCreateConflict on_conflict) {
 	lock_guard<mutex> l(entry_lock);
 	auto &entry_name = entry->name;

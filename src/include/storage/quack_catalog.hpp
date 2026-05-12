@@ -60,6 +60,8 @@ public:
 
 	shared_ptr<QuackClientConnection> GetClientConnection();
 
+	void Refresh(ClientContext &context);
+
 private:
 	void DropSchema(ClientContext &context, DropInfo &info) override;
 

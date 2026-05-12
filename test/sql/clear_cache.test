@@ -1,0 +1,81 @@
+# name: test/sql/clear_cache.test
+# description: quack_clear_cache refreshes the cached catalog snapshot after server-side DDL via quack_query_by_name
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+statement ok con1
+call quack_serve('quack:localhost', token='asdf');
+
+statement ok con2
+create secret (type quack, token 'asdf')
+
+statement ok con2
+attach 'quack:localhost' as rpc
+
+statement ok con2
+call system.main.quack_query_by_name('rpc', 'CREATE TABLE t1(i INTEGER); INSERT INTO t1 VALUES (1),(2),(3);')
+
+statement error con2
+SELECT i FROM rpc.t1
+----
+Table with name t1 does not exist
+
+statement ok con2
+CALL quack_clear_cache()
+
+query I con2
+SELECT i FROM rpc.t1 ORDER BY i
+----
+1
+2
+3
+
+statement ok con2
+call system.main.quack_query_by_name('rpc', 'CREATE TABLE t2(s VARCHAR); INSERT INTO t2 VALUES (''a''),(''b'');')
+
+statement error con2
+SELECT s FROM rpc.t2
+----
+Table with name t2 does not exist
+
+statement ok con2
+CALL quack_clear_cache()
+
+query I con2
+SELECT s FROM rpc.t2 ORDER BY s
+----
+a
+b
+
+statement ok con2
+call system.main.quack_query_by_name('rpc', 'DROP TABLE t1;')
+
+query I con2
+SELECT s FROM rpc.t2 ORDER BY s
+----
+a
+b
+
+statement error con2
+SELECT i FROM rpc.t1
+----
+Invalid Input Error: Table with name t1 does not exist
+
+statement ok con2
+CALL quack_clear_cache()
+
+statement error con2
+SELECT i FROM rpc.t1
+----
+Catalog Error: Table with name t1 does not exist
+
+statement ok con2
+detach rpc;
+
+statement ok con1
+call quack_stop('quack:localhost');

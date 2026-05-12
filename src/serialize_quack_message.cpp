@@ -133,7 +133,8 @@ unique_ptr<PrepareResponseMessage> PrepareResponseMessage::Deserialize(Deseriali
 	auto needs_more_fetch = deserializer.ReadPropertyWithDefault<bool>(3, "needs_more_fetch");
 	auto results = deserializer.ReadPropertyWithDefault<vector<unique_ptr<DataChunkWrapper>>>(4, "results");
 	auto result_uuid = deserializer.ReadProperty<hugeint_t>(5, "result_uuid");
-	auto result = duckdb::unique_ptr<PrepareResponseMessage>(new PrepareResponseMessage(std::move(result_types), std::move(result_names), std::move(results), needs_more_fetch, result_uuid));
+	auto result = duckdb::unique_ptr<PrepareResponseMessage>(new PrepareResponseMessage(
+	    std::move(result_types), std::move(result_names), std::move(results), needs_more_fetch, result_uuid));
 	return result;
 }
 
