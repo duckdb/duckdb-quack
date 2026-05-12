@@ -29,11 +29,16 @@ struct QuackConnection {
 	unique_ptr<QueryResult> duckdb_query_result;
 	//! Monotonic counter assigned per FETCH batch — enables order-preserving parallel scans on
 	idx_t next_batch_index = 1;
+	//! Current result UUID
+	hugeint_t result_uuid;
 	string session_id;
 	string sql_query;
 };
 
 class QuackServer {
+public:
+	static constexpr const idx_t QUACK_VERSION = 1;
+
 public:
 	explicit QuackServer(ClientContext &context_p, const QuackUri &uri_p, const string &token_p);
 	virtual ~QuackServer();

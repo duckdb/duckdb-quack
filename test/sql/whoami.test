@@ -2,8 +2,6 @@
 # description: whoami() / quack_identify contract
 # group: [sql]
 
-mode skip
-
 require quack
 
 require json

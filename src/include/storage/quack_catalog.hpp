@@ -28,6 +28,7 @@ public:
 	string GetCatalogType() override {
 		return "quack";
 	}
+	static bool IsQuackScan(const string &name);
 	void Initialize(bool load_builtin) override;
 
 	optional_ptr<CatalogEntry> CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) override;

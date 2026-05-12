@@ -5,6 +5,9 @@
 
 #include "quack_message.hpp"
 
+#include "quack_server.hpp"
+#include "duckdb/main/database.hpp"
+
 namespace duckdb {
 
 QuackMessage::QuackMessage(MessageType type) : header(type, string()) {
@@ -88,7 +91,7 @@ const char *EnumUtil::ToChars<MessageType>(MessageType value) {
 void QuackMessage::ToMemoryStream(MemoryStream &write_stream) const {
 	write_stream.Rewind();
 	SerializationOptions options;
-	options.serialization_compatibility = SerializationCompatibility::FromIndex(10);
+	options.serialization_compatibility = SerializationCompatibility::FromIndex(7);
 	BinarySerializer serializer(write_stream, options);
 
 	// write the header
@@ -142,6 +145,17 @@ unique_ptr<QuackMessage> QuackMessage::DeserializeMessage(BinaryDeserializer &de
 	result->SetHeader(std::move(header));
 	deserializer.End();
 	return result;
+}
+
+ConnectionRequestMessage::ConnectionRequestMessage(const string &auth_string_p)
+    : QuackMessage(TYPE), auth_string(auth_string_p), client_duckdb_version(DuckDB::LibraryVersion()),
+      client_platform(DuckDB::Platform()), min_supported_quack_version(QuackServer::QUACK_VERSION),
+      max_supported_quack_version(QuackServer::QUACK_VERSION) {
+}
+
+ConnectionResponseMessage::ConnectionResponseMessage(string connection_id_p)
+    : QuackMessage(TYPE, std::move(connection_id_p)), server_duckdb_version(DuckDB::LibraryVersion()),
+      server_platform(DuckDB::Platform()), quack_version(QuackServer::QUACK_VERSION) {
 }
 
 unique_ptr<QuackMessage> QuackMessage::FromMemoryStream(MemoryStream &read_stream) {

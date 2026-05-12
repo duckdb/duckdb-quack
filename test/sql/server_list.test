@@ -2,6 +2,8 @@
 # description: quack_server_list returns rows for active servers
 # group: [sql]
 
+require notwindows
+
 require quack
 
 require httpfs

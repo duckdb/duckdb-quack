@@ -2,6 +2,7 @@
 
 #include "duckdb/common/serializer/binary_serializer.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
+#include "duckdb/common/types/uuid.hpp"
 
 namespace duckdb {
 
@@ -142,9 +143,10 @@ public:
 	static constexpr MessageType TYPE = MessageType::PREPARE_RESPONSE;
 
 	PrepareResponseMessage(const vector<LogicalType> &types_p, const vector<string> &names_p,
-	                       vector<unique_ptr<DataChunkWrapper>> results_p, bool needs_more_fetch_p)
+	                       vector<unique_ptr<DataChunkWrapper>> results_p, bool needs_more_fetch_p,
+	                       hugeint_t result_uuid)
 	    : QuackMessage(TYPE), result_types(types_p), result_names(names_p), results(std::move(results_p)),
-	      needs_more_fetch(needs_more_fetch_p) {
+	      needs_more_fetch(needs_more_fetch_p), result_uuid(result_uuid) {
 	}
 
 public:
@@ -163,6 +165,9 @@ public:
 	bool NeedsMoreFetch() const {
 		return needs_more_fetch;
 	}
+	hugeint_t ResultUUID() const {
+		return result_uuid;
+	}
 
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<PrepareResponseMessage> Deserialize(Deserializer &deserializer);
@@ -176,6 +181,7 @@ private:
 	vector<string> result_names;
 	vector<unique_ptr<DataChunkWrapper>> results;
 	bool needs_more_fetch = false;
+	hugeint_t result_uuid;
 };
 
 // TODO this is where auth goes
@@ -183,12 +189,23 @@ class ConnectionRequestMessage : public QuackMessage {
 public:
 	static constexpr MessageType TYPE = MessageType::CONNECTION_REQUEST;
 
-	explicit ConnectionRequestMessage(const string &auth_string_p) : QuackMessage(TYPE), auth_string(auth_string_p) {
-	}
+	explicit ConnectionRequestMessage(const string &auth_string_p);
 
 public:
 	const string &AuthString() const {
 		return auth_string;
+	}
+	const string &ClientVersion() const {
+		return client_duckdb_version;
+	}
+	const string &ClientPlatform() const {
+		return client_platform;
+	}
+	const idx_t MinimumSupportedQuackVersion() const {
+		return min_supported_quack_version;
+	}
+	const idx_t MaximumSupportedQuackVersion() const {
+		return max_supported_quack_version;
 	}
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<ConnectionRequestMessage> Deserialize(Deserializer &deserializer);
@@ -199,29 +216,48 @@ protected:
 
 private:
 	string auth_string;
+	string client_duckdb_version;
+	string client_platform;
+	idx_t min_supported_quack_version;
+	idx_t max_supported_quack_version;
 };
 
 class ConnectionResponseMessage : public QuackMessage {
 public:
 	static constexpr MessageType TYPE = MessageType::CONNECTION_RESPONSE;
 
-	explicit ConnectionResponseMessage(string connection_id_p) : QuackMessage(TYPE, std::move(connection_id_p)) {
-	}
+	explicit ConnectionResponseMessage(string connection_id_p);
 
 protected:
 	ConnectionResponseMessage() : QuackMessage(TYPE) {
 	}
 
 public:
+	const string &ServerVersion() const {
+		return server_duckdb_version;
+	}
+	const string &ServerPlatform() const {
+		return server_platform;
+	}
+	idx_t QuackVersion() const {
+		return quack_version;
+	}
+
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<ConnectionResponseMessage> Deserialize(Deserializer &deserializer);
+
+private:
+	string server_duckdb_version;
+	string server_platform;
+	idx_t quack_version;
 };
 
 class FetchRequestMessage : public QuackMessage {
 public:
 	static constexpr MessageType TYPE = MessageType::FETCH_REQUEST;
 
-	explicit FetchRequestMessage(string connection_id_p) : QuackMessage(TYPE, std::move(connection_id_p)) {
+	explicit FetchRequestMessage(string connection_id_p, hugeint_t uuid)
+	    : QuackMessage(TYPE, std::move(connection_id_p)), uuid(uuid) {
 	}
 
 protected:
@@ -231,6 +267,8 @@ protected:
 public:
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<FetchRequestMessage> Deserialize(Deserializer &deserializer);
+
+	hugeint_t uuid;
 };
 
 class FetchResponseMessage : public QuackMessage {

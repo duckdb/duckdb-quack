@@ -1,0 +1,43 @@
+# name: test/sql/attach_fetch_large.test_slow
+# description: test large fetch using attach
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+foreach server 'quack:localhost'
+
+statement ok con1
+call quack_serve({server}, token='asdf');
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+statement ok
+create table rpc.big_tbl as from range(10_000_000) t(i);
+
+query II
+select count(*), sum(i) from rpc.big_tbl
+----
+10000000	49999995000000
+
+query II
+select count(*), sum(i) from quack_query_by_name('rpc', 'from big_tbl')
+----
+10000000	49999995000000
+
+statement ok con2
+detach rpc;
+
+query II
+select count(*), sum(i) from quack_query({server}, 'from big_tbl', token='asdf')
+----
+10000000	49999995000000
+
+statement ok con1
+call quack_stop({server});
+
+endloop

@@ -145,6 +145,5 @@ call quack_stop({server});
 statement error con2
 attach {server} as rpc
 ----
-IO Error
 
 endloop

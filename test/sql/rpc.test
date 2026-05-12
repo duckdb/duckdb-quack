@@ -112,10 +112,6 @@ from quack_query(NULL, '')
 ----
 cannot be NULL
 
-statement error con1
-call quack_serve()
-----
-Binder Error
 
 statement error con1
 call quack_serve('')
@@ -140,6 +136,18 @@ statement error con2
 from quack_query({server}, 'select 42')
 ----
 IO Error
+
+# we can call quack_serve() without parameters and connect using just quack:localhost
+statement ok
+SET VARIABLE token=(FROM quack_serve() SELECT auth_token);
+
+query I
+FROM quack_query('quack:localhost', 'select 42', token=getvariable('token'))
+----
+42
+
+statement ok
+call quack_stop('quack:localhost')
 
 endloop
 

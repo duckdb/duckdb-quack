@@ -49,6 +49,11 @@
   {
     "class": "FetchRequestMessage",
     "members": [
+      {
+        "id": 1,
+        "name": "uuid",
+        "type": "hugeint_t"
+      }
     ]
   },
   {
@@ -81,9 +86,14 @@
         "id": 4,
         "name": "results",
         "type": "vector<unique_ptr<DataChunkWrapper>>"
+      },
+      {
+        "id": 5,
+        "name": "result_uuid",
+        "type": "hugeint_t"
       }
     ],
-    "constructor": ["result_types", "result_names",  "results", "needs_more_fetch"]
+    "constructor": ["result_types", "result_names",  "results", "needs_more_fetch", "result_uuid"]
   },
   {
     "class": "AppendRequestMessage",
@@ -127,12 +137,47 @@
         "id": 1,
         "name": "auth_string",
         "type": "string"
+      },
+      {
+        "id": 2,
+        "name": "client_duckdb_version",
+        "type": "string"
+      },
+      {
+        "id": 3,
+        "name": "client_platform",
+        "type": "string"
+      },
+      {
+        "id": 4,
+        "name": "min_supported_quack_version",
+        "type": "idx_t"
+      },
+      {
+        "id": 5,
+        "name": "max_supported_quack_version",
+        "type": "idx_t"
       }
     ]
   },
   {
     "class": "ConnectionResponseMessage",
     "members": [
+      {
+        "id": 1,
+        "name": "server_duckdb_version",
+        "type": "string"
+      },
+      {
+        "id": 2,
+        "name": "server_platform",
+        "type": "string"
+      },
+      {
+        "id": 3,
+        "name": "quack_version",
+        "type": "idx_t"
+      }
     ]
   }
 ]

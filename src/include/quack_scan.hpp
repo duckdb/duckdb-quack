@@ -28,6 +28,7 @@ struct QuackScanBindData : FunctionData {
 	vector<unique_ptr<DataChunkWrapper>> results;
 	shared_ptr<QuackClientConnection> client_connection;
 	bool needs_more_fetch = true;
+	hugeint_t result_uuid;
 };
 
 class TableFunction;

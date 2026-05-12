@@ -266,6 +266,9 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 	switch (received_message.Type()) {
 	case MessageType::CONNECTION_REQUEST: {
 		auto &connection_request_message = received_message.Cast<ConnectionRequestMessage>();
+		if (connection_request_message.MinimumSupportedQuackVersion() > 1ULL) {
+			return make_uniq<ErrorResponse>("Unsupported Quack version - server only supports version 1 of quack");
+		}
 		string session_id = GenerateSessionId();
 		if (!EvaluateAuthQuery(
 		        db, StringUtil::Format("SELECT %s(?, ?, ?)", GetSettingString(db, "quack_authentication_function")),
@@ -310,6 +313,8 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		// Fresh query → restart batch numbering. Clients' local state is re-initialized on
 		// a new PREPARE, so indices start at 0 again.
 		connection.next_batch_index = 1;
+		// generate a random UUID to uniquely identify the result
+		connection.result_uuid = UUID::GenerateRandomUUID();
 
 		Value max_chunks_val;
 		DBConfig::GetConfig(db).TryGetCurrentSetting("quack_fetch_batch_chunks", max_chunks_val);
@@ -327,15 +332,18 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			return make_uniq<ErrorResponse>(std::move(error_message));
 		}
 		auto needs_more_fetch = results.size() == max_chunks_per_batch;
-		return make_uniq<PrepareResponseMessage>(types, names,
-
-		                                         std::move(results), needs_more_fetch);
+		return make_uniq<PrepareResponseMessage>(types, names, std::move(results), needs_more_fetch,
+		                                         connection.result_uuid);
 	}
 
 	case MessageType::FETCH_REQUEST: {
+		auto &fetch_request_message = received_message.Cast<FetchRequestMessage>();
 		auto &connection = *connection_p;
 		std::unique_lock<std::mutex> lock(connection.lock);
 
+		if (connection.result_uuid != fetch_request_message.uuid) {
+			return make_uniq<ErrorResponse>("Result has been closed");
+		}
 		if (!connection.duckdb_query_result) {
 			return make_uniq<FetchResponseMessage>();
 		}
