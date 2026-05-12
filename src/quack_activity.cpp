@@ -7,6 +7,21 @@
 
 namespace duckdb {
 
+static const char *QueryStateToString(QuackQueryState state) {
+	switch (state) {
+	case QuackQueryState::IDLE:
+		return "idle";
+	case QuackQueryState::ACTIVE:
+		return "active";
+	case QuackQueryState::FINISHED:
+		return "finished";
+	case QuackQueryState::CANCELLED:
+		return "cancelled";
+	default:
+		return "unknown";
+	}
+}
+
 struct QuacktivityData : FunctionData {
 	bool finished = false;
 
@@ -22,8 +37,8 @@ struct QuacktivityData : FunctionData {
 
 static unique_ptr<FunctionData> QuacktivityBind(ClientContext &, TableFunctionBindInput &,
                                                 vector<LogicalType> &return_types, vector<string> &names) {
-	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR};
-	names = {"connection_id", "query"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::TIMESTAMP};
+	names = {"connection_id", "query", "state", "query_started_at"};
 	return make_uniq<QuacktivityData>();
 }
 
@@ -37,6 +52,12 @@ static void QuacktivityScan(ClientContext &context, TableFunctionInput &input, D
 	for (auto &snap : snapshots) {
 		output.SetValue(0, count, snap.session_id);
 		output.SetValue(1, count, snap.sql_query);
+		output.SetValue(2, count, Value(QueryStateToString(snap.query_state)));
+		if (snap.query_state == QuackQueryState::IDLE) {
+			output.SetValue(3, count, Value(LogicalType::TIMESTAMP));
+		} else {
+			output.SetValue(3, count, Value::TIMESTAMP(snap.query_started_at));
+		}
 		count++;
 	}
 	output.SetCardinality(count);

@@ -48,8 +48,8 @@ QuackTableSet::QuackTableSet(ClientContext &context, QuackSchemaCatalogEntry &pa
 			} else {
 				auto view_name = row.GetValue(1).GetValue<string>();
 				// bind a remote procedure call to the view on the server side
-				// we don't actually care what the view contains server-side, we just treat it like an opaque object we can
-				// query
+				// we don't actually care what the view contains server-side, we just treat it like an opaque object we
+				// can query
 				CreateViewInfo info(schema, view_name);
 				info.sql = QuackViewCatalogEntry::CreateViewSQL(catalog.GetName(), schema.name, view_name);
 				info.query = CreateViewInfo::ParseSelect(info.sql);

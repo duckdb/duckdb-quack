@@ -20,6 +20,8 @@ class DatabaseInstance;
 class PreparedStatement;
 class EncryptionState;
 
+enum class QuackQueryState : uint8_t { IDLE, ACTIVE, FINISHED, CANCELLED };
+
 struct QuackConnection {
 	explicit QuackConnection(string session_id_p);
 	~QuackConnection();
@@ -33,6 +35,8 @@ struct QuackConnection {
 	hugeint_t result_uuid;
 	string session_id;
 	string sql_query;
+	QuackQueryState query_state = QuackQueryState::IDLE;
+	timestamp_t query_started_at {0};
 };
 
 class QuackServer {
@@ -70,6 +74,8 @@ public:
 	struct ConnectionSnapshot {
 		string session_id;
 		string sql_query;
+		QuackQueryState query_state = QuackQueryState::IDLE;
+		timestamp_t query_started_at {0};
 	};
 	vector<ConnectionSnapshot> GetActiveConnectionSnap();
 

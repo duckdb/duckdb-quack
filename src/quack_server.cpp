@@ -48,7 +48,12 @@ vector<QuackServer::ConnectionSnapshot> QuackServer::GetActiveConnectionSnap() {
 	vector<ConnectionSnapshot> result;
 	std::lock_guard<std::mutex> lock(active_connections_mutex);
 	for (auto &[id, conn] : active_connections) {
-		result.push_back({conn->session_id, conn->sql_query});
+		ConnectionSnapshot snap;
+		snap.session_id = conn->session_id;
+		snap.sql_query = conn->sql_query;
+		snap.query_state = conn->query_state;
+		snap.query_started_at = conn->query_started_at;
+		result.push_back(std::move(snap));
 	}
 	return result;
 }
@@ -297,18 +302,24 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 
 		std::unique_lock<std::mutex> lock(connection.lock);
 		connection.duckdb_query_result.reset();
+		connection.sql_query = prepare_request_message.Query();
+		connection.query_state = QuackQueryState::ACTIVE;
+		connection.query_started_at = Timestamp::GetCurrentTimestamp();
 
 		{
 			auto query_result = connection.duckdb_connection->SendQuery(prepare_request_message.Query());
 			if (query_result->HasError()) {
+				connection.query_state = QuackQueryState::CANCELLED;
+				connection.sql_query = "";
 				return make_uniq<ErrorResponse>(query_result->GetErrorObject());
 			}
 			if (query_result->names.empty()) {
+				connection.query_state = QuackQueryState::CANCELLED;
+				connection.sql_query = "";
 				return make_uniq<ErrorResponse>("Query did not return any columns");
 			}
 
 			connection.duckdb_query_result = std::move(query_result);
-			connection.sql_query = prepare_request_message.Query();
 		}
 		// Fresh query → restart batch numbering. Clients' local state is re-initialized on
 		// a new PREPARE, so indices start at 0 again.
@@ -332,6 +343,9 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			return make_uniq<ErrorResponse>(std::move(error_message));
 		}
 		auto needs_more_fetch = results.size() == max_chunks_per_batch;
+		if (!needs_more_fetch) {
+			connection.query_state = QuackQueryState::FINISHED;
+		}
 		return make_uniq<PrepareResponseMessage>(types, names, std::move(results), needs_more_fetch,
 		                                         connection.result_uuid);
 	}
@@ -363,6 +377,9 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			return make_uniq<ErrorResponse>(std::move(error_message));
 		}
 		auto assigned_batch_index = connection.next_batch_index++;
+		if (results.size() < max_chunks_per_batch) {
+			connection.query_state = QuackQueryState::FINISHED;
+		}
 		return make_uniq<FetchResponseMessage>(std::move(results), optional_idx(assigned_batch_index));
 	}
 
