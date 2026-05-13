@@ -246,6 +246,39 @@ static string BuildPushdownQuery(ClientContext &context, const QuackScanBindData
 		}
 	}
 
+	// --- ORDER BY pushdown (only when a LogicalTopN was rewritten) -----------
+	if (!bind_data.pushed_order_by.empty()) {
+		query += " ORDER BY ";
+		for (idx_t i = 0; i < bind_data.pushed_order_by.size(); i++) {
+			auto &ob = bind_data.pushed_order_by[i];
+			if (i > 0) {
+				query += ", ";
+			}
+			query += "#" + to_string(ob.column_id + 1);
+			query += ob.order_type == OrderType::DESCENDING ? " DESC" : " ASC";
+			switch (ob.null_order) {
+			case OrderByNullType::NULLS_FIRST:
+				query += " NULLS FIRST";
+				break;
+			case OrderByNullType::NULLS_LAST:
+				query += " NULLS LAST";
+				break;
+			default:
+				// ORDER_DEFAULT: leave to remote server's default; matches how DuckDB resolved
+				// the order on the client side.
+				break;
+			}
+		}
+	}
+
+	// --- LIMIT / OFFSET pushdown --------------------------------------------
+	if (bind_data.pushed_limit.IsValid()) {
+		query += " LIMIT " + to_string(bind_data.pushed_limit.GetIndex());
+		if (bind_data.pushed_offset.IsValid() && bind_data.pushed_offset.GetIndex() > 0) {
+			query += " OFFSET " + to_string(bind_data.pushed_offset.GetIndex());
+		}
+	}
+
 	return query;
 }
 

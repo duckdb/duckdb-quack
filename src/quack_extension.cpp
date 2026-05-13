@@ -162,6 +162,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "Push WHERE filters into the SQL sent to remote quack servers (default true)",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
 
+	// Push LIMIT / ORDER BY+LIMIT (TopN) into the rewritten scan SQL. Default on; the
+	// LogicalLimit / LogicalTopN node stays in the plan above the scan as a safety net.
+	config.AddExtensionOption("quack_pushdown_limit",
+	                          "Push LIMIT / TopN into the SQL sent to remote quack servers (default true)",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
+
 	// Process-wide fallback anchor for whoami().uptime when whoami_started_at isn't set.
 	// Stored as BIGINT epoch-microseconds to stay TZ-invariant regardless of ICU state.
 	config.AddExtensionOption("quack_loaded_at_us", "Epoch microseconds at extension load", LogicalType::BIGINT,

@@ -2,8 +2,18 @@
 
 #include "quack_uri.hpp"
 #include "quack_client.hpp"
+#include "duckdb/common/enums/order_type.hpp"
+#include "duckdb/common/optional_idx.hpp"
 
 namespace duckdb {
+
+//! A single ORDER BY entry forwarded to the remote server, expressed in terms of the
+//! positional column index into the underlying remote table (`column_id`, 0-based).
+struct QuackPushedOrderBy {
+	idx_t column_id;
+	OrderType order_type;
+	OrderByNullType null_order;
+};
 
 struct QuackScanBindData : FunctionData {
 	bool Equals(const FunctionData &other_p) const override {
@@ -29,6 +39,13 @@ struct QuackScanBindData : FunctionData {
 	shared_ptr<QuackClientConnection> client_connection;
 	bool needs_more_fetch = true;
 	hugeint_t result_uuid;
+	//! LIMIT pushed down by the optimizer (M2). When set, the rewritten scan SQL appends
+	//! "LIMIT <pushed_limit> [OFFSET <pushed_offset>]". The corresponding LogicalLimit /
+	//! LogicalTopN node is left in the plan as a client-side safety net.
+	optional_idx pushed_limit;
+	optional_idx pushed_offset;
+	//! ORDER BY clauses pushed alongside a LogicalTopN. Empty for a plain LogicalLimit.
+	vector<QuackPushedOrderBy> pushed_order_by;
 };
 
 class TableFunction;

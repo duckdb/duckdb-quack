@@ -1,0 +1,97 @@
+# name: test/sql/limit_pushdown.test
+# description: LIMIT / TopN pushdown (M2) for attached quack catalog scans
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+statement ok con1
+create table test_data as
+select range i, range * 2 as doubled, 'name_' || range::varchar as name from range(10000);
+
+foreach server 'quack:localhost'
+
+statement ok con1
+call quack_serve({server}, token='asdf');
+
+statement ok con2
+create secret (type quack, token 'asdf')
+
+statement ok con2
+attach {server} as rpc
+
+# --- Plain LIMIT: pushed down; correct row count ---
+query I
+SELECT count(*) FROM (SELECT i FROM rpc.main.test_data LIMIT 5);
+----
+5
+
+# --- LIMIT + OFFSET: skips offset rows server-side ---
+query I
+SELECT count(*) FROM (SELECT i FROM rpc.main.test_data LIMIT 5 OFFSET 100);
+----
+5
+
+# Same as above: the offset values are real
+query I
+SELECT min(i) FROM (SELECT i FROM rpc.main.test_data LIMIT 5 OFFSET 100);
+----
+100
+
+# --- LIMIT combined with filter pushdown ---
+query I
+SELECT count(*) FROM (SELECT i FROM rpc.main.test_data WHERE doubled > 100 LIMIT 3);
+----
+3
+
+# --- TopN: ORDER BY DESC LIMIT pushed; result is deterministic ---
+query I
+SELECT i FROM rpc.main.test_data ORDER BY i DESC LIMIT 1;
+----
+9999
+
+query I
+SELECT count(*) FROM (SELECT i FROM rpc.main.test_data ORDER BY i DESC LIMIT 5);
+----
+5
+
+# --- TopN with two-column order ---
+query II
+SELECT i, doubled FROM rpc.main.test_data ORDER BY doubled DESC, i DESC LIMIT 1;
+----
+9999	19998
+
+# --- TopN whose ORDER BY uses an expression (i + doubled) is NOT pushable but
+#     must still produce correct results client-side ---
+query I
+SELECT i FROM rpc.main.test_data ORDER BY i + doubled DESC LIMIT 1;
+----
+9999
+
+# --- Toggle disable preserves correctness ---
+statement ok con2
+SET quack_pushdown_limit = false;
+
+query I
+SELECT count(*) FROM (SELECT i FROM rpc.main.test_data LIMIT 5);
+----
+5
+
+query I
+SELECT i FROM rpc.main.test_data ORDER BY i DESC LIMIT 1;
+----
+9999
+
+statement ok con2
+SET quack_pushdown_limit = true;
+
+statement ok con2
+detach rpc;
+
+statement ok con1
+call quack_stop({server});
+
+endloop
