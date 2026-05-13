@@ -1,0 +1,132 @@
+# name: test/sql/agg_pushdown.test
+# description: total aggregation pushdown (M3a-narrow) for attached quack catalog scans
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+statement ok con1
+create table t as
+select
+  range as i,
+  range * 2 as doubled,
+  case when range % 7 = 0 then NULL else range end as maybe_null,
+  'name_' || range::varchar as name
+from range(1000);
+
+foreach server 'quack:localhost'
+
+statement ok con1
+call quack_serve({server}, token='asdf');
+
+statement ok con2
+create secret (type quack, token 'asdf')
+
+statement ok con2
+attach {server} as rpc
+
+# --- Happy path: count(*), sum, min, max, count(col) ---
+query I
+SELECT count(*) FROM rpc.main.t;
+----
+1000
+
+query I
+SELECT sum(i) FROM rpc.main.t;
+----
+499500
+
+query I
+SELECT min(i) FROM rpc.main.t;
+----
+0
+
+query I
+SELECT max(doubled) FROM rpc.main.t;
+----
+1998
+
+# count(col) excludes NULLs
+query I
+SELECT count(maybe_null) FROM rpc.main.t;
+----
+857
+
+# --- Multiple aggregates in one SELECT (single agg node) ---
+query IIII
+SELECT count(*), sum(i), min(i), max(i) FROM rpc.main.t;
+----
+1000	499500	0	999
+
+# --- Aggregation combined with filter pushdown (M1) ---
+query II
+SELECT count(*), sum(i) FROM rpc.main.t WHERE i > 500;
+----
+499	374250
+
+# --- avg is NOT in the pushable whitelist; falls back to client-side, still correct ---
+query R
+SELECT avg(i)::INT FROM rpc.main.t;
+----
+500
+
+# --- count(distinct col) is NOT pushable (DISTINCT modifier); falls back, correct ---
+query I
+SELECT count(distinct i) FROM rpc.main.t;
+----
+1000
+
+# --- A GROUP BY query is NOT pushable in M3a-narrow; falls back, correct result ---
+query II
+SELECT i % 4 AS bucket, count(*) FROM rpc.main.t GROUP BY bucket ORDER BY bucket;
+----
+0	250
+1	250
+2	250
+3	250
+
+# --- String column max ---
+query I
+SELECT max(name) FROM rpc.main.t;
+----
+name_999
+
+# --- count(*) over the empty result of a pushed filter still returns 0 ---
+query I
+SELECT count(*) FROM rpc.main.t WHERE i > 99999;
+----
+0
+
+# sum over empty filtered result is NULL
+query I
+SELECT sum(i) FROM rpc.main.t WHERE i > 99999;
+----
+NULL
+
+# --- Toggle: with pushdown disabled, results are unchanged ---
+statement ok con2
+SET quack_pushdown_aggregates = false;
+
+query I
+SELECT count(*) FROM rpc.main.t;
+----
+1000
+
+query I
+SELECT sum(i) FROM rpc.main.t WHERE i > 500;
+----
+374250
+
+statement ok con2
+SET quack_pushdown_aggregates = true;
+
+statement ok con2
+detach rpc;
+
+statement ok con1
+call quack_stop({server});
+
+endloop

@@ -168,6 +168,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "Push LIMIT / TopN into the SQL sent to remote quack servers (default true)",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
 
+	// Push total (no GROUP BY) aggregations into the rewritten scan SQL. Default on;
+	// covers count(*), count(col), sum(col), min(col), max(col) over bare column refs.
+	config.AddExtensionOption("quack_pushdown_aggregates",
+	                          "Push total aggregations into the SQL sent to remote quack servers (default true)",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
+
 	// Process-wide fallback anchor for whoami().uptime when whoami_started_at isn't set.
 	// Stored as BIGINT epoch-microseconds to stay TZ-invariant regardless of ICU state.
 	config.AddExtensionOption("quack_loaded_at_us", "Epoch microseconds at extension load", LogicalType::BIGINT,

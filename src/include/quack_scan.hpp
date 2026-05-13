@@ -51,6 +51,18 @@ struct QuackScanBindData : FunctionData {
 	//! to the optimizer via the table function's `cardinality` callback so cross-server
 	//! join orderings make sense. Stale until the catalog is re-attached / refreshed.
 	optional_idx estimated_cardinality;
+	//! Aggregation pushdown (M3a-narrow): when non-empty, the rewritten scan SQL emits
+	//! exactly these SELECT-list expressions instead of the per-row projection. Used for
+	//! total (no-GROUP-BY) aggregations like `SELECT count(*), sum(x) FROM t`. The
+	//! surrounding LogicalAggregate has been removed by the optimizer; the LogicalGet
+	//! now produces one row per execution with these N columns as output.
+	vector<string> pushed_aggregates;
+	//! WHERE clause (without the leading "WHERE") captured at agg-pushdown time. Filters
+	//! that DuckDB had folded into LogicalGet.table_filters need to be moved here because
+	//! the agg rewrite reshapes column_ids and breaks the filters' positional references.
+	//! Empty when no aggregate is pushed; ignored in that case (the per-scan path consults
+	//! input.filters directly).
+	string pushed_where_sql;
 };
 
 class TableFunction;

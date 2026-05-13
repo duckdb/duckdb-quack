@@ -196,26 +196,66 @@ static string BuildPushdownQuery(ClientContext &context, const QuackScanBindData
                                  const TableFunctionInitInput &input) {
 	string query;
 
-	// --- Projection pushdown -------------------------------------------------
-	// Emit a positional ref per entry in column_indexes. With filter_prune off (current
-	// default) column_indexes is exactly the set of columns the scan must produce, so
-	// this is also the final SELECT-list shape DuckDB expects.
-	if (!input.column_indexes.empty()) {
-		for (auto &col_id : input.column_indexes) {
-			if (!query.empty()) {
-				query += ", ";
+	if (!bind_data.pushed_aggregates.empty()) {
+		// --- Aggregation pushdown (M3a-narrow) -------------------------------
+		// The SELECT list is fully determined by the rewritten aggregate expressions.
+		// Honor projection pushdown by emitting only the subset of aggregate outputs
+		// DuckDB still consumes; column_indexes references the post-rewrite columns,
+		// not the underlying table.
+		bool any = false;
+		if (!input.column_indexes.empty()) {
+			for (auto &col_id : input.column_indexes) {
+				if (col_id.IsVirtualColumn()) {
+					continue;
+				}
+				auto idx = col_id.GetPrimaryIndex();
+				if (idx >= bind_data.pushed_aggregates.size()) {
+					continue;
+				}
+				if (any) {
+					query += ", ";
+				}
+				query += bind_data.pushed_aggregates[idx];
+				any = true;
 			}
-			query += PositionalColumnRef(col_id);
 		}
-		query = "SELECT " + query + " ";
+		if (!any) {
+			// Defensive: emit all of them.
+			for (idx_t i = 0; i < bind_data.pushed_aggregates.size(); i++) {
+				if (i > 0) {
+					query += ", ";
+				}
+				query += bind_data.pushed_aggregates[i];
+			}
+		}
+		query = "SELECT " + query + " FROM " + StringUtil::Format("%s", SQLIdentifier(bind_data.table_name));
+		if (!bind_data.pushed_where_sql.empty()) {
+			query += " WHERE " + bind_data.pushed_where_sql;
+		}
+		return query;
+	} else {
+		// --- Projection pushdown ---------------------------------------------
+		// Emit a positional ref per entry in column_indexes. With filter_prune off
+		// (current default) column_indexes is exactly the set of columns the scan
+		// must produce, so this is also the final SELECT-list shape DuckDB expects.
+		if (!input.column_indexes.empty()) {
+			for (auto &col_id : input.column_indexes) {
+				if (!query.empty()) {
+					query += ", ";
+				}
+				query += PositionalColumnRef(col_id);
+			}
+			query = "SELECT " + query + " ";
+		}
+		query += StringUtil::Format("FROM %s", SQLIdentifier(bind_data.table_name));
 	}
-	query += StringUtil::Format("FROM %s", SQLIdentifier(bind_data.table_name));
 
 	// --- Filter pushdown -----------------------------------------------------
-	// For each filter that targets a column referenced by column_indexes[i] and that we know
-	// how to translate to SQL, emit `<positional-ref> <op> ...` into a single AND-joined WHERE.
-	// Unpushable filters are silently dropped here and remain in the DuckDB plan above the
-	// scan, so correctness is preserved as long as the server respects the pushed predicate.
+	// At scan-init / runtime, TableFunctionInitInput.filters keys have already been
+	// remapped by DuckDB's physical-plan generation (CreateTableFilterSet in
+	// plan_get.cpp:17-35) from absolute table column indices to *positions in
+	// column_ids/column_indexes*. So look up the underlying primary index here via
+	// input.column_indexes[key].GetPrimaryIndex() before emitting a positional ref.
 	if (input.filters && IsFilterPushdownEnabled(context)) {
 		string where_clause;
 		for (auto &entry : input.filters->filters) {
