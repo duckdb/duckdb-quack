@@ -10,6 +10,7 @@
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/common/optional_idx.hpp"
 
 namespace duckdb {
 class QuackCatalog;
@@ -35,6 +36,10 @@ public:
 	unique_ptr<BaseStatistics> GetStatistics(ClientContext &context, column_t column_id) override;
 	TableFunction GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) override;
 	TableStorageInfo GetStorageInfo(ClientContext &context) override;
+
+	//! Best-effort row count piggybacked from the remote server's duckdb_tables().estimated_size
+	//! at catalog-load time. Optional: unset for tables whose remote estimate was NULL.
+	optional_idx estimated_cardinality;
 };
 
 } // namespace duckdb

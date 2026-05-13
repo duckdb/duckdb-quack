@@ -414,6 +414,20 @@ unique_ptr<FunctionData> QuackScanDeserialize(Deserializer &deserializer, TableF
 	throw NotImplementedException("Quack scans cannot be deserialized (yet?)");
 }
 
+// Surface the piggybacked remote `duckdb_tables.estimated_size` to the DuckDB optimizer
+// (M4). Returns nullptr when the remote estimate was NULL — yielding the same behavior as
+// before: no statistics, optimizer falls back to its defaults.
+static unique_ptr<NodeStatistics> QuackScanCardinality(ClientContext &, const FunctionData *bind_data_p) {
+	if (!bind_data_p) {
+		return nullptr;
+	}
+	auto &bind_data = bind_data_p->Cast<QuackScanBindData>();
+	if (!bind_data.estimated_cardinality.IsValid()) {
+		return nullptr;
+	}
+	return make_uniq<NodeStatistics>(bind_data.estimated_cardinality.GetIndex());
+}
+
 TableFunction QuackScanFunction::GetFunction() {
 	auto fun = TableFunction("quack_query", {LogicalType::VARCHAR, LogicalType::VARCHAR}, QuackScan, QuackScanBind,
 	                         QuackScanInitGlobal, QuackScanInitLocal);
@@ -431,6 +445,7 @@ TableFunction QuackScanFunction::GetFunction() {
 	fun.to_string = QuackScanToString;
 	fun.serialize = QuackScanSerialize;
 	fun.deserialize = QuackScanDeserialize;
+	fun.cardinality = QuackScanCardinality;
 	return fun;
 }
 
@@ -443,6 +458,7 @@ TableFunction QuackScanByNameFunction::GetFunction() {
 	fun.to_string = QuackScanToString;
 	fun.serialize = QuackScanSerialize;
 	fun.deserialize = QuackScanDeserialize;
+	fun.cardinality = QuackScanCardinality;
 	return fun;
 }
 

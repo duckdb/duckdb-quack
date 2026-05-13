@@ -1,0 +1,64 @@
+# name: test/sql/statistics.test
+# description: cardinality piggybacked from remote duckdb_tables().estimated_size (M4)
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+# Two tables with very different sizes; estimated_size will reflect the inserts.
+statement ok con1
+create table small as select range as i from range(10);
+
+statement ok con1
+create table big as select range as i from range(100000);
+
+# Server-side ANALYZE so that duckdb_tables().estimated_size is up-to-date for both.
+statement ok con1
+analyze;
+
+foreach server 'quack:localhost'
+
+statement ok con1
+call quack_serve({server}, token='asdf');
+
+statement ok con2
+create secret (type quack, token 'asdf')
+
+statement ok con2
+attach {server} as rpc
+
+# The optimizer surfaces the estimated cardinality in EXPLAIN as a "~N rows" tag
+# under the scan node. Big scan should show ~100,000 rows.
+query II
+EXPLAIN SELECT count(*) FROM rpc.main.big;
+----
+physical_plan	<REGEX>:.*100,000 rows.*
+
+query II
+EXPLAIN SELECT count(*) FROM rpc.main.small;
+----
+physical_plan	<REGEX>:.*10 rows.*
+
+# Cross-engine join (local small ⨝ remote big): with stats the optimizer picks
+# the smaller side as the hash-table build. Correctness check; plan shape
+# regression is implicit in the cardinality regex above.
+statement ok con2
+create table local_small as select range as i from range(5);
+
+query I
+select count(*)
+from rpc.main.big b
+join local_small s on b.i = s.i;
+----
+5
+
+statement ok con2
+detach rpc;
+
+statement ok con1
+call quack_stop({server});
+
+endloop

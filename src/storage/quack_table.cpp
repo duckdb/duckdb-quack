@@ -43,6 +43,15 @@ QuackTableSet::QuackTableSet(ClientContext &context, QuackSchemaCatalogEntry &pa
 			auto binder = Binder::CreateBinder(context);
 			auto bound_info = binder->BindCreateTableInfo(std::move(info), schema);
 			auto table = make_uniq<QuackTableCatalogEntry>(catalog, parent, bound_info->Base());
+			// Piggyback the remote `duckdb_tables().estimated_size` for cardinality (M4).
+			// Stored on the catalog entry; copied onto bind_data each time the scan is built.
+			auto est = row.GetValue(3);
+			if (!est.IsNull()) {
+				auto v = est.GetValue<int64_t>();
+				if (v >= 0) {
+					table->estimated_cardinality = static_cast<idx_t>(v);
+				}
+			}
 			entry = std::move(table);
 		} else {
 			auto view_name = row.GetValue(1).GetValue<string>();
@@ -66,11 +75,13 @@ QuackTableSet::QuackTableSet(QuackSchemaCatalogEntry &parent)
 }
 
 string QuackTableSet::GetLoadQuery() {
+	// 4th column carries duckdb_tables().estimated_size for tables (NULL for views).
+	// Used as a best-effort cardinality estimate (M4); see QuackScanFunction::cardinality.
 	return R"(
-SELECT schema_name, sql, 'table'
+SELECT schema_name, sql, 'table', estimated_size
 FROM duckdb_tables()
 UNION ALL
-SELECT schema_name, view_name, 'view'
+SELECT schema_name, view_name, 'view', NULL
 FROM duckdb_views()
 	)";
 }
@@ -80,6 +91,7 @@ TableFunction QuackTableCatalogEntry::GetScanFunction(ClientContext &context, un
 	auto bind_data = make_uniq<QuackScanBindData>();
 	bind_data->client_connection = quack_catalog.GetClientConnection();
 	bind_data->table_name = name;
+	bind_data->estimated_cardinality = estimated_cardinality;
 	for (auto &col : GetColumns().Physical()) {
 		bind_data->column_names.push_back(col.Name());
 		bind_data->column_types.push_back(col.Type());

@@ -46,6 +46,11 @@ struct QuackScanBindData : FunctionData {
 	optional_idx pushed_offset;
 	//! ORDER BY clauses pushed alongside a LogicalTopN. Empty for a plain LogicalLimit.
 	vector<QuackPushedOrderBy> pushed_order_by;
+	//! Best-effort row count for the underlying remote table (M4). Sourced from the
+	//! remote `duckdb_tables().estimated_size` at catalog-load time. When set, surfaced
+	//! to the optimizer via the table function's `cardinality` callback so cross-server
+	//! join orderings make sense. Stale until the catalog is re-attached / refreshed.
+	optional_idx estimated_cardinality;
 };
 
 class TableFunction;
