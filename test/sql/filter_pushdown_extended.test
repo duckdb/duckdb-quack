@@ -1,0 +1,104 @@
+# name: test/sql/filter_pushdown_extended.test
+# description: extended filter pushdown coverage (M1) — NULL filters, IN, OR, string literals
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+# Deterministic, easy-to-count dataset:
+#   - 100 rows with i = 0..99 and `name = 'name_<i>'`
+#   - every 10th row has i = NULL ⇒ 10 NULL rows, 90 non-NULL rows
+#   - bucket = i % 4 (when not NULL)
+statement ok con1
+create table edge as
+select
+  case when range % 10 = 0 then NULL else range end as i,
+  'name_' || range::varchar as name,
+  range % 4 as bucket
+from range(100);
+
+foreach server 'quack:localhost'
+
+statement ok con1
+call quack_serve({server}, token='asdf');
+
+statement ok con2
+create secret (type quack, token 'asdf')
+
+statement ok con2
+attach {server} as rpc
+
+# --- IS NULL / IS NOT NULL ---
+query I
+SELECT count(*) FROM rpc.main.edge WHERE i IS NULL;
+----
+10
+
+query I
+SELECT count(*) FROM rpc.main.edge WHERE i IS NOT NULL;
+----
+90
+
+# --- IN list: bucket in (0, 2) selects half the rows = 50 ---
+query I
+SELECT count(*) FROM rpc.main.edge WHERE bucket IN (0, 2);
+----
+50
+
+# --- String literal with embedded single quote works (escape correctness) ---
+statement ok con1
+insert into edge values (NULL, 'O''Brien', 0);
+
+query I
+SELECT count(*) FROM rpc.main.edge WHERE name = 'O''Brien';
+----
+1
+
+# --- OR over pushable children: same set as IN above, plus the inserted row ---
+query I
+SELECT count(*) FROM rpc.main.edge WHERE bucket = 0 OR bucket = 2;
+----
+51
+
+# --- Unpushable filter (expression over two columns): falls back to client-side,
+#     still correct ---
+query I
+SELECT count(*) FROM rpc.main.edge WHERE i + bucket > 50;
+----
+45
+
+# --- Filter on a column that is NOT in the SELECT list: pushdown handles this
+#     (the filter column is in column_indexes but not in projection). ---
+query I
+SELECT count(*) FROM rpc.main.edge WHERE bucket = 1;
+----
+25
+
+# --- count(distinct ...) plus filter still correct ---
+query I
+SELECT count(distinct bucket) FROM rpc.main.edge WHERE i IS NOT NULL;
+----
+4
+
+# --- Toggle disable, results unchanged ---
+statement ok con2
+SET quack_pushdown_filters = false;
+
+query I
+SELECT count(*) FROM rpc.main.edge WHERE bucket = 1;
+----
+25
+
+statement ok con2
+SET quack_pushdown_filters = true;
+
+statement ok con2
+detach rpc;
+
+statement ok con1
+call quack_stop({server});
+
+endloop

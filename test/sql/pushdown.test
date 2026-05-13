@@ -24,7 +24,7 @@ create secret (type quack, token 'asdf')
 statement ok con2
 attach {server} as rpc
 
-# Verify projection pushdown: selecting one column should only project that column
+# Verify projection pushdown: only the requested column appears under "Projections".
 query II
 EXPLAIN SELECT i FROM rpc.main.test_data;
 ----
@@ -36,30 +36,44 @@ EXPLAIN SELECT i, name FROM rpc.main.test_data;
 ----
 physical_plan	<REGEX>:.*Projections:.*i.*name.*
 
-# disabled for 1.5
-# # Verify filter pushdown appears in the physical plan
-# query II
-# EXPLAIN SELECT i FROM rpc.main.test_data WHERE i = 42;
-# ----
-# physical_plan	<REGEX>:.*Filters:.*i=42.*
-#
-# # Verify range filter pushdown
-# query II
-# EXPLAIN SELECT i FROM rpc.main.test_data WHERE i > 9990;
-# ----
-# physical_plan	<REGEX>:.*Filters:.*i>9990.*
-#
-# # Verify multiple filters (AND)
-# query II
-# EXPLAIN SELECT i FROM rpc.main.test_data WHERE i >= 100 AND i < 200;
-# ----
-# physical_plan	<REGEX>:.*Filters:.*i>=100.*i<200.*
-#
-# # Verify combined filter + projection pushdown
-# query II
-# EXPLAIN SELECT name FROM rpc.main.test_data WHERE i = 100;
-# ----
-# physical_plan	<REGEX>:.*Projections:.*name.*
+# Verify filter pushdown appears in the physical plan
+query II
+EXPLAIN SELECT i FROM rpc.main.test_data WHERE i = 42;
+----
+physical_plan	<REGEX>:.*Filters:.*i=42.*
+
+# Verify range filter pushdown
+query II
+EXPLAIN SELECT i FROM rpc.main.test_data WHERE i > 9990;
+----
+physical_plan	<REGEX>:.*Filters:.*i>9990.*
+
+# Verify multiple filters (AND)
+query II
+EXPLAIN SELECT i FROM rpc.main.test_data WHERE i >= 100 AND i < 200;
+----
+physical_plan	<REGEX>:.*Filters:.*i>=100.*i<200.*
+
+# Verify combined filter + projection pushdown: SELECT projects only `name` while
+# the filter on `i` is pushed.
+query II
+EXPLAIN SELECT name FROM rpc.main.test_data WHERE i = 100;
+----
+physical_plan	<REGEX>:.*Projections:.*name.*
+
+# Disabling the setting suppresses the WHERE in the pushed SQL — the filter still
+# applies client-side so results remain correct. We can't directly inspect the
+# pushed SQL string from a regular EXPLAIN, but correctness is preserved.
+statement ok con2
+SET quack_pushdown_filters = false;
+
+query I
+SELECT i FROM rpc.main.test_data WHERE i = 42;
+----
+42
+
+statement ok con2
+SET quack_pushdown_filters = true;
 
 # Correctness: filter pushdown returns correct results
 query I

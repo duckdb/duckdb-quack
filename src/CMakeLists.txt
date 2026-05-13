@@ -5,6 +5,7 @@ add_library(
   quack_clear_cache.cpp
   quack_client.cpp
   quack_extension.cpp
+  quack_filter.cpp
   quack_http_server.cpp
   quack_log.cpp
   quack_message.cpp

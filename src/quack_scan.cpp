@@ -7,6 +7,7 @@
 
 #include "quack_scan.hpp"
 #include "quack_client.hpp"
+#include "quack_filter.hpp"
 #include "include/storage/quack_catalog.hpp"
 
 #include <queue>
@@ -56,7 +57,7 @@ static unique_ptr<FunctionData> QuackScanBind(ClientContext &context, TableFunct
 	bind_data->needs_more_fetch = bind_response->NeedsMoreFetch();
 	bind_data->result_uuid = bind_response->ResultUUID();
 
-	return bind_data;
+	return std::move(bind_data);
 }
 
 QuackCatalog &GetQuackCatalog(ClientContext &context, Value &catalog_name) {
@@ -102,7 +103,7 @@ static unique_ptr<FunctionData> QuackScanBindCatalogName(ClientContext &context,
 	bind_data->results = std::move(bind_response->MutableResults());
 	bind_data->needs_more_fetch = bind_response->NeedsMoreFetch();
 	bind_data->result_uuid = bind_response->ResultUUID();
-	return bind_data;
+	return std::move(bind_data);
 }
 
 enum class ChunkResultPushdownType { REQUIRES_PUSHDOWN, PUSHDOWN_ALREADY_APPLIED };
@@ -168,72 +169,82 @@ private:
 	vector<ChunkResult> results;
 };
 
-static string BuildPushdownQuery(const QuackScanBindData &bind_data, const TableFunctionInitInput &input) {
+// Returns the positional reference (e.g. "#3") to use in pushed-down SQL for the column
+// at index `column_indexes_idx` of the scan's `column_indexes`. Virtual columns are emitted
+// as a typed NULL placeholder. Used both for SELECT-list and WHERE-clause emission so that
+// projection and filter pushdown reference the same underlying table columns by position.
+static string PositionalColumnRef(const ColumnIndex &col_id) {
+	if (col_id.IsVirtualColumn()) {
+		auto virtual_column = col_id.GetPrimaryIndex();
+		if (virtual_column == COLUMN_IDENTIFIER_EMPTY || virtual_column == COLUMN_IDENTIFIER_ROW_ID) {
+			return "NULL::BIGINT";
+		}
+		throw InternalException("Unsupported virtual column index in quack pushdown");
+	}
+	return "#" + to_string(col_id.GetPrimaryIndex() + 1);
+}
+
+static bool IsFilterPushdownEnabled(ClientContext &context) {
+	Value v;
+	if (!context.TryGetCurrentSetting("quack_pushdown_filters", v)) {
+		return true;
+	}
+	return v.GetValue<bool>();
+}
+
+static string BuildPushdownQuery(ClientContext &context, const QuackScanBindData &bind_data,
+                                 const TableFunctionInitInput &input) {
 	string query;
 
-	// Projection: select only the columns DuckDB actually needs in the output.
-	// With filter_prune, projection_ids indexes into column_ids for output columns only.
-	// Filter-only columns are in column_ids but NOT in projection_ids — they go in WHERE, not SELECT.
+	// --- Projection pushdown -------------------------------------------------
+	// Emit a positional ref per entry in column_indexes. With filter_prune off (current
+	// default) column_indexes is exactly the set of columns the scan must produce, so
+	// this is also the final SELECT-list shape DuckDB expects.
 	if (!input.column_indexes.empty()) {
 		for (auto &col_id : input.column_indexes) {
 			if (!query.empty()) {
 				query += ", ";
 			}
-			if (col_id.IsVirtualColumn()) {
-				auto virtual_column = col_id.GetPrimaryIndex();
-				if (virtual_column == COLUMN_IDENTIFIER_EMPTY || virtual_column == COLUMN_IDENTIFIER_ROW_ID) {
-					query += "NULL::BIGINT";
-				} else {
-					throw InternalException("Unsupported virtual column index");
-				}
-			} else {
-				query += "#" + to_string(col_id.GetPrimaryIndex() + 1);
-			}
+			query += PositionalColumnRef(col_id);
 		}
 		query = "SELECT " + query + " ";
 	}
-	// 	vector<string> selected_columns;
-	// 	if (!input.projection_ids.empty()) {
-	// 		for (auto &proj_id : input.projection_ids) {
-	// 			auto col_id = input.column_ids[proj_id];
-	// 			if (IsRowIdColumnId(col_id) || col_id >= bind_data.column_names.size()) {
-	// 				continue;
-	// 			}
-	// 			selected_columns.push_back(KeywordHelper::WriteOptionallyQuoted(bind_data.column_names[col_id]));
-	// 		}
-	// 	} else {
-	// 		for (auto &col_id : input.column_ids) {
-	// 			if (IsRowIdColumnId(col_id) || col_id >= bind_data.column_names.size()) {
-	// 				continue;
-	// 			}
-	// 			selected_columns.push_back(KeywordHelper::WriteOptionallyQuoted(bind_data.column_names[col_id]));
-	// 		}
-	// 	}
-	// 	if (!selected_columns.empty()) {
-	// 		query = "SELECT " + StringUtil::Join(selected_columns, ", ") + " ";
-	// 	}
-	// }
 	query += StringUtil::Format("FROM %s", SQLIdentifier(bind_data.table_name));
-	//
-	// // Filters: build WHERE clause from pushable filters
-	// if (input.filters) {
-	// 	vector<string> where_clauses;
-	// 	for (auto &entry : input.filters->filters) {
-	// 		auto col_idx = entry.second.GetIndex();
-	// 		if (col_idx >= bind_data.column_names.size()) {
-	// 			continue;
-	// 		}
-	// 		auto &filter = entry.Filter();
-	// 		if (!CanPushdownFilter(filter)) {
-	// 			continue;
-	// 		}
-	// 		auto col_name = KeywordHelper::WriteOptionallyQuoted(bind_data.column_names[col_idx]);
-	// 		where_clauses.push_back(filter.ToString(col_name));
-	// 	}
-	// 	if (!where_clauses.empty()) {
-	// 		query += " WHERE " + StringUtil::Join(where_clauses, " AND ");
-	// 	}
-	// }
+
+	// --- Filter pushdown -----------------------------------------------------
+	// For each filter that targets a column referenced by column_indexes[i] and that we know
+	// how to translate to SQL, emit `<positional-ref> <op> ...` into a single AND-joined WHERE.
+	// Unpushable filters are silently dropped here and remain in the DuckDB plan above the
+	// scan, so correctness is preserved as long as the server respects the pushed predicate.
+	if (input.filters && IsFilterPushdownEnabled(context)) {
+		string where_clause;
+		for (auto &entry : input.filters->filters) {
+			auto column_indexes_idx = entry.first;
+			if (column_indexes_idx >= input.column_indexes.size()) {
+				continue;
+			}
+			auto &col_id = input.column_indexes[column_indexes_idx];
+			if (col_id.IsVirtualColumn()) {
+				continue;
+			}
+			auto &filter = *entry.second;
+			if (!CanPushdownFilter(filter)) {
+				continue;
+			}
+			auto col_ref = PositionalColumnRef(col_id);
+			auto fragment = FilterToSql(filter, col_ref);
+			if (fragment.empty()) {
+				continue;
+			}
+			if (!where_clause.empty()) {
+				where_clause += " AND ";
+			}
+			where_clause += "(" + fragment + ")";
+		}
+		if (!where_clause.empty()) {
+			query += " WHERE " + where_clause;
+		}
+	}
 
 	return query;
 }
@@ -249,7 +260,7 @@ unique_ptr<GlobalTableFunctionState> QuackScanInitGlobal(ClientContext &context,
 	hugeint_t result_uuid;
 	if (!bind_data.table_name.empty()) {
 		// apply pushdown to the query
-		auto query = BuildPushdownQuery(bind_data, input);
+		auto query = BuildPushdownQuery(context, bind_data, input);
 		auto &client_connection = *bind_data.client_connection;
 		auto client_wrapper = client_connection.GetClient(context);
 		auto &client = client_wrapper->GetClient();
@@ -286,7 +297,7 @@ unique_ptr<LocalTableFunctionState> QuackScanInitLocal(ExecutionContext &context
 	for (auto &chunk : results) {
 		local_state->results.push(std::move(chunk));
 	}
-	return local_state;
+	return std::move(local_state);
 }
 
 static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
@@ -377,12 +388,16 @@ TableFunction QuackScanFunction::GetFunction() {
 	fun.named_parameters["token"] = LogicalType::VARCHAR;
 
 	fun.projection_pushdown = true;
+	fun.filter_pushdown = true;
+	// filter_prune left off: when on, the scan must emit only the `projection_ids` subset
+	// of `column_indexes`, but the current QuackScan output path doesn't reshape chunks
+	// accordingly. Filter-only columns are still fetched; DuckDB applies the residual
+	// projection. Correct, just mildly wasteful — to be fixed alongside M3a's
+	// output-schema rewrite work.
 	fun.get_partition_data = QuackScanGetPartitionData;
 	fun.to_string = QuackScanToString;
 	fun.serialize = QuackScanSerialize;
 	fun.deserialize = QuackScanDeserialize;
-	// fun.filter_pushdown = true;
-	// fun.filter_prune = true;
 	return fun;
 }
 
@@ -390,12 +405,11 @@ TableFunction QuackScanByNameFunction::GetFunction() {
 	auto fun = TableFunction("quack_query_by_name", {LogicalType::VARCHAR, LogicalType::VARCHAR}, QuackScan,
 	                         QuackScanBindCatalogName, QuackScanInitGlobal, QuackScanInitLocal);
 	fun.projection_pushdown = true;
+	fun.filter_pushdown = true;
 	fun.get_partition_data = QuackScanGetPartitionData;
 	fun.to_string = QuackScanToString;
 	fun.serialize = QuackScanSerialize;
 	fun.deserialize = QuackScanDeserialize;
-	// fun.filter_pushdown = true;
-	// fun.filter_prune = true;
 	return fun;
 }
 
