@@ -7,6 +7,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/logical_operator_visitor.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_insert.hpp"
@@ -273,28 +274,103 @@ static bool TryEmitAggregateSql(const BoundAggregateExpression &agg, const Logic
 	return false;
 }
 
+// Description of the column-binding remap to apply to the rest of the plan after a
+// LogicalAggregate has been folded into a quack LogicalGet.
+struct AggregateBindingRemap {
+	idx_t old_group_index;       // LogicalAggregate.group_index
+	idx_t old_aggregate_index;   // LogicalAggregate.aggregate_index
+	idx_t new_table_index;       // LogicalGet's (post-rewrite) table_index
+	idx_t group_count;           // |G| — aggregate column j moves from position j to (G+j)
+};
+
+// Visitor that rewrites BoundColumnRefExpression bindings touching the removed
+// LogicalAggregate's two table indexes into the unified new scan layout:
+//   (old_group_index, i)   -> (new_table_index, i)
+//   (old_aggregate_index,j)-> (new_table_index, group_count + j)
+class AggregateBindingRemapper : public LogicalOperatorVisitor {
+public:
+	explicit AggregateBindingRemapper(const AggregateBindingRemap &remap_p) : remap(remap_p) {
+	}
+
+protected:
+	unique_ptr<Expression> VisitReplace(BoundColumnRefExpression &expr, unique_ptr<Expression> *expr_ptr) override {
+		if (expr.binding.table_index == remap.old_group_index) {
+			expr.binding.table_index = remap.new_table_index;
+			// column_index already corresponds to the group position, no shift needed.
+		} else if (expr.binding.table_index == remap.old_aggregate_index) {
+			expr.binding.table_index = remap.new_table_index;
+			expr.binding.column_index += remap.group_count;
+		}
+		return nullptr;
+	}
+
+private:
+	const AggregateBindingRemap &remap;
+};
+
+// Resolve a group key expression that must be a bare BoundColumnRef into the scan.
+// Returns the positional ref (e.g. "#3") plus the group's type and name on success.
+static bool TryEmitGroupKeySql(const Expression &expr, const LogicalGet &get, string &out_sql) {
+	if (expr.type != ExpressionType::BOUND_COLUMN_REF) {
+		return false;
+	}
+	auto &col = expr.Cast<BoundColumnRefExpression>();
+	if (col.binding.table_index != get.table_index) {
+		return false;
+	}
+	auto &column_ids = get.GetColumnIds();
+	if (col.binding.column_index >= column_ids.size()) {
+		return false;
+	}
+	auto &idx = column_ids[col.binding.column_index];
+	if (idx.IsVirtualColumn()) {
+		return false;
+	}
+	out_sql = "#" + to_string(idx.GetPrimaryIndex() + 1);
+	return true;
+}
+
 // Attempt to push a LogicalAggregate directly above a quack LogicalGet.
-// On success, the LogicalGet is mutated and the caller should replace the
-// LogicalAggregate slot with the (now-rewired) LogicalGet.
-static bool TryPushAggregate(LogicalAggregate &agg, LogicalGet &get) {
+// On success, the LogicalGet is mutated, the caller replaces the LogicalAggregate
+// slot with the LogicalGet, and the returned `remap` is non-empty so the binding
+// rewriter can run over the rest of the plan.
+static bool TryPushAggregate(LogicalAggregate &agg, LogicalGet &get, AggregateBindingRemap &remap_out) {
 	// Aggregation rewrite relies on BuildPushdownQuery actually rewriting the SQL
-	// at scan-init time, which only happens for catalog-attached scans (where
-	// bind_data.table_name is set). The raw quack_query(uri, sql) path uses the
-	// user's verbatim SQL — pushing here would silently corrupt the result schema.
+	// at scan-init time, which only happens for catalog-attached scans.
 	auto &bind_data = get.bind_data->Cast<QuackScanBindData>();
 	if (bind_data.table_name.empty()) {
 		return false;
 	}
-	if (!agg.groups.empty() || agg.grouping_sets.size() > 1) {
+	// Reject ROLLUP / CUBE / GROUPING SETS (multiple grouping sets).
+	if (agg.grouping_sets.size() > 1) {
 		return false;
 	}
-	// Reject GROUPING() function calls.
+	// Reject GROUPING() function calls — depend on grouping_sets.
 	if (!agg.grouping_functions.empty()) {
 		return false;
 	}
-	if (agg.expressions.empty()) {
+	if (agg.expressions.empty() && agg.groups.empty()) {
 		return false;
 	}
+
+	// Group keys — every entry must be a bare column ref into the scan.
+	vector<string> group_sqls;
+	vector<LogicalType> group_types;
+	vector<string> group_names;
+	group_sqls.reserve(agg.groups.size());
+	group_types.reserve(agg.groups.size());
+	group_names.reserve(agg.groups.size());
+	for (auto &g : agg.groups) {
+		string sql;
+		if (!TryEmitGroupKeySql(*g, get, sql)) {
+			return false;
+		}
+		group_sqls.push_back(std::move(sql));
+		group_types.push_back(g->return_type);
+		group_names.push_back(g->GetName());
+	}
+
+	// Aggregate expressions.
 	vector<string> agg_sqls;
 	vector<LogicalType> agg_types;
 	vector<string> agg_names;
@@ -315,11 +391,7 @@ static bool TryPushAggregate(LogicalAggregate &agg, LogicalGet &get) {
 		agg_names.push_back(bound_agg.GetName());
 	}
 
-	// Capture any filters DuckDB already pushed into LogicalGet.table_filters BEFORE we
-	// reshape column_ids — their column indexes point into the OLD layout (original
-	// table columns). Emit them as SQL using the old column_ids and stash on bind_data.
-	// Then clear table_filters so DuckDB doesn't re-validate them against the new
-	// (1-row-of-aggregate-outputs) shape and panic with "Could not find column index".
+	// Capture filters using the old column_ids (primary indices) before reshaping.
 	string captured_where;
 	for (auto &entry : get.table_filters.filters) {
 		auto column_id = entry.first;
@@ -339,43 +411,85 @@ static bool TryPushAggregate(LogicalAggregate &agg, LogicalGet &get) {
 	}
 	get.table_filters.filters.clear();
 
-	// Mutate the LogicalGet: take over the aggregate's bindings & output schema.
+	// Combined output layout: groups first, then aggregates.
+	vector<LogicalType> out_types;
+	vector<string> out_names;
+	out_types.reserve(group_types.size() + agg_types.size());
+	out_names.reserve(group_names.size() + agg_names.size());
+	for (idx_t i = 0; i < group_types.size(); i++) {
+		out_types.push_back(group_types[i]);
+		out_names.push_back(group_names[i]);
+	}
+	for (idx_t i = 0; i < agg_types.size(); i++) {
+		out_types.push_back(agg_types[i]);
+		out_names.push_back(agg_names[i]);
+	}
+
+	// Stash everything on bind_data.
 	bind_data.pushed_aggregates = std::move(agg_sqls);
+	bind_data.pushed_group_keys = std::move(group_sqls);
 	bind_data.pushed_where_sql = std::move(captured_where);
-	bind_data.column_names = agg_names;
-	bind_data.column_types = agg_types;
-	// LIMIT / ORDER BY pushed by M2 would be invalid alongside whole-table aggs.
-	// We hit this only if optimizer ordering changes; defensive clear.
+	bind_data.column_names = out_names;
+	bind_data.column_types = out_types;
+	// LIMIT / ORDER BY pushed by M2 would be invalid alongside agg rewrite.
 	bind_data.pushed_limit = optional_idx();
 	bind_data.pushed_offset = optional_idx();
 	bind_data.pushed_order_by.clear();
-	// Aggregate output is single-row.
-	bind_data.estimated_cardinality = 1;
+	// Single row for total aggregation; otherwise unknown but bounded by base table.
+	if (agg.groups.empty()) {
+		bind_data.estimated_cardinality = 1;
+	} else {
+		bind_data.estimated_cardinality = optional_idx();
+	}
 
+	// Reshape the LogicalGet's output schema. The new table_index unifies what used
+	// to be the aggregate's two indices; we pick aggregate_index by convention.
 	get.table_index = agg.aggregate_index;
-	get.returned_types = agg_types;
-	get.names = agg_names;
+	get.returned_types = out_types;
+	get.names = out_names;
 	vector<ColumnIndex> new_column_ids;
-	for (idx_t i = 0; i < agg_types.size(); i++) {
+	new_column_ids.reserve(out_types.size());
+	for (idx_t i = 0; i < out_types.size(); i++) {
 		new_column_ids.emplace_back(i);
 	}
 	get.SetColumnIds(std::move(new_column_ids));
 	get.projection_ids.clear();
-	get.types = agg_types;
+	get.types = out_types;
+
+	remap_out.old_group_index = agg.group_index;
+	remap_out.old_aggregate_index = agg.aggregate_index;
+	remap_out.new_table_index = get.table_index;
+	remap_out.group_count = group_types.size();
 	return true;
 }
 
-static void PushAggregatesDown(unique_ptr<LogicalOperator> &op_ref) {
+static void PushAggregatesDownRec(unique_ptr<LogicalOperator> &op_ref, vector<AggregateBindingRemap> &remaps) {
 	auto &op = *op_ref;
 	if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY && op.children.size() == 1) {
 		auto &agg = op.Cast<LogicalAggregate>();
 		auto *get = AsQuackGet(*agg.children[0]);
-		if (get && TryPushAggregate(agg, *get)) {
-			op_ref = std::move(agg.children[0]);
+		if (get) {
+			AggregateBindingRemap remap;
+			if (TryPushAggregate(agg, *get, remap)) {
+				op_ref = std::move(agg.children[0]);
+				remaps.push_back(remap);
+			}
 		}
 	}
 	for (auto &child : op_ref->children) {
-		PushAggregatesDown(child);
+		PushAggregatesDownRec(child, remaps);
+	}
+}
+
+static void PushAggregatesDown(unique_ptr<LogicalOperator> &plan) {
+	vector<AggregateBindingRemap> remaps;
+	PushAggregatesDownRec(plan, remaps);
+	// Apply the binding remaps over the whole plan. Each remap touches only the two
+	// table indices that belonged to the removed LogicalAggregate; sibling subtrees
+	// use different indices so they're unaffected.
+	for (auto &remap : remaps) {
+		AggregateBindingRemapper rewriter(remap);
+		rewriter.VisitOperator(*plan);
 	}
 }
 

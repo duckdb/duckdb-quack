@@ -196,12 +196,21 @@ static string BuildPushdownQuery(ClientContext &context, const QuackScanBindData
                                  const TableFunctionInitInput &input) {
 	string query;
 
-	if (!bind_data.pushed_aggregates.empty()) {
-		// --- Aggregation pushdown (M3a-narrow) -------------------------------
-		// The SELECT list is fully determined by the rewritten aggregate expressions.
-		// Honor projection pushdown by emitting only the subset of aggregate outputs
-		// DuckDB still consumes; column_indexes references the post-rewrite columns,
-		// not the underlying table.
+	if (!bind_data.pushed_aggregates.empty() || !bind_data.pushed_group_keys.empty()) {
+		// --- Aggregation pushdown (M3a) --------------------------------------
+		// The SELECT list is the concatenation of group keys (positions 0..|G|-1) and
+		// aggregate expressions (positions |G|..|G|+|A|-1). Projection pushdown above
+		// may have pruned to a subset; column_indexes references positions in this
+		// combined list.
+		vector<string> full_select;
+		full_select.reserve(bind_data.pushed_group_keys.size() + bind_data.pushed_aggregates.size());
+		for (auto &g : bind_data.pushed_group_keys) {
+			full_select.push_back(g);
+		}
+		for (auto &a : bind_data.pushed_aggregates) {
+			full_select.push_back(a);
+		}
+		string select_list;
 		bool any = false;
 		if (!input.column_indexes.empty()) {
 			for (auto &col_id : input.column_indexes) {
@@ -209,28 +218,36 @@ static string BuildPushdownQuery(ClientContext &context, const QuackScanBindData
 					continue;
 				}
 				auto idx = col_id.GetPrimaryIndex();
-				if (idx >= bind_data.pushed_aggregates.size()) {
+				if (idx >= full_select.size()) {
 					continue;
 				}
 				if (any) {
-					query += ", ";
+					select_list += ", ";
 				}
-				query += bind_data.pushed_aggregates[idx];
+				select_list += full_select[idx];
 				any = true;
 			}
 		}
 		if (!any) {
-			// Defensive: emit all of them.
-			for (idx_t i = 0; i < bind_data.pushed_aggregates.size(); i++) {
+			for (idx_t i = 0; i < full_select.size(); i++) {
+				if (i > 0) {
+					select_list += ", ";
+				}
+				select_list += full_select[i];
+			}
+		}
+		query = "SELECT " + select_list + " FROM " + StringUtil::Format("%s", SQLIdentifier(bind_data.table_name));
+		if (!bind_data.pushed_where_sql.empty()) {
+			query += " WHERE " + bind_data.pushed_where_sql;
+		}
+		if (!bind_data.pushed_group_keys.empty()) {
+			query += " GROUP BY ";
+			for (idx_t i = 0; i < bind_data.pushed_group_keys.size(); i++) {
 				if (i > 0) {
 					query += ", ";
 				}
-				query += bind_data.pushed_aggregates[i];
+				query += bind_data.pushed_group_keys[i];
 			}
-		}
-		query = "SELECT " + query + " FROM " + StringUtil::Format("%s", SQLIdentifier(bind_data.table_name));
-		if (!bind_data.pushed_where_sql.empty()) {
-			query += " WHERE " + bind_data.pushed_where_sql;
 		}
 		return query;
 	} else {

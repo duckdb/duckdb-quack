@@ -17,6 +17,10 @@ select
   'name_' || range::varchar as name
 from range(1000);
 
+statement ok con1
+create table grouped as
+select range as i, range % 5 as bucket, range % 5 * 10 + (range // 5) as score from range(50);
+
 foreach server 'quack:localhost'
 
 statement ok con1
@@ -79,9 +83,53 @@ SELECT count(distinct i) FROM rpc.main.t;
 ----
 1000
 
-# --- A GROUP BY query is NOT pushable in M3a-narrow; falls back, correct result ---
+# --- GROUP BY pushdown ---
+# Group key must be a bare column ref; expressions fall back to client-side. The
+# `grouped` table was created before ATTACH so it appears in the rpc catalog.
+
+# Push: GROUP BY on bare bucket column.
 query II
-SELECT i % 4 AS bucket, count(*) FROM rpc.main.t GROUP BY bucket ORDER BY bucket;
+SELECT bucket, count(*) FROM rpc.main.grouped GROUP BY bucket ORDER BY bucket;
+----
+0	10
+1	10
+2	10
+3	10
+4	10
+
+# Push: GROUP BY + multiple aggs.
+query III
+SELECT bucket, count(*), sum(i) FROM rpc.main.grouped GROUP BY bucket ORDER BY bucket;
+----
+0	10	225
+1	10	235
+2	10	245
+3	10	255
+4	10	265
+
+# Push: GROUP BY + WHERE (filter combines with the grouped scan).
+query II
+SELECT bucket, count(*) FROM rpc.main.grouped WHERE i >= 25 GROUP BY bucket ORDER BY bucket;
+----
+0	5
+1	5
+2	5
+3	5
+4	5
+
+# Push: HAVING is just a LogicalFilter above the agg — binding remap keeps it correct.
+query II
+SELECT bucket, count(*) FROM rpc.main.grouped GROUP BY bucket HAVING count(*) > 0 ORDER BY bucket;
+----
+0	10
+1	10
+2	10
+3	10
+4	10
+
+# NOT pushed: GROUP BY expression (i % 4) is not a bare column ref.
+query II
+SELECT i % 4 AS b, count(*) FROM rpc.main.t GROUP BY b ORDER BY b;
 ----
 0	250
 1	250
