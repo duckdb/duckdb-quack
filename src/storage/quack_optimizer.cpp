@@ -13,6 +13,7 @@
 #include "duckdb/planner/operator/logical_insert.hpp"
 #include "duckdb/planner/operator/logical_create_table.hpp"
 #include "duckdb/planner/operator/logical_limit.hpp"
+#include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/planner/operator/logical_top_n.hpp"
 
 namespace duckdb {
@@ -75,23 +76,80 @@ static LogicalGet *AsQuackGet(LogicalOperator &op) {
 	return &get;
 }
 
+// Resolves a BoundColumnRefExpression that may point through a trivial LogicalProjection
+// down to the underlying quack scan. On success returns the LogicalGet and updates
+// `out_column_index` to the position in get.column_ids corresponding to the input ref.
+//
+// "Trivial projection" = every projection expression is a bare BoundColumnRef.
+// Returns nullptr when the binding doesn't resolve cleanly to a scan column.
+static LogicalGet *ResolveColumnRefToScan(const BoundColumnRefExpression &ref, LogicalOperator &op,
+                                          idx_t &out_column_index) {
+	if (auto *get = AsQuackGet(op)) {
+		if (ref.binding.table_index != get->table_index) {
+			return nullptr;
+		}
+		if (ref.binding.column_index >= get->GetColumnIds().size()) {
+			return nullptr;
+		}
+		out_column_index = ref.binding.column_index;
+		return get;
+	}
+	if (op.type == LogicalOperatorType::LOGICAL_PROJECTION && op.children.size() == 1) {
+		auto &proj = op.Cast<LogicalProjection>();
+		if (ref.binding.table_index != proj.table_index) {
+			return nullptr;
+		}
+		if (ref.binding.column_index >= proj.expressions.size()) {
+			return nullptr;
+		}
+		auto &child_expr = *proj.expressions[ref.binding.column_index];
+		if (child_expr.type != ExpressionType::BOUND_COLUMN_REF) {
+			return nullptr;
+		}
+		auto &child_ref = child_expr.Cast<BoundColumnRefExpression>();
+		return ResolveColumnRefToScan(child_ref, *proj.children[0], out_column_index);
+	}
+	return nullptr;
+}
+
+// Walk past a trivial single-child LogicalProjection chain to reach the underlying
+// quack LogicalGet. Returns nullptr if the chain isn't trivial (any projection
+// expression isn't a bare column ref).
+static LogicalGet *FindQuackGetBelowTrivialProjection(LogicalOperator &op) {
+	auto *cur = &op;
+	while (cur && cur->type == LogicalOperatorType::LOGICAL_PROJECTION && cur->children.size() == 1) {
+		auto &proj = cur->Cast<LogicalProjection>();
+		for (auto &e : proj.expressions) {
+			if (e->type != ExpressionType::BOUND_COLUMN_REF) {
+				return nullptr;
+			}
+		}
+		cur = proj.children[0].get();
+	}
+	if (cur) {
+		return AsQuackGet(*cur);
+	}
+	return nullptr;
+}
+
 // Resolve a BoundOrderByNode whose expression is a plain ColumnRef into the underlying
-// table column id (0-based). Returns false if the order key is anything other than a
-// direct column reference into the scan we're pushing into.
-static bool TryResolveOrderColumn(const BoundOrderByNode &order, const LogicalGet &get,
-                                  QuackPushedOrderBy &out) {
+// table column id (0-based). Walks through a possible trivial LogicalProjection
+// between the TopN and the scan, so plans like
+//   TopN -> Projection(bare col refs) -> Get
+// can still be pushed. Returns false if the order key is anything other than a
+// bare column reference that ultimately resolves to a non-virtual scan column.
+static bool TryResolveOrderColumn(const BoundOrderByNode &order, LogicalOperator &child_op,
+                                  const LogicalGet &target_get, QuackPushedOrderBy &out) {
 	if (!order.expression || order.expression->type != ExpressionType::BOUND_COLUMN_REF) {
 		return false;
 	}
 	auto &col_ref = order.expression->Cast<BoundColumnRefExpression>();
-	if (col_ref.binding.table_index != get.table_index) {
+	idx_t scan_col_index = 0;
+	auto *get = ResolveColumnRefToScan(col_ref, child_op, scan_col_index);
+	if (!get || get != &target_get) {
 		return false;
 	}
-	auto &column_ids = get.GetColumnIds();
-	if (col_ref.binding.column_index >= column_ids.size()) {
-		return false;
-	}
-	auto &col_idx = column_ids[col_ref.binding.column_index];
+	auto &col_idx = get->GetColumnIds()[scan_col_index];
 	if (col_idx.IsVirtualColumn()) {
 		return false;
 	}
@@ -109,13 +167,14 @@ static bool IsLimitPushdownEnabled(ClientContext &context) {
 	return v.GetValue<bool>();
 }
 
-// Attempt to push a LogicalLimit into a directly-underlying quack scan. Returns true if
+// Attempt to push a LogicalLimit into the underlying quack scan, possibly traversing
+// a trivial LogicalProjection chain between the limit and the scan. Returns true if
 // fully pushed (caller should replace the node with its child); false if not pushable.
 static bool TryPushLimit(LogicalLimit &limit) {
 	if (limit.children.size() != 1) {
 		return false;
 	}
-	auto *get = AsQuackGet(*limit.children[0]);
+	auto *get = FindQuackGetBelowTrivialProjection(*limit.children[0]);
 	if (!get) {
 		return false;
 	}
@@ -134,12 +193,13 @@ static bool TryPushLimit(LogicalLimit &limit) {
 	return true;
 }
 
-// Same for LogicalTopN. Requires every ORDER BY key to be a plain column ref into the scan.
+// Same for LogicalTopN. Requires every ORDER BY key to be a plain column ref that
+// resolves through any intervening trivial projection chain into the scan.
 static bool TryPushTopN(LogicalTopN &top_n) {
 	if (top_n.children.size() != 1) {
 		return false;
 	}
-	auto *get = AsQuackGet(*top_n.children[0]);
+	auto *get = FindQuackGetBelowTrivialProjection(*top_n.children[0]);
 	if (!get) {
 		return false;
 	}
@@ -147,7 +207,7 @@ static bool TryPushTopN(LogicalTopN &top_n) {
 	resolved.reserve(top_n.orders.size());
 	for (auto &order : top_n.orders) {
 		QuackPushedOrderBy entry;
-		if (!TryResolveOrderColumn(order, *get, entry)) {
+		if (!TryResolveOrderColumn(order, *top_n.children[0], *get, entry)) {
 			return false;
 		}
 		resolved.push_back(entry);

@@ -63,6 +63,13 @@ EXPLAIN ANALYZE SELECT doubled FROM rpc.main.t WHERE i = 42;
 ----
 analyzed_plan	<REGEX>:(?s).*Pushed SQL:.*SELECT #2 FROM t WHERE.*
 
+# TopN pushdown also fires through a trivial LogicalProjection between the TopN
+# and the scan (DuckDB inserts one when projection pushdown chooses a subset).
+query II
+EXPLAIN ANALYZE SELECT i FROM rpc.main.t ORDER BY i DESC LIMIT 5;
+----
+analyzed_plan	<REGEX>:(?s).*Pushed SQL:.*ORDER BY.*LIMIT.*
+
 statement ok con2
 detach rpc;
 
