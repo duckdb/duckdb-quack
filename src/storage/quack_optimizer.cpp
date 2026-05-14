@@ -1,5 +1,6 @@
 #include "storage/quack_optimizer.hpp"
 #include "storage/quack_catalog.hpp"
+#include "storage/quack_partial_agg.hpp"
 #include "quack_filter.hpp"
 #include "quack_scan.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
@@ -638,6 +639,11 @@ void QuackOptimizer::Optimize(OptimizerExtensionInput &input, unique_ptr<Logical
 	// M3a-narrow: push total aggregations (no GROUP BY) into quack scans.
 	if (IsAggregatePushdownEnabled(input.context)) {
 		PushAggregatesDown(plan);
+	}
+	// B: push *partial* aggregations into quack scans that sit underneath a join (the
+	// surviving LogicalAggregate combines partial states client-side).
+	if (IsAggregatePushdownEnabled(input.context)) {
+		QuackPartialAggregate::Apply(input.context, plan);
 	}
 }
 

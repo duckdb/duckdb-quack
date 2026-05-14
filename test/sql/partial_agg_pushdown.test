@@ -1,0 +1,97 @@
+# name: test/sql/partial_agg_pushdown.test
+# description: Partial aggregation pushdown (B) for aggregates over joins
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+statement ok con1
+create table facts as
+select
+  range % 10 as dim_id,
+  range as id,
+  (range * 2)::BIGINT as metric
+from range(1000);
+
+foreach server 'quack:localhost'
+
+statement ok con1
+call quack_serve({server}, token='asdf');
+
+statement ok con2
+create secret (type quack, token 'asdf')
+
+statement ok con2
+attach {server} as rpc
+
+# Local dimension table
+statement ok con2
+create table local_dim as
+select range as id, 'label_' || range::varchar as label from range(10);
+
+# Correctness: partial aggregation across the join should give the same result as
+# the baseline (toggle off pushdown to compare).
+query II
+SELECT d.label, sum(f.metric)
+FROM rpc.main.facts f JOIN local_dim d ON f.dim_id = d.id
+GROUP BY d.label
+ORDER BY d.label;
+----
+label_0	99000
+label_1	99200
+label_2	99400
+label_3	99600
+label_4	99800
+label_5	100000
+label_6	100200
+label_7	100400
+label_8	100600
+label_9	100800
+
+# Correctness check: same query with partial-agg disabled (route through M3a only,
+# which can't fire here either since the agg isn't directly over a single scan).
+statement ok con2
+SET quack_pushdown_aggregates = false;
+
+query II
+SELECT d.label, sum(f.metric)
+FROM rpc.main.facts f JOIN local_dim d ON f.dim_id = d.id
+GROUP BY d.label
+ORDER BY d.label;
+----
+label_0	99000
+label_1	99200
+label_2	99400
+label_3	99600
+label_4	99800
+label_5	100000
+label_6	100200
+label_7	100400
+label_8	100600
+label_9	100800
+
+statement ok con2
+SET quack_pushdown_aggregates = true;
+
+# min/max across a join
+query II
+SELECT d.label, max(f.metric)
+FROM rpc.main.facts f JOIN local_dim d ON f.dim_id = d.id
+WHERE d.id < 3
+GROUP BY d.label
+ORDER BY d.label;
+----
+label_0	1980
+label_1	1982
+label_2	1984
+
+statement ok con2
+detach rpc;
+
+statement ok con1
+call quack_stop({server});
+
+endloop
