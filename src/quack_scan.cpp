@@ -184,6 +184,12 @@ struct QuackScanGlobalState : GlobalTableFunctionState {
 	//! it shows up in EXPLAIN ANALYZE. Empty for the raw quack_query(uri, sql) path
 	//! where the user's SQL is sent verbatim.
 	string pushed_sql;
+	//! Wire-volume counters surfaced in EXPLAIN ANALYZE. Incremented every time a
+	//! response chunk reaches QuackScan; lets users see whether their query is
+	//! shipping 100 rows or 100M.
+	atomic<idx_t> rows_received {0};
+	atomic<idx_t> chunks_received {0};
+	atomic<idx_t> fetches_issued {0};
 
 	vector<ChunkResult> TryGetResults() {
 		lock_guard<mutex> guard(lock);
@@ -451,6 +457,8 @@ static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChu
 
 			auto &response_chunk = chunk.Chunk();
 			if (response_chunk.size() > 0) {
+				global_state.chunks_received.fetch_add(1, std::memory_order_relaxed);
+				global_state.rows_received.fetch_add(response_chunk.size(), std::memory_order_relaxed);
 				if (!chunk.RequiresPushdown()) {
 					output.Reference(response_chunk);
 				} else {
@@ -479,6 +487,7 @@ static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChu
 		// if that did not work, we request more results
 		if (local_state.results.empty() && global_state.needs_more_fetch) {
 			auto &client = local_state.client_wrapper->GetClient();
+			global_state.fetches_issued.fetch_add(1, std::memory_order_relaxed);
 			auto fetch_response = client.Request<FetchResponseMessage>(
 			    context,
 			    make_uniq<FetchRequestMessage>(bind_data.client_connection->ConnectionId(), global_state.result_uuid));
@@ -525,6 +534,16 @@ InsertionOrderPreservingMap<string> QuackScanDynamicToString(TableFunctionDynami
 		auto &gstate = input.global_state->Cast<QuackScanGlobalState>();
 		if (!gstate.pushed_sql.empty()) {
 			result["Pushed SQL"] = gstate.pushed_sql;
+		}
+		// Wire-volume counters (D.1/D.2): rows / chunks received from the server plus
+		// the number of follow-up FETCH round-trips beyond the initial PREPARE.
+		auto rows = gstate.rows_received.load(std::memory_order_relaxed);
+		auto chunks = gstate.chunks_received.load(std::memory_order_relaxed);
+		auto fetches = gstate.fetches_issued.load(std::memory_order_relaxed);
+		if (chunks > 0 || rows > 0 || fetches > 0) {
+			result["Rows shipped"] = to_string(rows);
+			result["Chunks"] = to_string(chunks);
+			result["Fetch round-trips"] = to_string(fetches);
 		}
 	}
 	return result;
