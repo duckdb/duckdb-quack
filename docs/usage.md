@@ -105,14 +105,38 @@ FROM rpc.call('SELECT 42');
 
 ### Pushdown
 
-Scans through an attached catalog support both **projection pushdown**
-and **filter pushdown** (constant comparisons, `IS NULL`, `IS NOT NULL`,
-`IN`, and `AND`/`OR` combinations). Only the required columns are
-transferred, and filters are evaluated server-side. Verify with
-`EXPLAIN`:
+Scans through an attached catalog rewrite a wide range of relational
+shapes into the SQL string actually sent to the remote server, so only
+the rows / columns the query needs cross the wire.
+
+| Kind | What gets pushed | Setting (all default on) |
+|------|------------------|--------------------------|
+| Projection | Only the requested columns appear in the SELECT list. With `filter_prune`, filter-only columns are referenced in WHERE but not shipped. | — |
+| Filter | Constant comparisons (`= != < <= > >=`), `IS [NOT] NULL`, `IN`, and `AND`/`OR` combinations. Literal types: numeric, varchar, blob, date/time/timestamp, uuid, interval, boolean. | `quack_pushdown_filters` |
+| `LIMIT [OFFSET]` | Folded into the scan SQL; the LogicalLimit is removed from the plan to avoid double-application. | `quack_pushdown_limit` |
+| `ORDER BY <bare cols> LIMIT N` (TopN) | Pushed as `ORDER BY ... LIMIT N`. Expression order keys fall back to client-side. | `quack_pushdown_limit` |
+| Total aggregation | `count(*)`, `count(col)`, `sum(col)`, `min(col)`, `max(col)` over bare column refs. `avg`, `count(distinct …)`, filter/order-by modifiers, etc. fall back. | `quack_pushdown_aggregates` |
+| `GROUP BY` | Pushed when every group key is a bare column ref into the same scan. HAVING is inherited automatically. ROLLUP / CUBE / GROUPING SETS / expression group keys fall back. | `quack_pushdown_aggregates` |
+
+Cardinality is piggybacked from the remote `duckdb_tables().estimated_size`
+at catalog-load time, so the planner can pick sensible join orderings
+without an extra round-trip. Stale until the catalog is re-attached.
+
+Same-server multi-scan queries (`SELECT … FROM rpc.a JOIN rpc.b ON …`)
+work — the server stores in-flight results in a uuid-keyed map so
+concurrent FETCHes on the same connection don't collide.
+
+Plain `EXPLAIN` shows the standard DuckDB scan params (`Projections:`
+and `Filters:`). `EXPLAIN ANALYZE` additionally surfaces the actual SQL
+string sent to the server under a `Pushed SQL` key — useful for
+verifying which rewrites fired:
 
 ```sql
-EXPLAIN SELECT i FROM rpc.main.test_data WHERE i = 42;
+EXPLAIN ANALYZE SELECT count(*) FROM rpc.main.test_data WHERE i > 9990;
+-- ...
+-- │        Pushed SQL:        │
+-- │ SELECT count(*) FROM t    │
+-- │      WHERE (#1>9990)      │
 ```
 
 ### Authentication
