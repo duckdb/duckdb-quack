@@ -7,6 +7,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/logical_operator_visitor.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
@@ -130,6 +131,37 @@ static LogicalGet *FindQuackGetBelowTrivialProjection(LogicalOperator &op) {
 		return AsQuackGet(*cur);
 	}
 	return nullptr;
+}
+
+// Rewrite every BoundColumnRefExpression in `expr` so that any ref through a trivial
+// projection chain is replaced with the equivalent direct ref into the underlying
+// LogicalGet. Returns false if any ref can't be resolved cleanly.
+static bool RewriteBindingsThroughProjection(Expression &expr, LogicalOperator &child_op, LogicalGet &target_get) {
+	bool ok = true;
+	ExpressionIterator::EnumerateChildren(expr, [&](unique_ptr<Expression> &child) {
+		if (!ok) {
+			return;
+		}
+		if (child->type == ExpressionType::BOUND_COLUMN_REF) {
+			auto &col_ref = child->Cast<BoundColumnRefExpression>();
+			if (col_ref.binding.table_index == target_get.table_index) {
+				return; // already direct
+			}
+			idx_t scan_col = 0;
+			auto *resolved_get = ResolveColumnRefToScan(col_ref, child_op, scan_col);
+			if (resolved_get != &target_get) {
+				ok = false;
+				return;
+			}
+			col_ref.binding.table_index = target_get.table_index;
+			col_ref.binding.column_index = scan_col;
+			return;
+		}
+		if (!RewriteBindingsThroughProjection(*child, child_op, target_get)) {
+			ok = false;
+		}
+	});
+	return ok;
 }
 
 // Resolve a BoundOrderByNode whose expression is a plain ColumnRef into the underlying
@@ -387,6 +419,12 @@ static bool TryPushAggregate(LogicalAggregate &agg, LogicalGet &get, AggregateBi
 	if (bind_data.table_name.empty()) {
 		return false;
 	}
+	// If M2 already pushed a LIMIT into the scan, the aggregate computes over the
+	// limited rows. We don't currently emit a subquery wrapper for that, so fall back.
+	if (bind_data.pushed_limit.IsValid() || bind_data.pushed_offset.IsValid() ||
+	    !bind_data.pushed_order_by.empty()) {
+		return false;
+	}
 	// Reject ROLLUP / CUBE / GROUPING SETS (multiple grouping sets).
 	if (agg.grouping_sets.size() > 1) {
 		return false;
@@ -477,10 +515,6 @@ static bool TryPushAggregate(LogicalAggregate &agg, LogicalGet &get, AggregateBi
 	bind_data.pushed_where_sql = std::move(captured_where);
 	bind_data.column_names = out_names;
 	bind_data.column_types = out_types;
-	// LIMIT / ORDER BY pushed by M2 would be invalid alongside agg rewrite.
-	bind_data.pushed_limit = optional_idx();
-	bind_data.pushed_offset = optional_idx();
-	bind_data.pushed_order_by.clear();
 	// Single row for total aggregation; otherwise unknown but bounded by base table.
 	if (agg.groups.empty()) {
 		bind_data.estimated_cardinality = 1;
@@ -513,7 +547,49 @@ static void PushAggregatesDownRec(unique_ptr<LogicalOperator> &op_ref, vector<Ag
 	auto &op = *op_ref;
 	if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY && op.children.size() == 1) {
 		auto &agg = op.Cast<LogicalAggregate>();
+		// Direct match: aggregate sits on top of a quack scan.
 		auto *get = AsQuackGet(*agg.children[0]);
+		if (!get) {
+			// Indirect match: aggregate sits on top of a trivial projection chain over
+			// a quack scan. Rewrite the agg's column refs to bypass the projection so
+			// the existing TryPushAggregate can run unchanged.
+			auto *deep_get = FindQuackGetBelowTrivialProjection(*agg.children[0]);
+			if (deep_get && agg.children[0].get() != deep_get) {
+				bool ok = true;
+				for (auto &g : agg.groups) {
+					if (!RewriteBindingsThroughProjection(*g, *agg.children[0], *deep_get)) {
+						ok = false;
+						break;
+					}
+				}
+				if (ok) {
+					for (auto &e : agg.expressions) {
+						if (!RewriteBindingsThroughProjection(*e, *agg.children[0], *deep_get)) {
+							ok = false;
+							break;
+						}
+					}
+				}
+				if (ok) {
+					// Replace the projection with the underlying get so subsequent code
+					// sees the same shape as the direct-match case.
+					unique_ptr<LogicalOperator> *get_slot = nullptr;
+					auto *parent = agg.children[0].get();
+					while (parent && parent->type == LogicalOperatorType::LOGICAL_PROJECTION &&
+					       parent->children.size() == 1) {
+						if (parent->children[0].get() == deep_get) {
+							get_slot = &parent->children[0];
+							break;
+						}
+						parent = parent->children[0].get();
+					}
+					if (get_slot) {
+						agg.children[0] = std::move(*get_slot);
+						get = deep_get;
+					}
+				}
+			}
+		}
 		if (get) {
 			AggregateBindingRemap remap;
 			if (TryPushAggregate(agg, *get, remap)) {

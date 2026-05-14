@@ -147,6 +147,18 @@ SELECT (i + 1) % 5 AS bucket, count(*) FROM rpc.main.t GROUP BY bucket ORDER BY 
 3	200
 4	200
 
+# Push through a trivial LogicalProjection (often inserted by DuckDB between an
+# aggregate and the scan when a column subset is selected).
+query I
+SELECT count(*) FROM (SELECT i FROM rpc.main.t);
+----
+1000
+
+query II
+SELECT count(*), sum(x) FROM (SELECT i AS x FROM rpc.main.t);
+----
+1000	499500
+
 # --- String column max ---
 query I
 SELECT max(name) FROM rpc.main.t;
