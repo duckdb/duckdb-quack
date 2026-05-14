@@ -1,0 +1,93 @@
+# name: test/sql/same_server_join.test
+# description: Same-server multi-scan / INNER JOIN now works (server stores results in a
+#              uuid-keyed map so concurrent in-flight FETCHes no longer collide)
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+statement ok con1
+create table dim as select range as id, 'name_' || range::varchar as name from range(10);
+
+statement ok con1
+create table facts as
+select
+  range % 10 as dim_id,
+  range as id,
+  range * 2 as metric
+from range(1000);
+
+# A small unrelated table, used to verify cross-product cardinality.
+statement ok con1
+create table small as select range as k from range(5);
+
+foreach server 'quack:localhost'
+
+statement ok con1
+call quack_serve({server}, token='asdf');
+
+statement ok con2
+create secret (type quack, token 'asdf')
+
+statement ok con2
+attach {server} as rpc
+
+# --- INNER JOIN across two attached quack tables ---
+query I
+select count(*) from rpc.main.facts f join rpc.main.dim d on f.dim_id = d.id;
+----
+1000
+
+# --- Multi-column projection across the join ---
+query I
+select sum(f.metric)
+from rpc.main.facts f join rpc.main.dim d on f.dim_id = d.id
+where d.id < 3;
+----
+297600
+
+# --- Cross-product (no join key) across two scans ---
+query I
+select count(*) from rpc.main.dim, rpc.main.small;
+----
+50
+
+# --- Three-way join (all same server) ---
+query I
+select count(*)
+from rpc.main.facts f
+join rpc.main.dim d on f.dim_id = d.id
+join rpc.main.small s on s.k = d.id;
+----
+500
+
+# --- Aggregation on top of a join: agg pushdown is NOT firing here (because the
+#     LogicalAggregate sits over a join, not directly over a single scan), but
+#     the join itself works and the result is correct. ---
+query II
+select d.id, count(*)
+from rpc.main.facts f join rpc.main.dim d on f.dim_id = d.id
+group by d.id
+order by d.id;
+----
+0	100
+1	100
+2	100
+3	100
+4	100
+5	100
+6	100
+7	100
+8	100
+9	100
+
+statement ok con2
+detach rpc;
+
+statement ok con1
+call quack_stop({server});
+
+endloop

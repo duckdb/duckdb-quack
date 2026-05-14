@@ -2,8 +2,10 @@
 
 #include <thread>
 
+#include "duckdb/common/hugeint.hpp"
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/shared_ptr.hpp"
+#include "duckdb/common/unordered_map.hpp"
 
 #include "quack_uri.hpp"
 
@@ -20,17 +22,27 @@ class DatabaseInstance;
 class PreparedStatement;
 class EncryptionState;
 
+//! Per-PREPARE result state. A single QuackConnection (session) can have multiple
+//! in-flight results in parallel — one per uuid — which is required to support same-
+//! server multi-scan queries (e.g. `SELECT * FROM rpc.a JOIN rpc.b ON ...`). Results
+//! are materialized so they don't conflict with the per-Connection streaming
+//! singleton constraint that DuckDB's Connection::SendQuery enforces.
+struct QuackQueryState {
+	unique_ptr<QueryResult> query_result;
+	//! Monotonic counter assigned per FETCH batch — enables order-preserving parallel
+	//! scans on the client side (CTAS, COPY TO, INSERT SELECT).
+	idx_t next_batch_index = 1;
+};
+
 struct QuackConnection {
 	explicit QuackConnection(string session_id_p);
 	~QuackConnection();
 
 	mutex lock;
 	unique_ptr<Connection> duckdb_connection;
-	unique_ptr<QueryResult> duckdb_query_result;
-	//! Monotonic counter assigned per FETCH batch — enables order-preserving parallel scans on
-	idx_t next_batch_index = 1;
-	//! Current result UUID
-	hugeint_t result_uuid;
+	//! Active in-flight query results, keyed by their server-issued uuid. PREPARE
+	//! inserts; FETCH looks up and removes when exhausted.
+	unordered_map<hugeint_t, unique_ptr<QuackQueryState>> active_queries;
 	string session_id;
 };
 

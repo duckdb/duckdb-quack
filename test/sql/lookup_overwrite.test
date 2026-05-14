@@ -40,13 +40,14 @@ select count(j) from rpc.main.t2;
 ----
 200
 
-# Two RPC tables in the same query: both call LookupEntry on the same
-# connection_id during planning. The second PREPARE overwrites the first's
-# server-side query result, so the first table's scan fetches 0 rows.
-statement error
+# Two RPC tables in the same query: each scan gets its own materialized result
+# stored on the server keyed by uuid, so concurrent in-flight FETCHes against
+# the same connection_id no longer collide. The cross-product cardinality is
+# the product of the two tables' row counts.
+query II
 select count(t1.i), count(t2.j) from rpc.main.t1, rpc.main.t2;
 ----
-not currently supported
+20000	20000
 
 statement ok con2
 detach rpc;

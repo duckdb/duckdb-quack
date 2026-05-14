@@ -501,17 +501,14 @@ void QuackOptimizer::Optimize(OptimizerExtensionInput &input, unique_ptr<Logical
 		// no scans
 		return;
 	}
-	for (auto &entry : operators.op_info) {
-		auto &op_info = entry.second;
-		auto multiple_scans = (op_info.scans.size() + op_info.insert_count) > 1;
-		if (!multiple_scans) {
-			continue;
-		}
-		for (auto &_ : op_info.scans) {
-			throw NotImplementedException("Multiple streaming scans or streaming scans + CTAS / insert in the same "
-			                              "query are not currently supported");
-		}
-	}
+	// Same-server multi-scan used to throw NotImplementedException here because the
+	// server held a single streaming QueryResult per connection — a second PREPARE
+	// from a parallel scan would clobber the first. The server now materializes
+	// results into a uuid-keyed map on QuackConnection so concurrent in-flight
+	// results coexist safely; lifting the throw lets queries like
+	//   SELECT * FROM rpc.a JOIN rpc.b ON a.k = b.k
+	// execute by running both scans against the same connection in parallel.
+	(void)operators;
 	// M2: push LIMIT / TopN into quack scans.
 	if (IsLimitPushdownEnabled(input.context)) {
 		PushLimitsDown(plan);

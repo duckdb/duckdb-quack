@@ -5,6 +5,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/query_parameters.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/storage/temporary_file_manager.hpp"
 #include "duckdb/common/serializer/binary_deserializer.hpp"
@@ -287,43 +288,46 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		}
 
 		std::unique_lock<std::mutex> lock(connection.lock);
-		connection.duckdb_query_result.reset();
 
+		// Run the query under FORCE_MATERIALIZED so the resulting QueryResult is
+		// independent of the per-Connection streaming singleton constraint. This is
+		// what lets a single session have multiple concurrent results in flight
+		// (e.g. for a server-side join across two attached quack tables).
+		auto query_state = make_uniq<QuackQueryState>();
 		{
-			auto query_result = connection.duckdb_connection->SendQuery(prepare_request_message.Query());
+			QueryParameters params(QueryResultOutputType::FORCE_MATERIALIZED);
+			auto query_result = connection.duckdb_connection->SendQuery(prepare_request_message.Query(), params);
 			if (query_result->HasError()) {
 				return make_uniq<ErrorResponse>(query_result->GetErrorObject());
 			}
 			if (query_result->names.empty()) {
 				return make_uniq<ErrorResponse>("Query did not return any columns");
 			}
-
-			connection.duckdb_query_result = std::move(query_result);
+			query_state->query_result = std::move(query_result);
 		}
-		// Fresh query → restart batch numbering. Clients' local state is re-initialized on
-		// a new PREPARE, so indices start at 0 again.
-		connection.next_batch_index = 1;
-		// generate a random UUID to uniquely identify the result
-		connection.result_uuid = UUID::GenerateRandomUUID();
+
+		auto result_uuid = UUID::GenerateRandomUUID();
 
 		Value max_chunks_val;
 		DBConfig::GetConfig(db).TryGetCurrentSetting("quack_fetch_batch_chunks", max_chunks_val);
 		auto max_chunks_per_batch = max_chunks_val.GetValue<uint64_t>();
 
-		auto names = connection.duckdb_query_result->names;
-		auto types = connection.duckdb_query_result->types;
+		auto names = query_state->query_result->names;
+		auto types = query_state->query_result->types;
 
-		auto results = CreateBatch(Allocator::Get(db), connection.duckdb_query_result, max_chunks_per_batch);
-		if (connection.duckdb_query_result && connection.duckdb_query_result->HasError()) {
+		auto results = CreateBatch(Allocator::Get(db), query_state->query_result, max_chunks_per_batch);
+		if (query_state->query_result && query_state->query_result->HasError()) {
 			D_ASSERT(results.empty());
-
-			auto error_message = connection.duckdb_query_result->GetErrorObject();
-			connection.duckdb_query_result.reset();
+			auto error_message = query_state->query_result->GetErrorObject();
 			return make_uniq<ErrorResponse>(std::move(error_message));
 		}
 		auto needs_more_fetch = results.size() == max_chunks_per_batch;
-		return make_uniq<PrepareResponseMessage>(types, names, std::move(results), needs_more_fetch,
-		                                         connection.result_uuid);
+		// Only store the in-flight result if there's more to fetch. When the whole
+		// result fit in one batch there's no follow-up FETCH and keeping it would leak.
+		if (needs_more_fetch) {
+			connection.active_queries[result_uuid] = std::move(query_state);
+		}
+		return make_uniq<PrepareResponseMessage>(types, names, std::move(results), needs_more_fetch, result_uuid);
 	}
 
 	case MessageType::FETCH_REQUEST: {
@@ -331,28 +335,43 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		auto &connection = *connection_p;
 		std::unique_lock<std::mutex> lock(connection.lock);
 
-		if (connection.result_uuid != fetch_request_message.uuid) {
-			return make_uniq<ErrorResponse>("Result has been closed");
-		}
-		if (!connection.duckdb_query_result) {
+		auto it = connection.active_queries.find(fetch_request_message.uuid);
+		if (it == connection.active_queries.end()) {
+			// Either the uuid was never registered (server-stored only when needs_more_fetch
+			// is true) or the result was exhausted on a previous FETCH. Either way, return
+			// empty so the client knows the stream is over.
 			return make_uniq<FetchResponseMessage>();
 		}
-		if (connection.duckdb_query_result->HasError()) {
-			return make_uniq<ErrorResponse>(connection.duckdb_query_result->GetErrorObject());
+		auto &query_state = *it->second;
+		if (!query_state.query_result) {
+			// CreateBatch on a previous FETCH exhausted the result and reset the pointer;
+			// drop the entry and signal end-of-stream.
+			connection.active_queries.erase(it);
+			return make_uniq<FetchResponseMessage>();
+		}
+		if (query_state.query_result->HasError()) {
+			auto err = query_state.query_result->GetErrorObject();
+			connection.active_queries.erase(it);
+			return make_uniq<ErrorResponse>(std::move(err));
 		}
 
 		Value max_chunks_val;
 		DBConfig::GetConfig(db).TryGetCurrentSetting("quack_fetch_batch_chunks", max_chunks_val);
 		auto max_chunks_per_batch = max_chunks_val.GetValue<uint64_t>();
 
-		auto results = CreateBatch(Allocator::Get(db), connection.duckdb_query_result, max_chunks_per_batch);
-		if (connection.duckdb_query_result && connection.duckdb_query_result->HasError()) { // TODO this is duplicated
+		auto results = CreateBatch(Allocator::Get(db), query_state.query_result, max_chunks_per_batch);
+		if (query_state.query_result && query_state.query_result->HasError()) {
 			D_ASSERT(results.empty());
-			auto error_message = connection.duckdb_query_result->GetErrorObject();
-			connection.duckdb_query_result.reset();
-			return make_uniq<ErrorResponse>(std::move(error_message));
+			auto err = query_state.query_result->GetErrorObject();
+			connection.active_queries.erase(it);
+			return make_uniq<ErrorResponse>(std::move(err));
 		}
-		auto assigned_batch_index = connection.next_batch_index++;
+		auto assigned_batch_index = query_state.next_batch_index++;
+		// Result exhausted (CreateBatch reset the pointer) OR caller drained the last
+		// rows in this batch — drop the entry so the materialized chunks can be freed.
+		if (!query_state.query_result || results.empty()) {
+			connection.active_queries.erase(it);
+		}
 		return make_uniq<FetchResponseMessage>(std::move(results), optional_idx(assigned_batch_index));
 	}
 
