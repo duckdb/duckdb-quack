@@ -308,26 +308,12 @@ private:
 	const AggregateBindingRemap &remap;
 };
 
-// Resolve a group key expression that must be a bare BoundColumnRef into the scan.
-// Returns the positional ref (e.g. "#3") plus the group's type and name on success.
+// Resolve a group key expression to SQL. Bare BoundColumnRefs become a positional ref
+// (e.g. "#3"); expressions are emitted via TryEmitExpressionSql, which recursively
+// handles a whitelist of pure scalar operators / functions over bare cols and constants.
+// Returns false when any subexpression isn't pushable.
 static bool TryEmitGroupKeySql(const Expression &expr, const LogicalGet &get, string &out_sql) {
-	if (expr.type != ExpressionType::BOUND_COLUMN_REF) {
-		return false;
-	}
-	auto &col = expr.Cast<BoundColumnRefExpression>();
-	if (col.binding.table_index != get.table_index) {
-		return false;
-	}
-	auto &column_ids = get.GetColumnIds();
-	if (col.binding.column_index >= column_ids.size()) {
-		return false;
-	}
-	auto &idx = column_ids[col.binding.column_index];
-	if (idx.IsVirtualColumn()) {
-		return false;
-	}
-	out_sql = "#" + to_string(idx.GetPrimaryIndex() + 1);
-	return true;
+	return TryEmitExpressionSql(expr, get, out_sql);
 }
 
 // Attempt to push a LogicalAggregate directly above a quack LogicalGet.

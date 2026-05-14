@@ -127,7 +127,8 @@ SELECT bucket, count(*) FROM rpc.main.grouped GROUP BY bucket HAVING count(*) > 
 3	10
 4	10
 
-# NOT pushed: GROUP BY expression (i % 4) is not a bare column ref.
+# Push: GROUP BY expression (i % 4) — emitted via the recursive expression-to-SQL
+# helper, since `%` is a whitelisted operator over a bare column ref and constant.
 query II
 SELECT i % 4 AS b, count(*) FROM rpc.main.t GROUP BY b ORDER BY b;
 ----
@@ -135,6 +136,16 @@ SELECT i % 4 AS b, count(*) FROM rpc.main.t GROUP BY b ORDER BY b;
 1	250
 2	250
 3	250
+
+# Push: GROUP BY arithmetic expression with a constant.
+query II
+SELECT (i + 1) % 5 AS bucket, count(*) FROM rpc.main.t GROUP BY bucket ORDER BY bucket;
+----
+0	200
+1	200
+2	200
+3	200
+4	200
 
 # --- String column max ---
 query I

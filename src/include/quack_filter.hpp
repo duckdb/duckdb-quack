@@ -5,6 +5,8 @@
 
 namespace duckdb {
 
+class Expression;
+class LogicalGet;
 class TableFilter;
 
 //! Returns true if `filter` (and all of its descendants) can be safely emitted as SQL and
@@ -17,5 +19,12 @@ bool CanPushdownFilter(const TableFilter &filter);
 //!
 //! Precondition: `CanPushdownFilter(filter)` returned true.
 string FilterToSql(const TableFilter &filter, const string &column_ref);
+
+//! Try to emit `expr` as SQL referencing the FROM clause of the given quack scan via
+//! positional `#N` refs. Supports bare column refs, constants of pushable types, casts,
+//! and a whitelist of pure scalar function calls / operators whose name parses identically
+//! on a remote DuckDB. Returns true on success and writes the SQL fragment to `out_sql`;
+//! returns false when any subexpression isn't pushable.
+bool TryEmitExpressionSql(const Expression &expr, const LogicalGet &get, string &out_sql);
 
 } // namespace duckdb
