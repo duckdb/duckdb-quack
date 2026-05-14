@@ -1,0 +1,65 @@
+# name: test/sql/explain_pushed_sql.test
+# description: EXPLAIN ANALYZE surfaces the actual SQL sent to the remote server
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+statement ok con1
+create table t as select range as i, range * 2 as doubled, range % 4 as bucket from range(100);
+
+foreach server 'quack:localhost'
+
+statement ok con1
+call quack_serve({server}, token='asdf');
+
+statement ok con2
+create secret (type quack, token 'asdf')
+
+statement ok con2
+attach {server} as rpc
+
+# Each EXPLAIN ANALYZE renders the scan node inside an ASCII box that wraps the
+# pushed SQL across lines, so use (?s) (dotall) and only assert on tokens narrow
+# enough to fit unbroken (i.e. avoid spanning box-internal padding).
+
+# Projection-only pushdown
+query II
+EXPLAIN ANALYZE SELECT i FROM rpc.main.t;
+----
+analyzed_plan	<REGEX>:(?s).*Pushed SQL:.*FROM t.*
+
+# Filter pushdown — substring "Pushed SQL" plus "WHERE" must both appear
+query II
+EXPLAIN ANALYZE SELECT i FROM rpc.main.t WHERE i = 42;
+----
+analyzed_plan	<REGEX>:(?s).*Pushed SQL:.*WHERE.*
+
+# LIMIT pushdown
+query II
+EXPLAIN ANALYZE SELECT i FROM rpc.main.t LIMIT 5;
+----
+analyzed_plan	<REGEX>:(?s).*Pushed SQL:.*LIMIT.*
+
+# Total aggregation pushdown
+query II
+EXPLAIN ANALYZE SELECT count(*) FROM rpc.main.t;
+----
+analyzed_plan	<REGEX>:(?s).*Pushed SQL:.*count.*
+
+# GROUP BY aggregation pushdown
+query II
+EXPLAIN ANALYZE SELECT bucket, count(*) FROM rpc.main.t GROUP BY bucket ORDER BY bucket;
+----
+analyzed_plan	<REGEX>:(?s).*Pushed SQL:.*GROUP BY.*
+
+statement ok con2
+detach rpc;
+
+statement ok con1
+call quack_stop({server});
+
+endloop

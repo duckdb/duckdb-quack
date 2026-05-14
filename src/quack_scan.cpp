@@ -145,10 +145,11 @@ struct QuackScanLocalState : public LocalTableFunctionState {
 
 struct QuackScanGlobalState : GlobalTableFunctionState {
 	explicit QuackScanGlobalState(vector<ColumnIndex> column_ids_p, vector<idx_t> projection_id_p,
-	                              vector<ChunkResult> results_p, bool needs_more_fetch_p, hugeint_t result_uuid_p)
+	                              vector<ChunkResult> results_p, bool needs_more_fetch_p, hugeint_t result_uuid_p,
+	                              string pushed_sql_p)
 	    : max_threads(needs_more_fetch_p ? MAX_THREADS : 1), column_ids(std::move(column_ids_p)),
 	      projection_ids(std::move(projection_id_p)), needs_more_fetch(needs_more_fetch_p), result_uuid(result_uuid_p),
-	      results(std::move(results_p)) {
+	      pushed_sql(std::move(pushed_sql_p)), results(std::move(results_p)) {
 	}
 	idx_t MaxThreads() const override {
 		return max_threads;
@@ -158,6 +159,11 @@ struct QuackScanGlobalState : GlobalTableFunctionState {
 	vector<idx_t> projection_ids;
 	atomic<bool> needs_more_fetch;
 	hugeint_t result_uuid;
+	//! The SQL string that was actually sent to the server for this scan (after all
+	//! pushdown rewriting). Surfaced via the function's dynamic_to_string callback so
+	//! it shows up in EXPLAIN ANALYZE. Empty for the raw quack_query(uri, sql) path
+	//! where the user's SQL is sent verbatim.
+	string pushed_sql;
 
 	vector<ChunkResult> TryGetResults() {
 		lock_guard<mutex> guard(lock);
@@ -348,9 +354,11 @@ unique_ptr<GlobalTableFunctionState> QuackScanInitGlobal(ClientContext &context,
 	vector<ChunkResult> results;
 	bool needs_more_fetch = bind_data.needs_more_fetch;
 	hugeint_t result_uuid;
+	string pushed_sql;
 	if (!bind_data.table_name.empty()) {
 		// apply pushdown to the query
 		auto query = BuildPushdownQuery(context, bind_data, input);
+		pushed_sql = query;
 		auto &client_connection = *bind_data.client_connection;
 		auto client_wrapper = client_connection.GetClient(context);
 		auto &client = client_wrapper->GetClient();
@@ -372,7 +380,7 @@ unique_ptr<GlobalTableFunctionState> QuackScanInitGlobal(ClientContext &context,
 	}
 	// we only multithread if there is more to fetch
 	return make_uniq<QuackScanGlobalState>(input.column_indexes, input.projection_ids, std::move(results),
-	                                       needs_more_fetch, result_uuid);
+	                                       needs_more_fetch, result_uuid, std::move(pushed_sql));
 }
 
 unique_ptr<LocalTableFunctionState> QuackScanInitLocal(ExecutionContext &context, TableFunctionInitInput &input,
@@ -462,6 +470,20 @@ InsertionOrderPreservingMap<string> QuackScanToString(TableFunctionToStringInput
 	return result;
 }
 
+// EXPLAIN ANALYZE — fires after InitGlobal has set the rewritten SQL, so we can show
+// users the actual string that crossed the wire to the remote server. Empty for the
+// raw quack_query(uri, sql) path (which sends the SQL verbatim — no rewrite happens).
+InsertionOrderPreservingMap<string> QuackScanDynamicToString(TableFunctionDynamicToStringInput &input) {
+	InsertionOrderPreservingMap<string> result;
+	if (input.global_state) {
+		auto &gstate = input.global_state->Cast<QuackScanGlobalState>();
+		if (!gstate.pushed_sql.empty()) {
+			result["Pushed SQL"] = gstate.pushed_sql;
+		}
+	}
+	return result;
+}
+
 void QuackScanSerialize(Serializer &serializer, const optional_ptr<FunctionData> bind_data,
                         const TableFunction &function) {
 	throw NotImplementedException("Quack scans cannot be serialized (yet?)");
@@ -500,6 +522,7 @@ TableFunction QuackScanFunction::GetFunction() {
 	// output-schema rewrite work.
 	fun.get_partition_data = QuackScanGetPartitionData;
 	fun.to_string = QuackScanToString;
+	fun.dynamic_to_string = QuackScanDynamicToString;
 	fun.serialize = QuackScanSerialize;
 	fun.deserialize = QuackScanDeserialize;
 	fun.cardinality = QuackScanCardinality;
@@ -513,6 +536,7 @@ TableFunction QuackScanByNameFunction::GetFunction() {
 	fun.filter_pushdown = true;
 	fun.get_partition_data = QuackScanGetPartitionData;
 	fun.to_string = QuackScanToString;
+	fun.dynamic_to_string = QuackScanDynamicToString;
 	fun.serialize = QuackScanSerialize;
 	fun.deserialize = QuackScanDeserialize;
 	fun.cardinality = QuackScanCardinality;
