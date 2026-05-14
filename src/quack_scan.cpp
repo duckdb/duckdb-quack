@@ -325,6 +325,9 @@ static string BuildPushdownQuery(ClientContext &context, const QuackScanBindData
 	// plan_get.cpp:17-35) from absolute table column indices to *positions in
 	// column_ids/column_indexes*. So look up the underlying primary index here via
 	// input.column_indexes[key].GetPrimaryIndex() before emitting a positional ref.
+	// DynamicFilter entries are also visited here — if their build-side pipeline has
+	// completed, the inner ConstantFilter is emitted; if not, the dynamic filter is
+	// silently skipped (correctness preserved by DuckDB re-applying it client-side).
 	if (input.filters && IsFilterPushdownEnabled(context)) {
 		string where_clause;
 		for (auto &entry : input.filters->filters) {

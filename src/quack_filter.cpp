@@ -11,6 +11,7 @@
 #include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/filter/conjunction_filter.hpp"
 #include "duckdb/planner/filter/constant_filter.hpp"
+#include "duckdb/planner/filter/dynamic_filter.hpp"
 #include "duckdb/planner/filter/in_filter.hpp"
 #include "duckdb/planner/filter/null_filter.hpp"
 #include "duckdb/planner/filter/optional_filter.hpp"
@@ -138,9 +139,25 @@ bool CanPushdownFilter(const TableFilter &filter) {
 		}
 		return CanPushdownFilter(*f.child_filter);
 	}
+	case TableFilterType::DYNAMIC_FILTER: {
+		// Dynamic filters get their value set by another pipeline (typically a hash
+		// join's build side or a TopN). At scan-init time we check `initialized` and
+		// emit the wrapped ConstantFilter; if not yet initialized we treat it as a
+		// no-op. This gives us semi-join-style reduction "for free" whenever DuckDB
+		// has chosen to inject a dynamic filter into the scan.
+		auto &f = filter.Cast<DynamicFilter>();
+		if (!f.filter_data) {
+			return false;
+		}
+		std::lock_guard<mutex> guard(f.filter_data->lock);
+		if (!f.filter_data->initialized.load() || !f.filter_data->filter) {
+			return true; // pushable but emits nothing — see FilterToSql
+		}
+		return CanPushdownFilter(*f.filter_data->filter);
+	}
 	default:
-		// DYNAMIC_FILTER, EXPRESSION_FILTER, STRUCT_EXTRACT, BLOOM_FILTER: not safe / not
-		// implemented for SQL emission.
+		// EXPRESSION_FILTER, STRUCT_EXTRACT, BLOOM_FILTER: not safe / not implemented
+		// for SQL emission.
 		return false;
 	}
 }
@@ -194,6 +211,17 @@ string FilterToSql(const TableFilter &filter, const string &column_ref) {
 	case TableFilterType::OPTIONAL_FILTER: {
 		auto &f = filter.Cast<OptionalFilter>();
 		return FilterToSql(*f.child_filter, column_ref);
+	}
+	case TableFilterType::DYNAMIC_FILTER: {
+		auto &f = filter.Cast<DynamicFilter>();
+		if (!f.filter_data) {
+			return string();
+		}
+		std::lock_guard<mutex> guard(f.filter_data->lock);
+		if (!f.filter_data->initialized.load() || !f.filter_data->filter) {
+			return string(); // not yet bound — emit nothing; correctness preserved
+		}
+		return FilterToSql(*f.filter_data->filter, column_ref);
 	}
 	default:
 		throw InternalException("FilterToSql called on a non-pushable filter (type=%d) - "
