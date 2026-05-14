@@ -56,6 +56,13 @@ EXPLAIN ANALYZE SELECT bucket, count(*) FROM rpc.main.t GROUP BY bucket ORDER BY
 ----
 analyzed_plan	<REGEX>:(?s).*Pushed SQL:.*GROUP BY.*
 
+# Filter-prune: the filter is on `i` but only `doubled` is projected — pushed SQL
+# selects only #2 (doubled), not #1 (i). Filter still references #1 in the WHERE.
+query II
+EXPLAIN ANALYZE SELECT doubled FROM rpc.main.t WHERE i = 42;
+----
+analyzed_plan	<REGEX>:(?s).*Pushed SQL:.*SELECT #2 FROM t WHERE.*
+
 statement ok con2
 detach rpc;
 

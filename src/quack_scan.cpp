@@ -150,6 +150,22 @@ struct QuackScanGlobalState : GlobalTableFunctionState {
 	    : max_threads(needs_more_fetch_p ? MAX_THREADS : 1), column_ids(std::move(column_ids_p)),
 	      projection_ids(std::move(projection_id_p)), needs_more_fetch(needs_more_fetch_p), result_uuid(result_uuid_p),
 	      pushed_sql(std::move(pushed_sql_p)), results(std::move(results_p)) {
+		// Pre-compute the effective output-column list once: with filter_prune on the
+		// scan emits only the projection_ids subset of column_ids; with it off the
+		// effective set is column_ids itself. Used by the URI-path fallback that
+		// references chunks position-by-position.
+		effective_column_ids.reserve(projection_ids.empty() ? column_ids.size() : projection_ids.size());
+		if (projection_ids.empty()) {
+			for (auto &c : column_ids) {
+				effective_column_ids.push_back(c);
+			}
+		} else {
+			for (auto pid : projection_ids) {
+				if (pid < column_ids.size()) {
+					effective_column_ids.push_back(column_ids[pid]);
+				}
+			}
+		}
 	}
 	idx_t MaxThreads() const override {
 		return max_threads;
@@ -157,6 +173,10 @@ struct QuackScanGlobalState : GlobalTableFunctionState {
 	idx_t max_threads;
 	vector<ColumnIndex> column_ids;
 	vector<idx_t> projection_ids;
+	//! `projection_ids`-resolved subset of column_ids (or column_ids itself when no
+	//! filter_prune is in effect). Lives here so the per-row scan path doesn't have to
+	//! recompute it for every output chunk.
+	vector<ColumnIndex> effective_column_ids;
 	atomic<bool> needs_more_fetch;
 	hugeint_t result_uuid;
 	//! The SQL string that was actually sent to the server for this scan (after all
@@ -198,6 +218,24 @@ static bool IsFilterPushdownEnabled(ClientContext &context) {
 	return v.GetValue<bool>();
 }
 
+// Returns the effective list of column_indexes the scan must output, honoring filter_prune:
+// with filter_prune=true, only the `projection_ids` subset of column_indexes is emitted
+// (filter-only columns are referenced in WHERE via their original primary index but not
+// shipped back from the server). With filter_prune=false, returns column_indexes unchanged.
+static vector<ColumnIndex> EffectiveOutputColumns(const TableFunctionInitInput &input) {
+	if (input.projection_ids.empty()) {
+		return input.column_indexes;
+	}
+	vector<ColumnIndex> result;
+	result.reserve(input.projection_ids.size());
+	for (auto pid : input.projection_ids) {
+		if (pid < input.column_indexes.size()) {
+			result.push_back(input.column_indexes[pid]);
+		}
+	}
+	return result;
+}
+
 static string BuildPushdownQuery(ClientContext &context, const QuackScanBindData &bind_data,
                                  const TableFunctionInitInput &input) {
 	string query;
@@ -216,10 +254,11 @@ static string BuildPushdownQuery(ClientContext &context, const QuackScanBindData
 		for (auto &a : bind_data.pushed_aggregates) {
 			full_select.push_back(a);
 		}
+		auto effective = EffectiveOutputColumns(input);
 		string select_list;
 		bool any = false;
-		if (!input.column_indexes.empty()) {
-			for (auto &col_id : input.column_indexes) {
+		if (!effective.empty()) {
+			for (auto &col_id : effective) {
 				if (col_id.IsVirtualColumn()) {
 					continue;
 				}
@@ -258,11 +297,12 @@ static string BuildPushdownQuery(ClientContext &context, const QuackScanBindData
 		return query;
 	} else {
 		// --- Projection pushdown ---------------------------------------------
-		// Emit a positional ref per entry in column_indexes. With filter_prune off
-		// (current default) column_indexes is exactly the set of columns the scan
-		// must produce, so this is also the final SELECT-list shape DuckDB expects.
-		if (!input.column_indexes.empty()) {
-			for (auto &col_id : input.column_indexes) {
+		// Emit a positional ref per output column. With filter_prune on, the effective
+		// output set is the projection_ids subset of column_indexes — filter-only
+		// columns are referenced in WHERE via their primary index but not shipped back.
+		auto effective = EffectiveOutputColumns(input);
+		if (!effective.empty()) {
+			for (auto &col_id : effective) {
 				if (!query.empty()) {
 					query += ", ";
 				}
@@ -414,8 +454,14 @@ static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChu
 				if (!chunk.RequiresPushdown()) {
 					output.Reference(response_chunk);
 				} else {
-					for (idx_t i = 0; i < global_state.column_ids.size(); i++) {
-						auto &index = global_state.column_ids[i];
+					// Raw quack_query(uri, sql) path: response_chunk has the FULL user-SQL
+					// column set; the scan picks the subset matching the scan's output
+					// shape. With filter_prune=true, only `projection_ids` are output
+					// (column_ids still includes filter-only columns).
+					auto &output_selection = global_state.projection_ids.empty() ? global_state.column_ids
+					                                                              : global_state.effective_column_ids;
+					for (idx_t i = 0; i < output_selection.size(); i++) {
+						auto &index = output_selection[i];
 						if (index.IsVirtualColumn()) {
 							// TODO
 							output.data[i].Reference(Value(output.data[i].GetType()));
@@ -515,11 +561,7 @@ TableFunction QuackScanFunction::GetFunction() {
 
 	fun.projection_pushdown = true;
 	fun.filter_pushdown = true;
-	// filter_prune left off: when on, the scan must emit only the `projection_ids` subset
-	// of `column_indexes`, but the current QuackScan output path doesn't reshape chunks
-	// accordingly. Filter-only columns are still fetched; DuckDB applies the residual
-	// projection. Correct, just mildly wasteful — to be fixed alongside M3a's
-	// output-schema rewrite work.
+	fun.filter_prune = true;
 	fun.get_partition_data = QuackScanGetPartitionData;
 	fun.to_string = QuackScanToString;
 	fun.dynamic_to_string = QuackScanDynamicToString;
@@ -534,6 +576,7 @@ TableFunction QuackScanByNameFunction::GetFunction() {
 	                         QuackScanBindCatalogName, QuackScanInitGlobal, QuackScanInitLocal);
 	fun.projection_pushdown = true;
 	fun.filter_pushdown = true;
+	fun.filter_prune = true;
 	fun.get_partition_data = QuackScanGetPartitionData;
 	fun.to_string = QuackScanToString;
 	fun.dynamic_to_string = QuackScanDynamicToString;
