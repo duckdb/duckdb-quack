@@ -155,6 +155,7 @@ bool ServerSupportsMessage(MessageType type) {
 	case MessageType::FETCH_REQUEST:
 	case MessageType::APPEND_REQUEST:
 	case MessageType::DISCONNECT_MESSAGE:
+	case MessageType::CANCEL_REQUEST:
 		return true;
 	default:
 		return false;
@@ -169,6 +170,23 @@ bool MessageRequiresConnection(MessageType type) {
 		return true;
 	}
 }
+
+// Publishes a client_query_id into QuackConnection::active_client_query_id for
+// the duration of a query handler so a concurrent CancelRequest can match it.
+struct ActiveQueryScope {
+	std::atomic<idx_t> &slot;
+	bool set;
+	ActiveQueryScope(std::atomic<idx_t> &slot_p, optional_idx query_id) : slot(slot_p), set(query_id.IsValid()) {
+		if (set) {
+			slot.store(query_id.GetIndex());
+		}
+	}
+	~ActiveQueryScope() {
+		if (set) {
+			slot.store(DConstants::INVALID_INDEX);
+		}
+	}
+};
 
 // main switcheroo happens here
 unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
@@ -287,6 +305,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		}
 
 		std::unique_lock<std::mutex> lock(connection.lock);
+		ActiveQueryScope active(connection.active_client_query_id, received_message.ClientQueryId());
 		connection.duckdb_query_result.reset();
 
 		{
@@ -330,6 +349,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		auto &fetch_request_message = received_message.Cast<FetchRequestMessage>();
 		auto &connection = *connection_p;
 		std::unique_lock<std::mutex> lock(connection.lock);
+		ActiveQueryScope active(connection.active_client_query_id, received_message.ClientQueryId());
 
 		if (connection.result_uuid != fetch_request_message.uuid) {
 			return make_uniq<ErrorResponse>("Result has been closed");
@@ -389,6 +409,22 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			// apend failed - directly pass error to user
 			return make_uniq<ErrorResponse>(ErrorData(ex));
 		}
+		return make_uniq<SuccessResponse>();
+	}
+
+	case MessageType::CANCEL_REQUEST: {
+		// Deliberately does NOT acquire connection.lock — that lock is held by the
+		// PREPARE/FETCH we're trying to cancel. We just read the atomic and, if it
+		// matches the targeted client_query_id, flip the interrupt flag on the
+		// query's ClientContext. The blocked PREPARE/FETCH then bails on its own.
+		auto &connection = *connection_p;
+		auto requested = received_message.ClientQueryId();
+		auto active = connection.active_client_query_id.load();
+		if (requested.IsValid() && active != DConstants::INVALID_INDEX && requested.GetIndex() == active) {
+			connection.duckdb_connection->Interrupt();
+		}
+		// Always succeed: cancel is idempotent — a no-op when the target query
+		// already finished is a legitimate outcome, not an error.
 		return make_uniq<SuccessResponse>();
 	}
 	default: {

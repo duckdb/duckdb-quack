@@ -1,0 +1,51 @@
+# name: test/sql/cancel.test
+# description: CancelRequest interrupts an in-flight remote query
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+statement ok con1
+CALL quack_serve('quack:localhost', token='asdf');
+
+sleep 100 millisecond
+
+statement ok con2
+CREATE SECRET (TYPE quack, TOKEN 'asdf');
+
+# Sanity: a normal short query still works.
+query I con2
+FROM quack_query('quack:localhost', 'SELECT 42')
+----
+42
+
+# Schedule a one-shot local Interrupt() to fire ~500ms from now. By then the
+# next statement (a slow remote query) is in flight; the client-side watchdog
+# inside HttpsQuackClient::RequestInternal should observe IsInterrupted()=true,
+# post a CancelRequest with the matching client_query_id, and the server's
+# CancelRequest handler should call Connection::Interrupt() on the running
+# duckdb_connection. The remote query then aborts and the client surfaces an
+# Interrupted! error.
+statement ok con2
+CALL quack_test_schedule_interrupt(500);
+
+# Query shape matters: simpler "slow" queries (count(*) FROM range, ORDER BY ...
+# LIMIT 1, etc.) get constant-folded or pushed down by the optimizer and finish
+# in well under our 500ms window, defeating the test. hash() over a billion-row
+# range is genuinely CPU-bound and can't be shortcut.
+statement error con2
+FROM quack_query('quack:localhost', 'SELECT sum(hash(i)) FROM range(1_000_000_000) t(i)')
+----
+Interrupted!
+
+# Connection survives a cancel — a follow-up query on the same client works.
+query I con2
+FROM quack_query('quack:localhost', 'SELECT 43')
+----
+43
+
+statement ok con1
+CALL quack_stop('quack:localhost');

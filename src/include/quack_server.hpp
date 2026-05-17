@@ -1,7 +1,9 @@
 #pragma once
 
+#include <atomic>
 #include <thread>
 
+#include "duckdb/common/constants.hpp"
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 
@@ -32,6 +34,10 @@ struct QuackConnection {
 	//! Current result UUID
 	hugeint_t result_uuid;
 	string session_id;
+	//! client_query_id of the query currently being processed for this connection, or
+	//! INVALID_INDEX when idle. Read by CancelRequest handler without holding `lock`
+	//! so it can race with a PREPARE/FETCH that's holding `lock`.
+	std::atomic<idx_t> active_client_query_id {DConstants::INVALID_INDEX};
 };
 
 class QuackServer {

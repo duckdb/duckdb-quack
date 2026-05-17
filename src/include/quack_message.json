@@ -65,6 +65,10 @@
     "members": []
   },
   {
+    "class": "CancelRequestMessage",
+    "members": []
+  },
+  {
     "class": "PrepareResponseMessage",
     "members": [
       {
