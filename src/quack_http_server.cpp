@@ -72,15 +72,15 @@ HttpQuackServer::HttpQuackServer(ClientContext &context_p, const QuackUri &uri_p
 
 	// TODO: this is very liberal, and there might be reasonable cases to restrict to trusted domains (note, this is
 	// only relevant from within a Web browser, since other actors can just ignore the CORS convention
-	server->Options("/quack", [](const duckdb_httplib::Request &, duckdb_httplib::Response &res) {
+	server->Options(uri_p.Path(), [](const duckdb_httplib::Request &, duckdb_httplib::Response &res) {
 		res.set_header("Access-Control-Allow-Origin", "*");
 		res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
 		res.set_header("Access-Control-Allow-Headers", "*");
 		res.status = 204;
 	});
 
-	server->Post("/quack", [&](const duckdb_httplib::Request &, duckdb_httplib::Response &res,
-	                           const duckdb_httplib::ContentReader &content_reader) {
+	server->Post(uri_p.Path(), [&](const duckdb_httplib::Request &, duckdb_httplib::Response &res,
+	                               const duckdb_httplib::ContentReader &content_reader) {
 		res.set_header("Access-Control-Allow-Origin", "*");
 		MemoryStream stream;
 		content_reader([&](const char *data, size_t data_length) {

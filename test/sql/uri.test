@@ -6,50 +6,60 @@ require quack
 
 require httpfs
 
-query IIIII
+query IIIIIII
 select unnest(quack_uri_parser('quack:localhost', true));
 ----
-localhost	9494	false	true	https://localhost:9494
+localhost	9494	false	true	https://localhost:9494	/quack	https://localhost:9494/quack
 
-query IIIII
+query IIIIIII
 select unnest(quack_uri_parser('quack:localhost', false));
 ----
-localhost	9494	false	false	http://localhost:9494
+localhost	9494	false	false	http://localhost:9494	/quack	http://localhost:9494/quack
 
-query IIIII
+query IIIIIII
 select unnest(quack_uri_parser('quack://localhost', true));
 ----
-localhost	9494	false	true	https://localhost:9494
+localhost	9494	false	true	https://localhost:9494	/quack	https://localhost:9494/quack
 
-query IIIII
+query IIIIIII
 select unnest(quack_uri_parser('quack:localhost:1234', true));
 ----
-localhost	1234	false	true	https://localhost:1234
+localhost	1234	false	true	https://localhost:1234	/quack	https://localhost:1234/quack
 
-query IIIII
+query IIIIIII
 select unnest(quack_uri_parser('quack:otherhost', true));
 ----
-otherhost	9494	false	true	https://otherhost:9494
+otherhost	9494	false	true	https://otherhost:9494	/quack	https://otherhost:9494/quack
 
-query IIIII
+query IIIIIII
 select unnest(quack_uri_parser('quack:127.0.0.1', true));
 ----
-127.0.0.1	9494	false	true	https://127.0.0.1:9494
+127.0.0.1	9494	false	true	https://127.0.0.1:9494	/quack	https://127.0.0.1:9494/quack
 
-query IIIII
+query IIIIIII
 select unnest(quack_uri_parser('quack:127.0.0.1:1234', true));
 ----
-127.0.0.1	1234	false	true	https://127.0.0.1:1234
+127.0.0.1	1234	false	true	https://127.0.0.1:1234	/quack	https://127.0.0.1:1234/quack
 
-query IIIII
+query IIIIIII
+select unnest(quack_uri_parser('quack:127.0.0.1:1234/duckdb', true));
+----
+127.0.0.1	1234	false	true	https://127.0.0.1:1234	/duckdb	https://127.0.0.1:1234/duckdb
+
+query IIIIIII
 select unnest(quack_uri_parser('quack:[::1]', true));
 ----
-::1	9494	true	true	https://[::1]:9494
+::1	9494	true	true	https://[::1]:9494	/quack	https://[::1]:9494/quack
 
-query IIIII
+query IIIIIII
 select unnest(quack_uri_parser('quack:[::1]:1234', true));
 ----
-::1	1234	true	true	https://[::1]:1234
+::1	1234	true	true	https://[::1]:1234	/quack	https://[::1]:1234/quack
+
+query IIIIIII
+select unnest(quack_uri_parser('quack:[::1]:1234/duckdb', true));
+----
+::1	1234	true	true	https://[::1]:1234	/duckdb	https://[::1]:1234/duckdb
 
 
 #failure cases

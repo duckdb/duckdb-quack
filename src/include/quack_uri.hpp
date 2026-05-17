@@ -14,6 +14,9 @@ public:
 	string Http() const {
 		return http;
 	}
+	string HttpEndpoint() const {
+		return http + path;
+	}
 	string Uri() const {
 		return uri;
 	}
@@ -33,12 +36,15 @@ public:
 	bool IPv6() const {
 		return ipv6;
 	}
+	string Path() const {
+		return path;
+	}
 	bool IsLocal() const {
 		return StringUtil::Lower(host) == "localhost" || host == "127.0.0.1" || host == "::1";
 	}
 	bool operator==(const QuackUri &other) const {
 		return other.ssl == ssl && other.ipv6 == ipv6 && other.host == host && other.port == port &&
-		       other.http == http && other.uri == uri;
+		       other.http == http && other.path == path && other.uri == uri;
 	}
 	bool operator!=(const QuackUri &other) const {
 		return !(*this == other);
@@ -50,6 +56,7 @@ private:
 	string host;
 	uint16_t port; // default port!
 	string http;
+	string path;
 	string uri;
 };
 
