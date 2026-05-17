@@ -32,7 +32,7 @@ unique_ptr<QuackMessage> HttpsQuackClient::RequestInternal(optional_ptr<ClientCo
 	lock_guard<mutex> guard(request_mutex);
 
 	auto &http_util = HTTPUtil::Get(db);
-	auto request_url = uri.Http() + "/quack";
+	auto request_url = uri.HttpEndpoint();
 	if (!http_params) {
 		if (context && context->transaction.HasActiveTransaction()) {
 			http_params = http_util.InitializeParameters(*context, request_url);
@@ -114,7 +114,7 @@ unique_ptr<QuackMessage> HttpsQuackClient::RequestInternal(optional_ptr<ClientCo
 				error = response_message->Cast<ErrorResponse>().ErrorMessage();
 			}
 			auto msg =
-			    QuackLogType::ConstructLogMessage(request_type, connection_id, client_query_id, query, uri.Http(),
+			    QuackLogType::ConstructLogMessage(request_type, connection_id, client_query_id, query, uri.HttpEndpoint(),
 			                                      end_time - start_time, response_message->Type(), error);
 			logger.WriteLog(QuackLogType::NAME, QuackLogType::LEVEL, msg);
 		}

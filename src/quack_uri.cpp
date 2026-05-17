@@ -7,6 +7,7 @@ QuackUri::QuackUri(string uri_p, bool ssl_p) : ssl(ssl_p), uri(uri_p) {
 	// whitespace be gone
 	ipv6 = false;
 	port = 9494;
+	path = "/quack";
 	StringUtil::Trim(uri);
 	// first off, lets be tolerant and accept this variant, too
 	if (StringUtil::StartsWith(uri, "quack://")) {
@@ -20,6 +21,16 @@ QuackUri::QuackUri(string uri_p, bool ssl_p) : ssl(ssl_p), uri(uri_p) {
 	if (remainder.empty()) {
 		throw InvalidInputException("Missing hostname");
 	}
+
+	auto path_pos = remainder.find('/');
+	if (path_pos != string::npos) {
+		path = remainder.substr(path_pos);
+		remainder = remainder.substr(0, path_pos);
+		if (path.empty()) {
+			throw InvalidInputException("Invalid Path");
+		}
+	}
+
 	// we have an ipv6 URL
 	if (StringUtil::StartsWith(remainder, "[")) {
 		if (!StringUtil::Contains(remainder, ']')) {
@@ -32,6 +43,9 @@ QuackUri::QuackUri(string uri_p, bool ssl_p) : ssl(ssl_p), uri(uri_p) {
 			throw InvalidInputException("Missing IPv6 Address");
 		}
 		remainder = remainder.substr(pos + 1);
+		if (!remainder.empty() && !StringUtil::StartsWith(remainder, ":")) {
+			throw InvalidInputException("Invalid IPv6 URL");
+		}
 	}
 
 	// a port was specified
@@ -57,6 +71,9 @@ QuackUri::QuackUri(string uri_p, bool ssl_p) : ssl(ssl_p), uri(uri_p) {
 	if (!ipv6) {
 		host = remainder;
 	}
+	if (host.empty()) {
+		throw InvalidInputException("Missing hostname");
+	}
 	http = StringUtil::Format("http%s://%s:%d", ssl ? "s" : "", ipv6 ? "[" + host + "]" : host, port);
 }
 
@@ -70,7 +87,9 @@ static void QuackUriParser(const DataChunk &args, ExpressionState &, Vector &res
 	                                  {"port", Value::USMALLINT(parsed.Port())},
 	                                  {"ipv6", Value::BOOLEAN(parsed.IPv6())},
 	                                  {"ssl", Value::BOOLEAN(parsed.Ssl())},
-	                                  {"url", Value(parsed.Http())}}));
+	                                  {"url", Value(parsed.Http())},
+	                                  {"path", Value(parsed.Path())},
+	                                  {"endpoint", Value(parsed.HttpEndpoint())}}));
 	result.SetVectorType(VectorType::CONSTANT_VECTOR);
 }
 
@@ -81,7 +100,9 @@ ScalarFunction QuackParseUriFunction::GetFunction() {
 	                                           {"port", LogicalType::USMALLINT},
 	                                           {"ipv6", LogicalType::BOOLEAN},
 	                                           {"ssl", LogicalType::BOOLEAN},
-	                                           {"url", LogicalType::VARCHAR}}),
+	                                           {"url", LogicalType::VARCHAR},
+	                                           {"path", LogicalType::VARCHAR},
+	                                           {"endpoint", LogicalType::VARCHAR}}),
 	                      QuackUriParser);
 }
 

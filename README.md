@@ -34,6 +34,15 @@ FROM remote.hello;
 
 This should show the content of the remote table `hello` on the client side.
 
+Quack URIs can include an HTTP path when the endpoint is exposed behind a path-prefixing reverse proxy:
+
+```sql
+CALL quack_serve('quack:localhost/duckdb', token = 'super_secret');
+ATTACH 'quack:localhost/duckdb' AS remote;
+```
+
+When a path is provided, clients send RPC requests to that path instead of the default `/quack` endpoint.
+
 We can also copy data from client to server:
 
 ```sql

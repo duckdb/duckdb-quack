@@ -31,13 +31,23 @@ need to connect. This token can also be [set](#authentication--authorization).
 
 RPC endpoints use the `quack:` scheme, some examples:
 
-| URI                       | Host        | Port (default 1294) |
-|---------------------------|-------------|---------------------|
-| `quack:localhost`         | `localhost` | `1294`              |
-| `quack:myhost:9000`       | `myhost`    | `9000`              |
-| `quack:127.0.0.1`         | `127.0.0.1` | `1294`              |
-| `quack:[::1]:1234`        | `::1`       | `1234` (IPv6)       |
-| `quack://localhost`       | `localhost` | `1294`              |
+| URI                            | Host        | Port (default 9494) | HTTP endpoint                 |
+|--------------------------------|-------------|---------------------|-------------------------------|
+| `quack:localhost`              | `localhost` | `9494`              | `/quack`                      |
+| `quack:myhost:9000`            | `myhost`    | `9000`              | `/quack`                      |
+| `quack:myhost:9000/duckdb`     | `myhost`    | `9000`              | `/duckdb`                     |
+| `quack:127.0.0.1`              | `127.0.0.1` | `9494`              | `/quack`                      |
+| `quack:[::1]:1234`             | `::1`       | `1234` (IPv6)       | `/quack`                      |
+| `quack://localhost`            | `localhost` | `9494`              | `/quack`                      |
+
+If a URI includes a path, clients send RPC requests to that path instead of
+the default `/quack` endpoint. This is useful when routing Quack through a
+reverse proxy under a path prefix:
+
+```sql
+CALL rpc_start('quack:localhost:9000/duckdb');
+ATTACH 'quack:localhost:9000/duckdb' AS rpc;
+```
 
 You can parse and validate a URI with the `rpc_uri_parser(uri, ssl)`
 scalar function.
@@ -147,7 +157,7 @@ SET rpc_default_token = '<token-from-rpc_start>';
 
 | Function                      | Description                                                         |
 |------------------------------|---------------------------------------------------------------------|
-| `rpc_uri_parser(uri, ssl)`   | Parse an RPC URI into `{host, port, ipv6, ssl, url}`.               |
+| `rpc_uri_parser(uri, ssl)`   | Parse an RPC URI into `{host, port, ipv6, ssl, url, path, endpoint}`. |
 | `rpc_auth_token(sid, token)` | Default authentication callback; compares against `rpc_default_token`. |
 | `rpc_dummy_authorization(sid, query)` | Default authorization callback; always allows.              |
 

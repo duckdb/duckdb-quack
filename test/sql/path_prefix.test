@@ -1,0 +1,27 @@
+# name: test/sql/path_prefix.test
+# description: verify quack URI path prefixes are used as the HTTP endpoint
+# group: [sql]
+
+require quack
+
+require httpfs
+
+query III con1
+call quack_serve('quack:localhost:20119/duckdb', token='asdf');
+----
+quack:localhost:20119/duckdb	http://localhost:20119	asdf
+
+sleep 100 millisecond
+
+query I con2
+from quack_query('quack:localhost:20119/duckdb', 'select 42', token='asdf')
+----
+42
+
+statement error con2
+from quack_query('quack:localhost:20119', 'select 42', token='asdf')
+----
+Failed to send message
+
+statement ok con1
+call quack_stop('quack:localhost:20119/duckdb');
