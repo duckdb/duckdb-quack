@@ -160,8 +160,7 @@ unique_ptr<QuackMessage> HttpsQuackClient::RequestInternal(optional_ptr<ClientCo
 		// every connection setup / disconnect / append.
 		unique_ptr<InterruptWatchdog> watchdog;
 		if (context && client_query_id.IsValid() && MessageIsCancellable(request_type) && !connection_id.empty()) {
-			watchdog =
-			    make_uniq<InterruptWatchdog>(db, uri, connection_id, *context, client_query_id.GetIndex());
+			watchdog = make_uniq<InterruptWatchdog>(db, uri, connection_id, *context, client_query_id.GetIndex());
 		}
 
 		try {
