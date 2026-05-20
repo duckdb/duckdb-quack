@@ -1,4 +1,5 @@
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/secret/secret.hpp"
@@ -21,8 +22,8 @@
 namespace duckdb {
 
 QuackCatalog::QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri, ClientContext &context,
-                           const string &token)
-    : Catalog(db_p) {
+                           const string &token, string schema_filter_p)
+    : Catalog(db_p), schema_filter(std::move(schema_filter_p)) {
 	// connect to the server
 	client_connection = QuackClient::ConnectToServer(context, server_uri, token);
 
@@ -33,8 +34,8 @@ QuackCatalog::QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri, C
 
 QuackLoadCatalogData QuackCatalog::LoadCatalog(ClientContext &context) {
 	QuackLoadCatalogData result;
-	result.schemas = ExecuteCommandInternal(context, QuackSchemaSet::GetLoadQuery());
-	result.tables = ExecuteCommandInternal(context, QuackTableSet::GetLoadQuery());
+	result.schemas = ExecuteCommandInternal(context, QuackSchemaSet::GetLoadQuery(schema_filter));
+	result.tables = ExecuteCommandInternal(context, QuackTableSet::GetLoadQuery(schema_filter));
 	return result;
 }
 
@@ -94,6 +95,10 @@ const string &QuackCatalog::GetConnectionId() {
 }
 
 optional_ptr<CatalogEntry> QuackCatalog::CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) {
+	if (!schema_filter.empty() && !StringUtil::CIEquals(info.schema, schema_filter)) {
+		throw BinderException("Cannot create schema \"%s\" through schema-scoped Quack catalog \"%s\"", info.schema,
+		                      schema_filter);
+	}
 	auto &quack_transaction = QuackTransaction::Get(transaction);
 	// create schema remotely
 	quack_transaction.Query(info.ToString());

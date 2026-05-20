@@ -65,13 +65,17 @@ QuackTableSet::QuackTableSet(QuackSchemaCatalogEntry &parent)
     : QuackCatalogSet(parent.ParentCatalog().Cast<QuackCatalog>()), schema(parent) {
 }
 
-string QuackTableSet::GetLoadQuery() {
+string QuackTableSet::GetLoadQuery(const string &schema_filter) {
+	auto schema_predicate =
+	    schema_filter.empty() ? string() : StringUtil::Format("WHERE schema_name = %s\n", SQLString(schema_filter));
 	return R"(
 SELECT schema_name, sql, 'table'
 FROM duckdb_tables()
+)" + schema_predicate + R"(
 UNION ALL
 SELECT schema_name, view_name, 'view'
 FROM duckdb_views()
+)" + schema_predicate + R"(
 	)";
 }
 
@@ -79,6 +83,7 @@ TableFunction QuackTableCatalogEntry::GetScanFunction(ClientContext &context, un
 	auto &quack_catalog = catalog.Cast<QuackCatalog>();
 	auto bind_data = make_uniq<QuackScanBindData>();
 	bind_data->client_connection = quack_catalog.GetClientConnection();
+	bind_data->schema_name = ParentSchema().name;
 	bind_data->table_name = name;
 	for (auto &col : GetColumns().Physical()) {
 		bind_data->column_names.push_back(col.Name());

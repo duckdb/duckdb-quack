@@ -1,0 +1,55 @@
+# name: test/sql/attach_schema.test
+# description: test schema-scoped quack attach
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+statement ok con1
+create table t as values (7);
+
+statement ok con1
+create schema wanted;
+
+statement ok con1
+create table wanted.t as values (42);
+
+statement ok con1
+create schema other;
+
+statement ok con1
+create table other.t as values (99);
+
+foreach server 'quack:localhost'
+
+statement ok con1
+call quack_serve({server}, token='asdf');
+
+statement ok con2
+attach {server} as rpc (token 'asdf', schema 'wanted')
+
+query I con2
+select col0 from rpc.wanted.t;
+----
+42
+
+statement error con2
+select * from rpc.other.t;
+----
+schema "other" does not exist
+
+statement error con2
+create schema rpc.other;
+----
+Cannot create schema "other" through schema-scoped Quack catalog "wanted"
+
+statement ok con2
+detach rpc;
+
+statement ok con1
+call quack_stop({server});
+
+endloop

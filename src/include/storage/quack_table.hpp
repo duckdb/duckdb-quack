@@ -20,7 +20,7 @@ public:
 	QuackTableSet(ClientContext &context, QuackSchemaCatalogEntry &parent, const QuackLoadCatalogData &load_data);
 	explicit QuackTableSet(QuackSchemaCatalogEntry &parent);
 
-	static string GetLoadQuery();
+	static string GetLoadQuery(const string &schema_filter = string());
 
 private:
 	QuackSchemaCatalogEntry &schema;

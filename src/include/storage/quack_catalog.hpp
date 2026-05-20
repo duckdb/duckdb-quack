@@ -21,7 +21,7 @@ class QuackClientConnection;
 class QuackCatalog : public Catalog {
 public:
 	explicit QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri_p, ClientContext &context,
-	                      const string &token);
+	                      const string &token, string schema_filter = string());
 	~QuackCatalog() override;
 
 public:
@@ -70,6 +70,7 @@ private:
 private:
 	shared_ptr<QuackClientConnection> client_connection;
 	unique_ptr<QuackSchemaSet> schemas;
+	string schema_filter;
 };
 
 } // namespace duckdb
