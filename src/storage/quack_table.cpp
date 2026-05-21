@@ -71,11 +71,13 @@ string QuackTableSet::GetLoadQuery(const string &schema_filter) {
 	return R"(
 SELECT schema_name, sql, 'table'
 FROM duckdb_tables()
-)" + schema_predicate + R"(
+)" + schema_predicate +
+	       R"(
 UNION ALL
 SELECT schema_name, view_name, 'view'
 FROM duckdb_views()
-)" + schema_predicate + R"(
+)" + schema_predicate +
+	       R"(
 	)";
 }
 
