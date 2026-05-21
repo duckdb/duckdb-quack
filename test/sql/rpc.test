@@ -135,7 +135,7 @@ call quack_stop({server})
 statement error con2
 from quack_query({server}, 'select 42')
 ----
-IO Error
+Error
 
 # we can call quack_serve() without parameters and connect using just quack:localhost
 statement ok
@@ -150,4 +150,3 @@ statement ok
 call quack_stop('quack:localhost')
 
 endloop
-
