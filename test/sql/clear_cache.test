@@ -18,6 +18,9 @@ statement ok con2
 attach 'quack:localhost' as rpc
 
 statement ok con2
+attach 'quack:localhost' as rpc2
+
+statement ok con2
 call system.main.quack_query_by_name('rpc', 'CREATE TABLE t1(i INTEGER); INSERT INTO t1 VALUES (1),(2),(3);')
 
 statement error con2
@@ -26,10 +29,25 @@ SELECT i FROM rpc.t1
 Table with name t1 does not exist
 
 statement ok con2
-CALL quack_clear_cache()
+CALL quack_clear_cache('rpc')
 
 query I con2
 SELECT i FROM rpc.t1 ORDER BY i
+----
+1
+2
+3
+
+statement error con2
+SELECT i FROM rpc2.t1
+----
+Table with name t1 does not exist
+
+statement ok con2
+CALL quack_clear_cache('rpc2')
+
+query I con2
+SELECT i FROM rpc2.t1 ORDER BY i
 ----
 1
 2
@@ -76,6 +94,9 @@ Catalog Error: Table with name t1 does not exist
 
 statement ok con2
 detach rpc;
+
+statement ok con2
+detach rpc2;
 
 statement ok con1
 call quack_stop('quack:localhost');
