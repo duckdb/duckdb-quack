@@ -1,5 +1,8 @@
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/secret/secret_manager.hpp"
 
+#include "quack_client.hpp"
+#include "quack_message.hpp"
 #include "quack_startstop.hpp"
 #include "quack_storage.hpp"
 
@@ -179,4 +182,75 @@ static void QuackServerList(ClientContext &context, TableFunctionInput &data_p, 
 
 TableFunction QuackServerListFunction::GetFunction() {
 	return TableFunction("quack_server_list", {}, QuackServerList, QuackServerListBind);
+}
+
+struct QuackStatusFunctionData : public TableFunctionData {
+	bool finished = false;
+	QuackUri target_uri;
+	string token;
+};
+
+static unique_ptr<FunctionData> QuackStatusBind(ClientContext &context, TableFunctionBindInput &input,
+                                                vector<LogicalType> &return_types, vector<string> &names) {
+	auto bind_data = make_uniq<QuackStatusFunctionData>();
+	auto &uri_value = input.inputs[0];
+	if (uri_value.IsNull() || uri_value.GetValue<string>().empty()) {
+		throw InvalidInputException("Invalid quack URI specified");
+	}
+
+	// Mirror quack_query: SSL off by default for local hosts, optionally overridden by
+	// the `disable_ssl` named parameter.
+	auto initial_uri = QuackUri(uri_value.GetValue<string>());
+	auto enable_ssl = !initial_uri.IsLocal();
+	auto disable_it = input.named_parameters.find("disable_ssl");
+	if (disable_it != input.named_parameters.end() && !disable_it->second.IsNull()) {
+		enable_ssl = !disable_it->second.GetValue<bool>();
+	}
+	bind_data->target_uri = QuackUri(initial_uri.Uri(), enable_ssl);
+
+	auto token_it = input.named_parameters.find("token");
+	if (token_it != input.named_parameters.end() && !token_it->second.IsNull()) {
+		bind_data->token = token_it->second.GetValue<string>();
+	}
+
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("directive");
+
+	return std::move(bind_data);
+}
+
+static void QuackStatusFun(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &bind_data = data_p.bind_data->CastNoConst<QuackStatusFunctionData>();
+	if (bind_data.finished) {
+		return;
+	}
+
+	// Resolve token: explicit param > quack secret for this URI. Required — STATUS now auth-checks.
+	auto token = bind_data.token;
+	if (token.empty()) {
+		auto &secret_manager = SecretManager::Get(context);
+		auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
+		auto match = secret_manager.LookupSecret(transaction, bind_data.target_uri.Uri(), "quack");
+		if (match.HasMatch()) {
+			const auto &kv = dynamic_cast<const KeyValueSecret &>(*match.secret_entry->secret);
+			token = kv.TryGetValue("token", true).ToString();
+		}
+	}
+	if (token.empty()) {
+		throw InvalidInputException("Could not find a Quack authentication token for quack_status()");
+	}
+
+	auto client = QuackClient::GetClient(context, bind_data.target_uri);
+	auto response = client->Request<StatusResponse>(&context, make_uniq<StatusRequest>(token));
+
+	output.SetValue(0, 0, Value(response->TrimmedDirective()));
+	output.SetCardinality(1);
+	bind_data.finished = true;
+}
+
+TableFunction QuackStatusFunction::GetFunction() {
+	auto fun = TableFunction("quack_status", {LogicalType::VARCHAR}, QuackStatusFun, QuackStatusBind);
+	fun.named_parameters["token"] = LogicalType::VARCHAR;
+	fun.named_parameters["disable_ssl"] = LogicalType::BOOLEAN;
+	return fun;
 }

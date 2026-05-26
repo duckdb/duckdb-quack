@@ -17,6 +17,8 @@ enum class MessageType : uint8_t {
 	APPEND_REQUEST = 9,
 	SUCCESS_RESPONSE = 10,
 	DISCONNECT_MESSAGE = 11,
+	STATUS_REQUEST = 12,
+	STATUS_RESPONSE = 13,
 	ERROR_RESPONSE = 100
 };
 
@@ -381,6 +383,81 @@ protected:
 
 private:
 	ErrorData error;
+};
+
+//! STATUS_REQUEST — minimal probe carrying just the server's auth token. Server compares it
+//! against its own `Token()` and returns ErrorResponse on mismatch. Does NOT count as activity
+//! for the idle-timeout computation (that's the load-bearing property of this message-pair).
+class StatusRequest : public QuackMessage {
+public:
+	static constexpr MessageType TYPE = MessageType::STATUS_REQUEST;
+
+	explicit StatusRequest(string token_p) : QuackMessage(TYPE), token(std::move(token_p)) {
+	}
+
+	const string &Token() const {
+		return token;
+	}
+
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<StatusRequest> Deserialize(Deserializer &deserializer);
+
+protected:
+	StatusRequest() : QuackMessage(TYPE) {
+	}
+
+private:
+	string token;
+};
+
+//! STATUS_RESPONSE — single field: a 16-char ASCII directive, space-padded ("OK" or "IDLE",
+//! right-padded to 16). The payload is intentionally minimal and **frozen** at this shape:
+//! clients (especially lightweight HTTP-only ones like AWS Lambda) can byte-compare the
+//! response against two known fixed sequences without parsing.
+//!
+//! Directive is derived purely from `quack_idle_timeout_seconds` + the server's tracked
+//! last-activity time. STATUS_REQUEST does NOT bump activity — that's the load-bearing
+//! property of this message-type pair (any other RPC would corrupt the idle measurement just
+//! by polling).
+class StatusResponse : public QuackMessage {
+public:
+	static constexpr MessageType TYPE = MessageType::STATUS_RESPONSE;
+	static constexpr idx_t DIRECTIVE_LENGTH = 16;
+
+	explicit StatusResponse(const string &directive_p) : QuackMessage(TYPE), directive(PadDirective(directive_p)) {
+	}
+
+	//! Returns the raw 16-char padded directive. Use `TrimmedDirective()` for the logical value.
+	const string &Directive() const {
+		return directive;
+	}
+
+	//! Returns the directive with trailing spaces removed ("OK" / "IDLE" etc).
+	string TrimmedDirective() const {
+		auto end = directive.find_last_not_of(' ');
+		return end == string::npos ? string() : directive.substr(0, end + 1);
+	}
+
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<StatusResponse> Deserialize(Deserializer &deserializer);
+
+protected:
+	StatusResponse() : QuackMessage(TYPE), directive(DIRECTIVE_LENGTH, ' ') {
+	}
+
+	//! Right-pads (or throws if too long) a logical directive value to DIRECTIVE_LENGTH chars.
+	static string PadDirective(const string &raw) {
+		if (raw.size() > DIRECTIVE_LENGTH) {
+			throw InternalException("Directive '%s' exceeds fixed length of %d", raw,
+			                        static_cast<int>(DIRECTIVE_LENGTH));
+		}
+		string padded = raw;
+		padded.append(DIRECTIVE_LENGTH - raw.size(), ' ');
+		return padded;
+	}
+
+private:
+	string directive; // always exactly DIRECTIVE_LENGTH chars (space-padded)
 };
 
 } // namespace duckdb

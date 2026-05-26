@@ -118,6 +118,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(QuackServeFunction::GetFunction());
 	loader.RegisterFunction(QuackStopFunction::GetFunction());
 	loader.RegisterFunction(QuackServerListFunction::GetFunction());
+	loader.RegisterFunction(QuackStatusFunction::GetFunction());
 	loader.RegisterFunction(QuackClearCacheFunction::GetFunction());
 	loader.RegisterFunction(GetQuackIdentifyFunction());
 
@@ -155,6 +156,15 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	config.AddExtensionOption("quack_fetch_batch_chunks", "Maximum number of DataChunks returned per FETCH response",
 	                          LogicalType::UBIGINT, Value::UBIGINT(12));
+
+	// STATUS feature — instance-wide setting shared by every quack server hosted in this DuckDB
+	// instance (a single instance can listen on multiple URIs / tokens; they all read the same
+	// value). 0 (default) disables auto-IDLE reporting; positive values are an inclusive
+	// inactivity threshold in seconds.
+	config.AddExtensionOption("quack_idle_timeout_seconds",
+	                          "Seconds of inactivity before STATUS reports IDLE (0 = disabled). "
+	                          "Instance-wide: applies to every server hosted by this DuckDB instance.",
+	                          LogicalType::BIGINT, Value::BIGINT(0), nullptr, SetScope::GLOBAL);
 
 	// Process-wide fallback anchor for whoami().uptime when whoami_started_at isn't set.
 	// Stored as BIGINT epoch-microseconds to stay TZ-invariant regardless of ICU state.

@@ -19,4 +19,9 @@ public:
 	static TableFunction GetFunction();
 };
 
+class QuackStatusFunction {
+public:
+	static TableFunction GetFunction();
+};
+
 } // namespace duckdb

@@ -138,6 +138,26 @@ unique_ptr<PrepareResponseMessage> PrepareResponseMessage::Deserialize(Deseriali
 	return result;
 }
 
+void StatusRequest::Serialize(Serializer &serializer) const {
+	serializer.WritePropertyWithDefault<string>(1, "token", token);
+}
+
+unique_ptr<StatusRequest> StatusRequest::Deserialize(Deserializer &deserializer) {
+	auto result = duckdb::unique_ptr<StatusRequest>(new StatusRequest());
+	deserializer.ReadPropertyWithDefault<string>(1, "token", result->token);
+	return result;
+}
+
+void StatusResponse::Serialize(Serializer &serializer) const {
+	serializer.WritePropertyWithDefault<string>(1, "directive", directive);
+}
+
+unique_ptr<StatusResponse> StatusResponse::Deserialize(Deserializer &deserializer) {
+	auto result = duckdb::unique_ptr<StatusResponse>(new StatusResponse());
+	deserializer.ReadPropertyWithDefault<string>(1, "directive", result->directive);
+	return result;
+}
+
 void SuccessResponse::Serialize(Serializer &serializer) const {
 }
 

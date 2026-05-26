@@ -1,0 +1,80 @@
+# name: test/sql/status.test
+# description: STATUS — directive-only payload. quack_idle_timeout_seconds drives the OK/IDLE
+# group: [sql]
+
+require notwindows
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+# Boot a server.
+statement ok
+FROM quack_serve('quack:127.0.0.1', token='abcd');
+
+# Wrong token is rejected.
+statement error
+FROM quack_status('quack:127.0.0.1', token='wrong');
+----
+Authentication failed
+
+# Missing token (and no secret in scope) is also rejected.
+statement error
+FROM quack_status('quack:127.0.0.1');
+----
+Could not find a Quack authentication token
+
+# Correct token: no timeout configured → OK regardless of inactivity.
+query I
+FROM quack_status('quack:127.0.0.1', token='abcd');
+----
+OK
+
+# Positive timeout with fresh activity → still OK.
+statement ok
+SET quack_idle_timeout_seconds = 3600;
+
+query I
+FROM quack_status('quack:127.0.0.1', token='abcd');
+----
+OK
+
+# Shorten timeout to 1s, sleep > 1s. STATUS does NOT bump activity, so polling here doesn't
+# reset the clock — the flip should happen.
+statement ok
+SET quack_idle_timeout_seconds = 1;
+
+sleep 2 second
+
+query I
+FROM quack_status('quack:127.0.0.1', token='abcd');
+----
+IDLE
+
+# Real query bumps last_activity_at, so next STATUS flips back to OK.
+query I
+FROM quack_query('quack:127.0.0.1', 'SELECT 1', token='abcd');
+----
+1
+
+query I
+FROM quack_status('quack:127.0.0.1', token='abcd');
+----
+OK
+
+# Secret-manager fallback works too.
+statement ok
+CREATE SECRET (type quack, token 'abcd');
+
+query I
+FROM quack_status('quack:127.0.0.1');
+----
+OK
+
+statement ok
+SET quack_idle_timeout_seconds = 0;
+
+statement ok
+CALL quack_stop('quack:127.0.0.1');

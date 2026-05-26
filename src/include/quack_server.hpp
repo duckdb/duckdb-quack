@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <chrono>
 #include <thread>
 
 #include "duckdb/common/optional_ptr.hpp"
@@ -19,6 +21,7 @@ class QueryResult;
 class DatabaseInstance;
 class PreparedStatement;
 class EncryptionState;
+enum class MessageType : uint8_t;
 
 struct QuackConnection {
 	explicit QuackConnection(string session_id_p);
@@ -79,10 +82,26 @@ public:
 		return active_connections.size();
 	}
 
+	//! Returns the wall-clock epoch seconds of the most recent non-STATUS message handled by this server.
+	//! STATUS_REQUEST handling does NOT bump this — the timestamp reflects actual work, not health-checks.
+	int64_t LastActivityAtEpochSeconds() const {
+		return last_activity_at_epoch_seconds.load();
+	}
+
+	//! Bumps last_activity_at_epoch_seconds if `type` is anything other than STATUS_REQUEST.
+	//! Called from HandleMessage on every incoming message.
+	void OnMessageReceived(MessageType type);
+
 protected:
 	unique_ptr<QuackMessage> HandleMessage(MemoryStream &read_stream);
 	unique_ptr<QuackMessage> HandleMessageInternal(DatabaseInstance &db, QuackMessage &received_message,
 	                                               optional_ptr<QuackConnection> connection);
+
+	//! Reads `quack_idle_timeout_seconds` + `quack_idle` settings and computes the directive
+	//! ("OK" or "IDLE") for STATUS_RESPONSE. Read fresh on every STATUS request so SET changes
+	//! take effect immediately. The server never rejects traffic based on this — directive is
+	//! purely a signal for orchestrators that decide externally what to do with idle instances.
+	string EvaluateDirective(DatabaseInstance &db) const;
 
 protected:
 	std::vector<std::thread> listen_threads;
@@ -93,6 +112,10 @@ protected:
 
 	mutex session_id_rng_mutex;
 	shared_ptr<EncryptionState> session_id_rng;
+
+	//! Wall-clock epoch seconds of the most recent non-STATUS message. Initialized to server-start time;
+	//! bumped by OnMessageReceived. system_clock-derived so it's serializable to clients.
+	std::atomic<int64_t> last_activity_at_epoch_seconds;
 
 private:
 	QuackUri uri;

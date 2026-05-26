@@ -27,9 +27,37 @@ void QuackServer::ValidateToken(const string &token) {
 	}
 }
 
+static int64_t NowEpochSeconds() {
+	return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
+	    .count();
+}
+
 QuackServer::QuackServer(ClientContext &context_p, const QuackUri &uri_p, const string &token_p)
-    : db_ptr(context_p.db), uri(uri_p), token(token_p) {
+    : db_ptr(context_p.db), last_activity_at_epoch_seconds(NowEpochSeconds()), uri(uri_p), token(token_p) {
 	ValidateToken(token);
+}
+
+void QuackServer::OnMessageReceived(MessageType type) {
+	// STATUS probes do not count as activity — health-checking should not keep an idle server alive.
+	if (type != MessageType::STATUS_REQUEST) {
+		last_activity_at_epoch_seconds.store(NowEpochSeconds());
+	}
+}
+
+string QuackServer::EvaluateDirective(DatabaseInstance &db) const {
+	auto &config = DBConfig::GetConfig(db);
+
+	// Derive from idle timeout. A 0 / negative / unset timeout disables auto-IDLE reporting.
+	Value timeout_val;
+	if (!config.TryGetCurrentSetting("quack_idle_timeout_seconds", timeout_val) || timeout_val.IsNull()) {
+		return "OK";
+	}
+	auto timeout_seconds = timeout_val.GetValue<int64_t>();
+	if (timeout_seconds <= 0) {
+		return "OK";
+	}
+	auto elapsed = NowEpochSeconds() - last_activity_at_epoch_seconds.load();
+	return (elapsed >= timeout_seconds) ? "IDLE" : "OK";
 }
 
 QuackServer::~QuackServer() {
@@ -155,6 +183,7 @@ bool ServerSupportsMessage(MessageType type) {
 	case MessageType::FETCH_REQUEST:
 	case MessageType::APPEND_REQUEST:
 	case MessageType::DISCONNECT_MESSAGE:
+	case MessageType::STATUS_REQUEST:
 		return true;
 	default:
 		return false;
@@ -164,6 +193,7 @@ bool ServerSupportsMessage(MessageType type) {
 bool MessageRequiresConnection(MessageType type) {
 	switch (type) {
 	case MessageType::CONNECTION_REQUEST:
+	case MessageType::STATUS_REQUEST:
 		return false;
 	default:
 		return true;
@@ -197,6 +227,10 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
 	if (!ServerSupportsMessage(header.type)) {
 		return make_uniq<ErrorResponse>("Unsupported message type for server");
 	}
+
+	// Record activity (no-op for STATUS_REQUEST) before deserializing the body — that way slow
+	// or malformed payloads still count as activity from the wall-clock perspective.
+	OnMessageReceived(header.type);
 
 	// if the message requires it, obtain a connection
 	// these are basically all messages aside from connect request
@@ -277,6 +311,13 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			return make_uniq<ErrorResponse>("Connection does not exist / already disconnected");
 		}
 		return make_uniq<SuccessResponse>();
+	}
+	case MessageType::STATUS_REQUEST: {
+		auto &status_request = received_message.Cast<StatusRequest>();
+		if (status_request.Token() != Token()) {
+			return make_uniq<ErrorResponse>("Authentication failed");
+		}
+		return make_uniq<StatusResponse>(EvaluateDirective(db));
 	}
 	case MessageType::PREPARE_REQUEST: {
 		auto &prepare_request_message = received_message.Cast<PrepareRequestMessage>();
