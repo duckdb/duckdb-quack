@@ -1,5 +1,8 @@
 #define DUCKDB_EXTENSION_MAIN
 
+#include <chrono>
+#include <thread>
+
 #include "duckdb/catalog/default/default_table_functions.hpp"
 #include "duckdb/logging/log_manager.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -110,6 +113,41 @@ static TableFunction GetQuackIdentifyFunction() {
 	return fun;
 }
 
+// Test-only: schedule a one-shot Interrupt() on the current ClientContext after a
+// delay. Used by the cancel sqllogic test to deterministically fire a local
+// interrupt while a slow remote query is in flight — avoiding any dependency on
+// OS-level Ctrl-C delivery. Mirrors DuckDB's convention of always-registered
+// test helpers (test_all_types, force_checkpoint).
+static void TestScheduleInterruptExecFn(ClientContext &, TableFunctionInput &, DataChunk &) {
+	// no-op: side effect is in bind
+}
+
+static unique_ptr<FunctionData> TestScheduleInterruptBindFn(ClientContext &context, TableFunctionBindInput &input,
+                                                            vector<LogicalType> &return_types, vector<string> &names) {
+	auto delay = input.inputs[0].GetValue<int64_t>();
+	// Hold a weak_ptr so we don't keep the ClientContext alive past the user's
+	// session if they exit before the timer fires.
+	weak_ptr<ClientContext> weak_ctx = context.shared_from_this();
+	std::thread([weak_ctx, delay]() mutable {
+		std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+		if (auto ctx = weak_ctx.lock()) {
+			ctx->Interrupt();
+		}
+	}).detach();
+	return_types.emplace_back(LogicalType::BOOLEAN);
+	names.emplace_back("scheduled");
+	return nullptr;
+}
+
+static TableFunction GetQuackTestScheduleInterruptFunction() {
+	// TEST-ONLY: schedules a delayed Connection::Interrupt() on the calling
+	// ClientContext. Intended for use by cancel-path sqllogic tests; do not
+	// rely on this from application code.
+	TableFunction fun("quack_test_schedule_interrupt", {LogicalType::BIGINT}, TestScheduleInterruptExecFn,
+	                  TestScheduleInterruptBindFn);
+	return fun;
+}
+
 static void LoadInternal(ExtensionLoader &loader) {
 	loader.SetDescription("The DuckDB 'Quack' Client/Server Protocol");
 
@@ -120,6 +158,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(QuackServerListFunction::GetFunction());
 	loader.RegisterFunction(QuackClearCacheFunction::GetFunction());
 	loader.RegisterFunction(GetQuackIdentifyFunction());
+	loader.RegisterFunction(GetQuackTestScheduleInterruptFunction());
 
 	// the default authentication function
 	ScalarFunction quack_check_token("quack_check_token",

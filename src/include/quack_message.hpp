@@ -17,6 +17,7 @@ enum class MessageType : uint8_t {
 	APPEND_REQUEST = 9,
 	SUCCESS_RESPONSE = 10,
 	DISCONNECT_MESSAGE = 11,
+	CANCEL_REQUEST = 12,
 	ERROR_RESPONSE = 100
 };
 
@@ -341,6 +342,20 @@ public:
 
 protected:
 	DisconnectMessage() : QuackMessage(TYPE) {
+	}
+};
+
+class CancelRequestMessage : public QuackMessage {
+public:
+	static constexpr MessageType TYPE = MessageType::CANCEL_REQUEST;
+
+	explicit CancelRequestMessage(string connection_id_p) : QuackMessage(TYPE, std::move(connection_id_p)) {};
+
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<CancelRequestMessage> Deserialize(Deserializer &deserializer);
+
+protected:
+	CancelRequestMessage() : QuackMessage(TYPE) {
 	}
 };
 
