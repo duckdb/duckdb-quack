@@ -13,13 +13,15 @@ namespace duckdb {
 struct QuackCancelBindData : FunctionData {
 	string target_connection_id;
 	string server_uri;
+	bool cancelled = false;
 	bool finished = false;
 
-	explicit QuackCancelBindData(string connection_id_p) : target_connection_id(std::move(connection_id_p)) {
+	explicit QuackCancelBindData(string connection_id_p, bool cancelled_p)
+	    : target_connection_id(std::move(connection_id_p)), cancelled(cancelled_p) {
 	}
 
 	unique_ptr<FunctionData> Copy() const override {
-		auto result = make_uniq<QuackCancelBindData>(target_connection_id);
+		auto result = make_uniq<QuackCancelBindData>(target_connection_id, cancelled);
 		result->finished = finished;
 		return result;
 	}
@@ -53,10 +55,11 @@ static unique_ptr<FunctionData> QuackCancelBind(ClientContext &context, TableFun
 	auto &client = client_wrapper->GetClient();
 
 	// Target connection goes in the header; zero UUID = cancel whatever is running
-	client.Request<CancelResponseMessage>(context,
-	                                      make_uniq<CancelRequestMessage>(target_connection_id, hugeint_t {0, 0}));
+	auto response = client.Request<CancelResponseMessage>(
+	    context, make_uniq<CancelRequestMessage>(target_connection_id, hugeint_t {0, 0}));
+	bool cancelled = response->Type() == MessageType::CANCEL_RESPONSE;
 
-	return make_uniq<QuackCancelBindData>(std::move(target_connection_id));
+	return make_uniq<QuackCancelBindData>(std::move(target_connection_id), cancelled);
 }
 
 static void QuackCancelScan(ClientContext &, TableFunctionInput &input, DataChunk &output) {
@@ -66,7 +69,7 @@ static void QuackCancelScan(ClientContext &, TableFunctionInput &input, DataChun
 	}
 	data.finished = true;
 	output.SetValue(0, 0, data.target_connection_id);
-	output.SetValue(1, 0, Value::BOOLEAN(true));
+	output.SetValue(1, 0, Value::BOOLEAN(data.cancelled));
 	output.SetCardinality(1);
 }
 

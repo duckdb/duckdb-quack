@@ -436,7 +436,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			collection.Append(append_request_message.AppendChunk());
 			connection.duckdb_connection->Append(*table_info, collection);
 		} catch (std::exception &ex) {
-			// apend failed - directly pass error to user
+			// append failed - directly pass error to user
 			return make_uniq<ErrorResponse>(ErrorData(ex));
 		}
 		return make_uniq<SuccessResponse>();
