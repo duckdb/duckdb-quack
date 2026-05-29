@@ -1,0 +1,54 @@
+# name: test/sql/quack_cancel.test
+# description: test quack_cancel interrupts an active query
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+statement ok
+CALL quack_serve('quack:localhost', token='asdf');
+
+concurrentloop threadid 0 2
+
+# slow query
+onlyif threadid=0
+statement maybe
+FROM quack_query('quack:localhost', 'SELECT sleep_ms(5000)', token='asdf');
+----
+Interrupted
+
+# wait for the query to be active, sleep 1 second
+onlyif threadid=1
+statement ok
+SELECT sleep_ms(200);
+
+# check if the query is active
+onlyif threadid=1
+query I
+SELECT count(*) FROM quack_activity() WHERE state = 'active';
+----
+1
+
+onlyif threadid=1
+statement ok
+SET VARIABLE conn_id = (
+  SELECT connection_id FROM quack_activity()
+  WHERE state = 'active' LIMIT 1
+);
+
+onlyif threadid=1
+statement ok
+FROM quack_cancel('quack:localhost', getvariable('conn_id'), 'asdf');
+
+endloop
+
+query I
+SELECT count(*) FROM quack_activity() WHERE state = 'active';
+----
+0
+
+statement ok
+CALL quack_stop('quack:localhost');

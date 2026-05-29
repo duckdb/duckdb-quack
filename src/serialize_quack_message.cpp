@@ -146,4 +146,21 @@ unique_ptr<SuccessResponse> SuccessResponse::Deserialize(Deserializer &deseriali
 	return result;
 }
 
+void CancelRequestMessage::Serialize(Serializer &serializer) const {
+	serializer.WriteProperty<hugeint_t>(1, "result_uuid", result_uuid);
+}
+
+unique_ptr<CancelRequestMessage> CancelRequestMessage::Deserialize(Deserializer &deserializer) {
+	auto result = duckdb::unique_ptr<CancelRequestMessage>(new CancelRequestMessage());
+	deserializer.ReadProperty<hugeint_t>(1, "result_uuid", result->result_uuid);
+	return result;
+}
+
+void CancelResponseMessage::Serialize(Serializer &serializer) const {
+}
+
+unique_ptr<CancelResponseMessage> CancelResponseMessage::Deserialize(Deserializer &deserializer) {
+	return duckdb::unique_ptr<CancelResponseMessage>(new CancelResponseMessage());
+}
+
 } // namespace duckdb

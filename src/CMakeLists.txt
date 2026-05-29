@@ -13,6 +13,7 @@ add_library(
   quack_start_stop.cpp
   quack_storage.cpp
   quack_uri.cpp
+  quack_cancel.cpp
   quack_activity.cpp
   serialize_quack_message.cpp)
 set(EXTENSION_SOURCES

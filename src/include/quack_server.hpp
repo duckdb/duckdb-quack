@@ -80,6 +80,7 @@ public:
 	static void ValidateToken(const string &token);
 
 	vector<QuackConnectionSnapshot> GetActiveConnectionSnap();
+	bool CancelConnection(const string &connection_id);
 
 	const string &Token() {
 		return token;

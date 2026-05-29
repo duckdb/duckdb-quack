@@ -51,6 +51,12 @@ MessageType EnumUtil::FromString<MessageType>(const char *value) {
 	if (StringUtil::Equals(value, "DISCONNECT_MESSAGE")) {
 		return MessageType::DISCONNECT_MESSAGE;
 	}
+	if (StringUtil::Equals(value, "CANCEL_REQUEST")) {
+		return MessageType::CANCEL_REQUEST;
+	}
+	if (StringUtil::Equals(value, "CANCEL_RESPONSE")) {
+		return MessageType::CANCEL_RESPONSE;
+	}
 	if (StringUtil::Equals(value, "ERROR_RESPONSE")) {
 		return MessageType::ERROR_RESPONSE;
 	}
@@ -79,6 +85,10 @@ const char *EnumUtil::ToChars<MessageType>(MessageType value) {
 		return "SUCCESS_RESPONSE";
 	case MessageType::DISCONNECT_MESSAGE:
 		return "DISCONNECT_MESSAGE";
+	case MessageType::CANCEL_REQUEST:
+		return "CANCEL_REQUEST";
+	case MessageType::CANCEL_RESPONSE:
+		return "CANCEL_RESPONSE";
 	case MessageType::ERROR_RESPONSE:
 		return "ERROR_RESPONSE";
 
@@ -124,6 +134,10 @@ unique_ptr<QuackMessage> QuackMessage::Deserialize(Deserializer &deserializer, M
 		return SuccessResponse::Deserialize(deserializer);
 	case MessageType::DISCONNECT_MESSAGE:
 		return DisconnectMessage::Deserialize(deserializer);
+	case MessageType::CANCEL_REQUEST:
+		return CancelRequestMessage::Deserialize(deserializer);
+	case MessageType::CANCEL_RESPONSE:
+		return CancelResponseMessage::Deserialize(deserializer);
 	case MessageType::ERROR_RESPONSE:
 		return ErrorResponse::Deserialize(deserializer);
 	default:

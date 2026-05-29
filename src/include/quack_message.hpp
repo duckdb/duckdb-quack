@@ -17,6 +17,8 @@ enum class MessageType : uint8_t {
 	APPEND_REQUEST = 9,
 	SUCCESS_RESPONSE = 10,
 	DISCONNECT_MESSAGE = 11,
+	CANCEL_REQUEST = 12,
+	CANCEL_RESPONSE = 13,
 	ERROR_RESPONSE = 100
 };
 
@@ -381,6 +383,35 @@ protected:
 
 private:
 	ErrorData error;
+};
+
+class CancelRequestMessage : public QuackMessage {
+public:
+	static constexpr MessageType TYPE = MessageType::CANCEL_REQUEST;
+
+	explicit CancelRequestMessage(string connection_id_p, hugeint_t result_uuid_p)
+	    : QuackMessage(TYPE, std::move(connection_id_p)), result_uuid(result_uuid_p) {
+	}
+
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<CancelRequestMessage> Deserialize(Deserializer &deserializer);
+
+	hugeint_t result_uuid;
+
+protected:
+	CancelRequestMessage() : QuackMessage(TYPE) {
+	}
+};
+
+class CancelResponseMessage : public QuackMessage {
+public:
+	static constexpr MessageType TYPE = MessageType::CANCEL_RESPONSE;
+
+	explicit CancelResponseMessage() : QuackMessage(TYPE) {
+	}
+
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<CancelResponseMessage> Deserialize(Deserializer &deserializer);
 };
 
 } // namespace duckdb

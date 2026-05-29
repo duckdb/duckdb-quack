@@ -20,6 +20,7 @@
 #include "quack_scan.hpp"
 #include "quack_startstop.hpp"
 #include "quack_storage.hpp"
+#include "quack_cancel.hpp"
 #include "quack_uri.hpp"
 #include "include/quack_startstop.hpp"
 #include "include/quack_storage.hpp"
@@ -115,6 +116,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.SetDescription("The DuckDB 'Quack' Client/Server Protocol");
 
 	loader.RegisterFunction(QuackScanFunction::GetFunction());
+	loader.RegisterFunction(QuackCancelFunction::GetFunction());
 	loader.RegisterFunction(QuackScanByNameFunction::GetFunction());
 	loader.RegisterFunction(QuackServeFunction::GetFunction());
 	loader.RegisterFunction(QuackStopFunction::GetFunction());

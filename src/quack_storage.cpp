@@ -80,6 +80,18 @@ bool QuackStorageExtensionInfo::StopServer(ClientContext &context, const QuackUr
 	return true;
 }
 
+bool QuackStorageExtensionInfo::CancelConnection(const string &server_id, const string &connection_id) {
+	std::lock_guard<std::mutex> lock(servers_mutex);
+	// not for every server, but also give the server ID
+	// check if the server ID corresponds
+	for (auto &[uri, server] : servers) {
+		if (server->CancelConnection(connection_id)) {
+			return true;
+		}
+	}
+	throw InvalidInputException("Connection id '%s' not found, or query could not be cancelled", connection_id.c_str());
+}
+
 static unique_ptr<Catalog> QuackAttach(optional_ptr<StorageExtensionInfo> storage_info, ClientContext &context,
                                        AttachedDatabase &db, const string &name, AttachInfo &info,
                                        AttachOptions &attach_options) {
