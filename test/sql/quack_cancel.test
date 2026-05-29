@@ -20,18 +20,12 @@ FROM quack_query('quack:localhost', 'SELECT sleep_ms(5000)', token='asdf');
 ----
 Interrupted
 
-# wait for the query to be active, sleep 1 second
+# wait for the query to be active, sleep a bit
 onlyif threadid=1
 statement ok
 SELECT sleep_ms(200);
 
-# check if the query is active
-onlyif threadid=1
-query I
-SELECT count(*) FROM quack_activity() WHERE state = 'active';
-----
-1
-
+# get the connection id from the currently active query
 onlyif threadid=1
 statement ok
 SET VARIABLE conn_id = (

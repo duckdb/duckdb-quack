@@ -444,11 +444,8 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 	case MessageType::CANCEL_REQUEST: {
 		auto &cancel_request_message = received_message.Cast<CancelRequestMessage>();
 		auto &connection = *connection_p;
-		// zero UUID = admin cancel from quack_cancel(), skip result check
-		if (cancel_request_message.result_uuid != hugeint_t {0, 0} &&
-		    connection.result_uuid != cancel_request_message.result_uuid) {
-			return make_uniq<ErrorResponse>("Result has been closed");
-		}
+		// TODO; we should check the query id in the future
+		// to not cancel a newer query running on this connection
 		connection.duckdb_connection->Interrupt();
 		connection.query_state = QuackQueryState::CANCELLED;
 		return make_uniq<CancelResponseMessage>();
