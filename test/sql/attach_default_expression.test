@@ -1,0 +1,48 @@
+# name: test/sql/attach_default_expression.test
+# description: test rpc attach with ordinary column defaults (DEFAULT 42, etc.)
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+statement ok con1
+create table t_defaults (
+    x INTEGER DEFAULT 42,
+    y VARCHAR DEFAULT 'hello'
+);
+
+statement ok con1
+insert into t_defaults (x) values (1);
+
+statement ok con1
+insert into t_defaults (y) values ('a');
+
+foreach server 'quack:localhost'
+
+statement ok con1
+call quack_serve({server}, token='asdf');
+
+statement ok con2
+attach {server} as rpc (token 'asdf')
+
+# Verify the table schema can be described without errors
+statement ok
+describe rpc.t_defaults;
+
+# Verify SELECT returns data correctly (defaults are evaluated server-side)
+query II
+from rpc.t_defaults order by x;
+----
+1	hello
+42	a
+
+statement ok con2
+detach rpc;
+
+statement ok con1
+call quack_stop({server});
+
+endloop

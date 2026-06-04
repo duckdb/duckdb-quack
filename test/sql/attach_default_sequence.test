@@ -1,0 +1,46 @@
+# name: test/sql/attach_default_sequence.test
+# description: test rpc attach with sequence-based default primary key
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+statement ok con1
+create sequence id_sequence START 1;
+
+statement ok con1
+create table test_seq (
+    id INTEGER PRIMARY KEY DEFAULT nextval('id_sequence'),
+    s VARCHAR
+);
+
+statement ok con1
+insert into test_seq (s) values ('foo');
+
+statement ok con1
+insert into test_seq (s) values ('bar');
+
+foreach server 'quack:localhost'
+
+statement ok con1
+call quack_serve({server}, token='asdf');
+
+statement ok con2
+attach {server} as rpc (token 'asdf')
+
+query II
+from rpc.test_seq order by id;
+----
+1	foo
+2	bar
+
+statement ok con1
+call quack_stop({server});
+
+statement ok con2
+detach rpc;
+
+endloop

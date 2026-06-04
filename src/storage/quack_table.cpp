@@ -3,6 +3,9 @@
 #include "quack_scan.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/statement/create_statement.hpp"
+#include "duckdb/parser/column_list.hpp"
+#include "duckdb/parser/expression/function_expression.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
 #include "storage/quack_view.hpp"
@@ -19,6 +22,30 @@ unique_ptr<CreateInfo> ParseCreateTable(const string &sql) {
 	}
 	auto &create = parser.statements[0]->Cast<CreateStatement>();
 	return std::move(create.info);
+}
+
+static bool DefaultContainsNextval(const ParsedExpression &expr) {
+	if (expr.GetExpressionClass() == ExpressionClass::FUNCTION) {
+		auto &func = expr.Cast<FunctionExpression>();
+		if (StringUtil::CIEquals(func.function_name, "nextval")) {
+			return true;
+		}
+		for (auto &child : func.children) {
+			if (DefaultContainsNextval(*child)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+static void ClearColumnDefaults(CreateTableInfo &info) {
+	for (idx_t i = 0; i < info.columns.LogicalColumnCount(); i++) {
+		auto &col = info.columns.GetColumnMutable(LogicalIndex(i));
+		if (col.HasDefaultValue() && DefaultContainsNextval(col.DefaultValue())) {
+			col.SetDefaultValue(nullptr);
+		}
+	}
 }
 
 QuackTableSet::QuackTableSet(ClientContext &context, QuackSchemaCatalogEntry &parent,
@@ -39,6 +66,10 @@ QuackTableSet::QuackTableSet(ClientContext &context, QuackSchemaCatalogEntry &pa
 			if (info->type != CatalogType::TABLE_ENTRY) {
 				throw InternalException("Expected a CREATE TABLE");
 			}
+			// Strip only defaults that reference server-only objects (e.g. nextval sequences)
+			// that don't exist on the client. Harmless defaults (e.g. DEFAULT 42) are preserved.
+			// Defaults are always evaluated server-side regardless.
+			ClearColumnDefaults(info->Cast<CreateTableInfo>());
 			// bind to resolve the types
 			auto binder = Binder::CreateBinder(context);
 			auto bound_info = binder->BindCreateTableInfo(std::move(info), schema);
