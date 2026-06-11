@@ -26,11 +26,15 @@ QuackInsert::QuackInsert(PhysicalPlan &physical_plan, LogicalOperator &op, Schem
 //===--------------------------------------------------------------------===//
 class QuackInsertGlobalState : public GlobalSinkState {
 public:
-	explicit QuackInsertGlobalState(QuackTableCatalogEntry &table_p) : table(table_p), insert_count(0) {
+	explicit QuackInsertGlobalState(QuackTableCatalogEntry &table_p)
+	    : table(table_p), insert_count(0), buffered_rows(0) {
 	}
 
 	QuackTableCatalogEntry &table;
 	idx_t insert_count;
+	//! Self-owned chunks buffered client-side, not yet shipped to the server
+	vector<unique_ptr<DataChunk>> buffer;
+	idx_t buffered_rows;
 };
 
 unique_ptr<GlobalSinkState> QuackInsert::GetGlobalSinkState(ClientContext &context) const {
@@ -46,25 +50,59 @@ unique_ptr<GlobalSinkState> QuackInsert::GetGlobalSinkState(ClientContext &conte
 }
 
 //===--------------------------------------------------------------------===//
+// Append buffering
+//===--------------------------------------------------------------------===//
+// This is just some threshold that mimics the appender threshold; could be made configurable
+static constexpr idx_t QUACK_APPEND_FLUSH_ROWS = STANDARD_VECTOR_SIZE * 100ULL;
+
+// Ship all buffered chunks to the server in one APPEND_REQUEST. The wrappers reference the buffered
+// chunks (no copy) and the request is serialized synchronously inside Request(), so the buffer only
+// needs to stay alive until Request() returns.
+static void FlushAppendBuffer(ClientContext &context, QuackInsertGlobalState &global_state) {
+	if (global_state.buffer.empty()) {
+		return;
+	}
+	auto &tbl = global_state.table;
+	auto &quack_catalog = tbl.catalog.Cast<QuackCatalog>();
+
+	vector<unique_ptr<DataChunkWrapper>> wrappers;
+	wrappers.reserve(global_state.buffer.size());
+	for (auto &chunk : global_state.buffer) {
+		wrappers.push_back(make_uniq<DataChunkWrapper>(*chunk));
+	}
+	auto append_message = make_uniq<AppendRequestMessage>(quack_catalog.GetConnectionId(), tbl.schema.name, tbl.name,
+	                                                      std::move(wrappers));
+
+	auto client_connection = quack_catalog.GetClientConnection();
+	auto client_wrapper = client_connection->GetClient(context);
+	auto &client = client_wrapper->GetClient();
+	client.Request<SuccessResponse>(context, std::move(append_message));
+
+	global_state.buffer.clear();
+	global_state.buffered_rows = 0;
+}
+
+//===--------------------------------------------------------------------===//
 // Sink
 //===--------------------------------------------------------------------===//
 SinkResultType QuackInsert::Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const {
 	auto &global_state = input.global_state.Cast<QuackInsertGlobalState>();
-	auto &tbl = global_state.table;
-	auto &quack_catalog = tbl.catalog.Cast<QuackCatalog>();
-	auto append_chunk = make_uniq<DataChunk>();
-	append_chunk->Initialize(context.client, chunk.GetTypes());
-	append_chunk->Reference(chunk);
-	auto chunk_wrapper = make_uniq<DataChunkWrapper>(*append_chunk);
-	auto append_message = make_uniq<AppendRequestMessage>(quack_catalog.GetConnectionId(), tbl.schema.name, tbl.name,
-	                                                      std::move(chunk_wrapper));
+	if (chunk.size() == 0) {
+		return SinkResultType::NEED_MORE_INPUT;
+	}
 
-	auto client_connection = quack_catalog.GetClientConnection();
-	auto client_wrapper = client_connection->GetClient(context.client);
-	auto &client = client_wrapper->GetClient();
-	client.Request<SuccessResponse>(context.client, std::move(append_message));
-
+	// Buffer a self-owned copy of the chunk: the executor reuses the source chunk across Sink calls,
+	// so we cannot Reference it and defer the send.
+	auto owned = make_uniq<DataChunk>();
+	owned->Initialize(context.client, chunk.GetTypes());
+	owned->Append(chunk);
+	global_state.buffered_rows += owned->size();
 	global_state.insert_count += chunk.size();
+	global_state.buffer.push_back(std::move(owned));
+
+	if (global_state.buffered_rows >= QUACK_APPEND_FLUSH_ROWS) {
+		FlushAppendBuffer(context.client, global_state);
+	}
 	return SinkResultType::NEED_MORE_INPUT;
 }
 
@@ -73,7 +111,10 @@ SinkResultType QuackInsert::Sink(ExecutionContext &context, DataChunk &chunk, Op
 //===--------------------------------------------------------------------===//
 SinkFinalizeType QuackInsert::Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
                                        OperatorSinkFinalizeInput &input) const {
-	// TODO nop?
+	// Ship any remaining buffered rows. After this returns every row for the statement has been sent,
+	// so transaction visibility/rollback semantics match the unbuffered path.
+	auto &global_state = input.global_state.Cast<QuackInsertGlobalState>();
+	FlushAppendBuffer(context, global_state);
 	return SinkFinalizeType::READY;
 }
 
