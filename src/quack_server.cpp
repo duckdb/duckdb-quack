@@ -271,8 +271,10 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 	switch (received_message.Type()) {
 	case MessageType::CONNECTION_REQUEST: {
 		auto &connection_request_message = received_message.Cast<ConnectionRequestMessage>();
-		if (connection_request_message.MinimumSupportedQuackVersion() > 1ULL) {
-			return make_uniq<ErrorResponse>("Unsupported Quack version - server only supports version 1 of quack");
+		if (connection_request_message.MinimumSupportedQuackVersion() != QUACK_PROTOCOL_VERSION) {
+			return make_uniq<ErrorResponse>("Quack protocol version mismatch: server speaks v" +
+			                                to_string(QUACK_PROTOCOL_VERSION) + ", client speaks v" +
+			                                to_string(connection_request_message.MinimumSupportedQuackVersion()));
 		}
 		string session_id = GenerateSessionId();
 		auto auth_result = EvaluateAuthQuery(
