@@ -421,11 +421,16 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			                                SQLIdentifier(append_request_message.TableName()));
 		}
 		try {
-			ColumnDataCollection collection(Allocator::Get(context), append_request_message.AppendChunk().GetTypes());
-			collection.Append(append_request_message.AppendChunk());
-			connection.duckdb_connection->Append(*table_info, collection);
+			auto &chunks = append_request_message.MutableAppendChunks();
+			if (!chunks.empty()) {
+				ColumnDataCollection collection(Allocator::Get(context), chunks[0]->Chunk().GetTypes());
+				for (auto &wrapper : chunks) {
+					collection.Append(wrapper->Chunk());
+				}
+				connection.duckdb_connection->Append(*table_info, collection);
+			}
 		} catch (std::exception &ex) {
-			// apend failed - directly pass error to user
+			// append failed - directly pass error to user
 			return make_uniq<ErrorResponse>(ErrorData(ex));
 		}
 		return make_uniq<SuccessResponse>();
