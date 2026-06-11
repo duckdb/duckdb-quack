@@ -92,9 +92,10 @@ SinkResultType QuackInsert::Sink(ExecutionContext &context, DataChunk &chunk, Op
 	}
 
 	// Buffer a self-owned copy of the chunk: the executor reuses the source chunk across Sink calls,
-	// so we cannot Reference it and defer the send.
+	// so we cannot Reference it and defer the send. Size the copy to the actual row count (not a full
+	// STANDARD_VECTOR_SIZE) so a stream of partial chunks doesn't inflate memory.
 	auto owned = make_uniq<DataChunk>();
-	owned->Initialize(context.client, chunk.GetTypes());
+	owned->Initialize(context.client, chunk.GetTypes(), chunk.size());
 	owned->Append(chunk);
 	global_state.buffered_rows += owned->size();
 	global_state.insert_count += chunk.size();
