@@ -303,16 +303,16 @@ public:
 	static constexpr MessageType TYPE = MessageType::APPEND_REQUEST;
 
 	explicit AppendRequestMessage(string connection_id_p, string schema_name_p, string table_name_p,
-	                              unique_ptr<DataChunkWrapper> append_chunk_p)
+	                              vector<unique_ptr<DataChunkWrapper>> append_chunks_p)
 	    : QuackMessage(TYPE, std::move(connection_id_p)), schema_name(std::move(schema_name_p)),
-	      table_name(std::move(table_name_p)), append_chunk(std::move(append_chunk_p)) {
+	      table_name(std::move(table_name_p)), append_chunks(std::move(append_chunks_p)) {
 	}
 
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<AppendRequestMessage> Deserialize(Deserializer &deserializer);
 
-	DataChunk &AppendChunk() const {
-		return append_chunk->Chunk();
+	vector<unique_ptr<DataChunkWrapper>> &MutableAppendChunks() {
+		return append_chunks;
 	}
 	const string &SchemaName() const {
 		return schema_name;
@@ -328,7 +328,7 @@ protected:
 private:
 	string schema_name;
 	string table_name;
-	unique_ptr<DataChunkWrapper> append_chunk;
+	vector<unique_ptr<DataChunkWrapper>> append_chunks;
 };
 
 class DisconnectMessage : public QuackMessage {
