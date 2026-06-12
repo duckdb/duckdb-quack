@@ -36,7 +36,7 @@ UPDATE pgbench_tellers SET tbalance = tbalance + 2655 WHERE tid = 120;
 UPDATE pgbench_branches SET bbalance = bbalance + 2655 WHERE bid = 3;
 INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES (120, 3, 5445192, 2655, CURRENT_TIMESTAMP);
 COMMIT;
-')
+');
 
 endloop
 

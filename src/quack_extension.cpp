@@ -49,7 +49,7 @@ static unique_ptr<BaseSecret> CreateQuackSecretFromConfig(ClientContext &, Creat
 
 static void RegisterQuackSecretType(ExtensionLoader &loader) {
 	SecretType secret_type;
-	secret_type.name = QUACK_SECRET_TYPE;
+	secret_type.name = Identifier(QUACK_SECRET_TYPE);
 	secret_type.deserializer = KeyValueSecret::Deserialize<KeyValueSecret>;
 	secret_type.default_provider = "config";
 	secret_type.extension = "quack";

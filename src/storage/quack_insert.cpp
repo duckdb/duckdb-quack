@@ -70,8 +70,9 @@ static void FlushAppendBuffer(ClientContext &context, QuackInsertGlobalState &gl
 	for (auto &chunk : global_state.buffer) {
 		wrappers.push_back(make_uniq<DataChunkWrapper>(*chunk));
 	}
-	auto append_message = make_uniq<AppendRequestMessage>(quack_catalog.GetConnectionId(), tbl.schema.name, tbl.name,
-	                                                      std::move(wrappers));
+	auto append_message =
+	    make_uniq<AppendRequestMessage>(quack_catalog.GetConnectionId(), tbl.schema.name.GetIdentifierName(),
+	                                    tbl.name.GetIdentifierName(), std::move(wrappers));
 
 	auto client_connection = quack_catalog.GetClientConnection();
 	auto client_wrapper = client_connection->GetClient(context);
@@ -139,7 +140,7 @@ string QuackInsert::GetName() const {
 
 InsertionOrderPreservingMap<string> QuackInsert::ParamsToString() const {
 	InsertionOrderPreservingMap<string> result;
-	result["Table Name"] = table ? table->name : info->Base().table;
+	result["Table Name"] = table ? table->name.GetIdentifierName() : info->Base().table.GetIdentifierName();
 	return result;
 }
 

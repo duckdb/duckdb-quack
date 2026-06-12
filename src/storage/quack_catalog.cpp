@@ -103,7 +103,7 @@ QuackCatalog &QuackCatalog::GetQuackCatalog(ClientContext &context, Value &catal
 	// look up the database to query
 	auto db_name = catalog_name.GetValue<string>();
 	auto &db_manager = DatabaseManager::Get(context);
-	auto db = db_manager.GetDatabase(context, db_name);
+	auto db = db_manager.GetDatabase(context, Identifier(db_name));
 	if (!db) {
 		throw BinderException("Failed to find attached database \"%s\"", db_name);
 	}
@@ -173,6 +173,21 @@ string QuackCatalog::GetDBPath() {
 void QuackCatalog::DropSchema(ClientContext &context, DropInfo &info) {
 	// TODO should we just send over the drop info in a dropmessage???
 	throw NotImplementedException("DropSchema not implemented yet");
+}
+
+bool QuackCatalog::SupportsPushdown(const TableRef &ref) {
+	if (ref.type != TableReferenceType::TABLE_FUNCTION) {
+		return true;
+	}
+	auto &table_func_ref = ref.Cast<TableFunctionRef>();
+	if (table_func_ref.function->GetExpressionClass() != ExpressionClass::FUNCTION) {
+		return true;
+	}
+	auto &func_expr = table_func_ref.function->Cast<FunctionExpression>();
+	if (func_expr.FunctionName() == "query") {
+		return false;
+	}
+	return true;
 }
 
 } // namespace duckdb

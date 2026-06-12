@@ -49,8 +49,9 @@ QuackTableSet::QuackTableSet(ClientContext &context, QuackSchemaCatalogEntry &pa
 			// bind a remote procedure call to the view on the server side
 			// we don't actually care what the view contains server-side, we just treat it like an opaque object we can
 			// query
-			CreateViewInfo info(schema, view_name);
-			info.sql = QuackViewCatalogEntry::CreateViewSQL(catalog.GetName(), schema.name, view_name);
+			CreateViewInfo info(schema, Identifier(view_name));
+			info.sql = QuackViewCatalogEntry::CreateViewSQL(catalog.GetName().GetIdentifierName(),
+			                                                schema.name.GetIdentifierName(), view_name);
 			info.query = CreateViewInfo::ParseSelect(info.sql);
 
 			// bind to resolve the types
@@ -79,9 +80,9 @@ TableFunction QuackTableCatalogEntry::GetScanFunction(ClientContext &context, un
 	auto &quack_catalog = catalog.Cast<QuackCatalog>();
 	auto bind_data = make_uniq<QuackScanBindData>();
 	bind_data->client_connection = quack_catalog.GetClientConnection();
-	bind_data->table_name = name;
+	bind_data->table_name = name.GetIdentifierName();
 	for (auto &col : GetColumns().Physical()) {
-		bind_data->column_names.push_back(col.Name());
+		bind_data->column_names.emplace_back(col.Name());
 		bind_data->column_types.push_back(col.Type());
 	}
 	bind_data->table_entry = this;

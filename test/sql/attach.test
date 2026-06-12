@@ -31,6 +31,10 @@ create secret (type quack, token 'asdf')
 statement ok
 attach {server} as rpc
 
+query I
+from rpc.query('BEGIN; select 42; COMMIT;')
+----
+42
 
 query II
 from rpc.fuu;

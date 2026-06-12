@@ -28,7 +28,9 @@ public:
 	string GetCatalogType() override {
 		return "quack";
 	}
+
 	static bool IsQuackScan(const string &name);
+	bool SupportsPushdown(const TableRef &ref) override;
 	void Initialize(bool load_builtin) override;
 
 	optional_ptr<CatalogEntry> CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) override;
@@ -66,6 +68,9 @@ public:
 	}
 	unique_ptr<TableRef> RemoteExecute(ClientContext &context, unique_ptr<QueryNode> node) override;
 	unique_ptr<TableRef> RemoteExecute(ClientContext &context, const string &sql) override;
+	string GetConnectDisplay() override {
+		return GetDBPath();
+	}
 
 	unique_ptr<ColumnDataCollection> ExecuteCommandInternal(ClientContext &context, const string &query);
 	const QuackUri &GetServerUri();

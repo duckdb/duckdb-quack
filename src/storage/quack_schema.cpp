@@ -20,8 +20,8 @@ void QuackSchemaSet::Reload(ClientContext &context, QuackCatalog &catalog, const
 	Clear();
 	for (auto &row : load_data.schemas->Rows()) {
 		CreateSchemaInfo info;
-		info.catalog = row.GetValue(0).GetValue<string>();
-		info.schema = row.GetValue(1).GetValue<string>();
+		info.catalog = Identifier(row.GetValue(0).GetValue<string>());
+		info.schema = Identifier(row.GetValue(1).GetValue<string>());
 		// TODO this will fail if there are two schemas with the same name in different catalogs :/
 		auto schema = make_uniq<QuackSchemaCatalogEntry>(context, catalog, info, load_data);
 		CreateEntry(std::move(schema), OnCreateConflict::REPLACE_ON_CONFLICT);
@@ -105,7 +105,8 @@ optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateView(CatalogTransactio
 	quack_transaction.Query(create_view_info->ToString());
 
 	// locally, override the query with a remote procedure call to ensure the view is evaluated remotely
-	info.sql = QuackViewCatalogEntry::CreateViewSQL(ParentCatalog().GetName(), name, info.view_name);
+	info.sql = QuackViewCatalogEntry::CreateViewSQL(ParentCatalog().GetName().GetIdentifierName(),
+	                                                name.GetIdentifierName(), info.view_name.GetIdentifierName());
 	info.query = CreateViewInfo::ParseSelect(info.sql);
 
 	auto quack_entry = make_uniq<QuackViewCatalogEntry>(catalog, *this, info);
@@ -149,7 +150,7 @@ void QuackSchemaCatalogEntry::DropEntry(ClientContext &context, DropInfo &info_p
 	}
 	auto &transaction = QuackTransaction::Get(context, ParentCatalog());
 	transaction.Query(drop_info->ToString());
-	tables->DropEntry(info_p.name);
+	tables->DropEntry(info_p.name.GetIdentifierName());
 }
 void QuackSchemaCatalogEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 	throw NotImplementedException("Alter not implemented yet, Alter!");
@@ -165,8 +166,9 @@ static const DefaultTableMacro quack_table_macros[] = {
 // 'borrowed' from ducklake
 optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::LoadBuiltInFunction(DefaultTableMacro macro) {
 	string macro_def = macro.macro;
-	macro_def = StringUtil::Replace(macro_def, "{CATALOG}", KeywordHelper::WriteQuoted(catalog.GetName(), '\''));
-	macro_def = StringUtil::Replace(macro_def, "{SCHEMA}", KeywordHelper::WriteQuoted(name, '\''));
+	macro_def = StringUtil::Replace(macro_def, "{CATALOG}",
+	                                KeywordHelper::WriteQuoted(catalog.GetName().GetIdentifierName(), '\''));
+	macro_def = StringUtil::Replace(macro_def, "{SCHEMA}", KeywordHelper::WriteQuoted(name.GetIdentifierName(), '\''));
 	macro.macro = macro_def.c_str();
 	auto info = DefaultTableFunctionGenerator::CreateTableMacroInfo(macro);
 	auto table_macro =

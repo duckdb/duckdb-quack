@@ -416,7 +416,8 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 
 		std::unique_lock<std::mutex> lock(connection.lock);
 		auto &context = *connection.duckdb_connection->context;
-		auto table_info = context.TableInfo(append_request_message.SchemaName(), append_request_message.TableName());
+		auto table_info = context.TableInfo(Identifier(append_request_message.SchemaName()),
+		                                    Identifier(append_request_message.TableName()));
 		if (!table_info) {
 			return make_uniq<ErrorResponse>("Table %s.%s does not exist",
 			                                SQLIdentifier(append_request_message.SchemaName()),
