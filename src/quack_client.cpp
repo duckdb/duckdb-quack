@@ -166,7 +166,7 @@ QuackClientConnection::~QuackClientConnection() {
 }
 
 shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &context, const QuackUri &uri,
-                                                               string token) {
+                                                               string token, string client_id) {
 	// if no token is provided fetch it from the secret manager
 	if (token.empty()) {
 		auto &secret_manager = SecretManager::Get(context);
@@ -185,8 +185,8 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 	auto client = QuackClient::GetClient(context, uri);
 
 	// submit the connection request
-	auto connection_request_response =
-	    client->Request<ConnectionResponseMessage>(context, make_uniq<ConnectionRequestMessage>(token));
+	auto connection_request_response = client->Request<ConnectionResponseMessage>(
+	    context, make_uniq<ConnectionRequestMessage>(token, std::move(client_id)));
 	// success! we got a connection id
 	// construct the client connection and return it
 	auto connection_id = connection_request_response->ConnectionId();

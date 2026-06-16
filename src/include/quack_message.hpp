@@ -195,11 +195,14 @@ class ConnectionRequestMessage : public QuackMessage {
 public:
 	static constexpr MessageType TYPE = MessageType::CONNECTION_REQUEST;
 
-	explicit ConnectionRequestMessage(const string &auth_string_p);
+	explicit ConnectionRequestMessage(const string &auth_string_p, string client_id_p = {});
 
 public:
 	const string &AuthString() const {
 		return auth_string;
+	}
+	const string &ClientId() const {
+		return client_id;
 	}
 	const string &ClientVersion() const {
 		return client_duckdb_version;
@@ -222,6 +225,7 @@ protected:
 
 private:
 	string auth_string;
+	string client_id;
 	string client_duckdb_version;
 	string client_platform;
 	idx_t min_supported_quack_version;

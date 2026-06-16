@@ -37,6 +37,10 @@ struct QuackConnection {
 	//! Current query UUID
 	hugeint_t query_uuid;
 	string session_id;
+
+	//! hash(session_id + token + client_id)
+	//! empty if no client_id
+	string client_id_hash;
 	string sql_query;
 	QuackQueryState query_state = QuackQueryState::IDLE;
 	timestamp_t query_started_at {0};
@@ -45,6 +49,7 @@ struct QuackConnection {
 struct QuackConnectionSnapshot {
 	string server_id;
 	string session_id;
+	string client_id_hash;
 	string sql_query;
 	QuackQueryState query_state = QuackQueryState::IDLE;
 	timestamp_t query_started_at {0};
@@ -72,7 +77,7 @@ public:
 	virtual void Close() {};
 
 	shared_ptr<QuackConnection> GetConnection(const string &connection_id);
-	string CreateNewConnection(const string &session_id);
+	string CreateNewConnection(const string &session_id, const string &client_id_hash = {});
 	bool DisconnectConnection(const string &session_id);
 	// TODO need something to destroy connections
 

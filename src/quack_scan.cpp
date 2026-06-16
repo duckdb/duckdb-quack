@@ -41,7 +41,11 @@ static unique_ptr<FunctionData> QuackScanBind(ClientContext &context, TableFunct
 	if (input.named_parameters.find("token") != input.named_parameters.end()) {
 		token = input.named_parameters["token"].GetValue<string>();
 	}
-	bind_data->client_connection = QuackClient::ConnectToServer(context, server_uri, token);
+	string client_id;
+	if (input.named_parameters.find("client_id") != input.named_parameters.end()) {
+		client_id = input.named_parameters["client_id"].GetValue<string>();
+	}
+	bind_data->client_connection = QuackClient::ConnectToServer(context, server_uri, token, std::move(client_id));
 	auto &client_connection = *bind_data->client_connection;
 
 	auto client_wrapper = client_connection.GetClient(context);
@@ -383,6 +387,7 @@ TableFunction QuackScanFunction::GetFunction() {
 	                         QuackScanInitGlobal, QuackScanInitLocal);
 	fun.named_parameters["disable_ssl"] = LogicalType::BOOLEAN;
 	fun.named_parameters["token"] = LogicalType::VARCHAR;
+	fun.named_parameters["client_id"] = LogicalType::VARCHAR;
 
 	fun.projection_pushdown = true;
 	fun.get_partition_data = QuackScanGetPartitionData;

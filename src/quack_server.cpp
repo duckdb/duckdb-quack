@@ -1,3 +1,4 @@
+#include "duckdb/common/crypto/md5.hpp"
 #include "duckdb/common/encryption_state.hpp"
 #include "duckdb/common/render_tree.hpp"
 #include "duckdb/common/types/blob.hpp"
@@ -42,6 +43,7 @@ vector<QuackConnectionSnapshot> QuackServer::GetActiveConnectionSnap() {
 	for (auto &[id, conn] : active_connections) {
 		QuackConnectionSnapshot snapshot;
 		snapshot.session_id = conn->session_id;
+		snapshot.client_id_hash = conn->client_id_hash;
 		snapshot.sql_query = conn->sql_query;
 		snapshot.query_state = conn->query_state;
 		snapshot.query_started_at = conn->query_started_at;
@@ -59,7 +61,7 @@ shared_ptr<QuackConnection> QuackServer::GetConnection(const string &connection_
 	return nullptr;
 }
 
-string QuackServer::CreateNewConnection(const string &session_id) {
+string QuackServer::CreateNewConnection(const string &session_id, const string &client_id_hash) {
 	std::lock_guard<std::mutex> lock(active_connections_mutex);
 
 	D_ASSERT(active_connections.find(session_id) == active_connections.end());
@@ -69,6 +71,7 @@ string QuackServer::CreateNewConnection(const string &session_id) {
 		throw InternalException("Database was closed");
 	}
 	auto new_connection = make_shared_ptr<QuackConnection>(session_id);
+	new_connection->client_id_hash = client_id_hash;
 	new_connection->duckdb_connection = make_uniq<Connection>(*db);
 	new_connection->duckdb_connection->context->config.enable_progress_bar = false;
 	// new_connection->duckdb_connection->context->config.streaming_buffer_size = 10 * 1000000; // 10 MB
@@ -115,6 +118,14 @@ static Value EvaluateAuthQuery(DatabaseInstance &db, const string &sql, ARGS... 
 }
 
 static constexpr idx_t kTokenBytes = 16; // 128 bits
+
+static string ComputeSessionHash(const string &session_id, const string &token, const string &client_id) {
+	MD5Context context;
+	context.Add(session_id);
+	context.Add(token);
+	context.Add(client_id);
+	return context.FinishHex();
+}
 
 static string HexEncode(const data_t *bytes, idx_t n) {
 	string result(n * 2, '\0');
@@ -285,7 +296,11 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		    (auth_result.type().id() == LogicalTypeId::BOOLEAN && !auth_result.GetValue<bool>())) {
 			return make_uniq<ErrorResponse>("Authentication failed");
 		}
-		return make_uniq<ConnectionResponseMessage>(CreateNewConnection(session_id));
+		string client_id_hash;
+		if (!connection_request_message.ClientId().empty()) {
+			client_id_hash = ComputeSessionHash(session_id, Token(), connection_request_message.ClientId());
+		}
+		return make_uniq<ConnectionResponseMessage>(CreateNewConnection(session_id, client_id_hash));
 	}
 	case MessageType::DISCONNECT_MESSAGE: {
 		auto &connection = *connection_p;
