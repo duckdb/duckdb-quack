@@ -39,16 +39,27 @@ select starts_with(query, 'SELECT') from quack_active_connections();
 ----
 true
 
+# client id hash is NULL, because there is no client id input
+query I quack_db:quack_server_con
+select client_id_hash from quack_active_connections();
+----
+NULL
+
 endloop
 
 # two clients on the same server
 statement ok
-attach {server} as rpc3 (token 'asdf');
+attach {server} as rpc3 (token 'asdf', client_id 'random_client_id');
 
 query I quack_db:quack_server_con
 select count(*) from quack_active_connections();
 ----
 2
+
+query I quack_db:quack_server_con
+SELECT count(client_id_hash) from quack_active_connections() WHERE client_id_hash NOT NULL;
+----
+1
 
 statement ok
 detach rpc3;
