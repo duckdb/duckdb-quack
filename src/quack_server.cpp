@@ -273,8 +273,10 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 	switch (received_message.Type()) {
 	case MessageType::CONNECTION_REQUEST: {
 		auto &connection_request_message = received_message.Cast<ConnectionRequestMessage>();
-		if (connection_request_message.MinimumSupportedQuackVersion() > 1ULL) {
-			return make_uniq<ErrorResponse>("Unsupported Quack version - server only supports version 1 of quack");
+		if (connection_request_message.MinimumSupportedQuackVersion() != QUACK_PROTOCOL_VERSION) {
+			return make_uniq<ErrorResponse>("Quack protocol version mismatch: server speaks v" +
+			                                to_string(QUACK_PROTOCOL_VERSION) + ", client speaks v" +
+			                                to_string(connection_request_message.MinimumSupportedQuackVersion()));
 		}
 		string session_id = GenerateSessionId();
 		auto auth_result = EvaluateAuthQuery(
@@ -429,11 +431,16 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			                                SQLIdentifier(append_request_message.TableName()));
 		}
 		try {
-			ColumnDataCollection collection(Allocator::Get(context), append_request_message.AppendChunk().GetTypes());
-			collection.Append(append_request_message.AppendChunk());
-			connection.duckdb_connection->Append(*table_info, collection);
+			auto &chunks = append_request_message.MutableAppendChunks();
+			if (!chunks.empty()) {
+				ColumnDataCollection collection(Allocator::Get(context), chunks[0]->Chunk().GetTypes());
+				for (auto &wrapper : chunks) {
+					collection.Append(wrapper->Chunk());
+				}
+				connection.duckdb_connection->Append(*table_info, collection);
+			}
 		} catch (std::exception &ex) {
-			// apend failed - directly pass error to user
+			// append failed - directly pass error to user
 			return make_uniq<ErrorResponse>(ErrorData(ex));
 		}
 		return make_uniq<SuccessResponse>();

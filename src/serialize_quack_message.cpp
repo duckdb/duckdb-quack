@@ -12,14 +12,15 @@ namespace duckdb {
 void AppendRequestMessage::Serialize(Serializer &serializer) const {
 	serializer.WritePropertyWithDefault<string>(1, "schema_name", schema_name);
 	serializer.WritePropertyWithDefault<string>(2, "table_name", table_name);
-	serializer.WritePropertyWithDefault<unique_ptr<DataChunkWrapper>>(3, "append_chunk", append_chunk);
+	serializer.WritePropertyWithDefault<vector<unique_ptr<DataChunkWrapper>>>(3, "append_chunks", append_chunks);
 }
 
 unique_ptr<AppendRequestMessage> AppendRequestMessage::Deserialize(Deserializer &deserializer) {
 	auto result = duckdb::unique_ptr<AppendRequestMessage>(new AppendRequestMessage());
 	deserializer.ReadPropertyWithDefault<string>(1, "schema_name", result->schema_name);
 	deserializer.ReadPropertyWithDefault<string>(2, "table_name", result->table_name);
-	deserializer.ReadPropertyWithDefault<unique_ptr<DataChunkWrapper>>(3, "append_chunk", result->append_chunk);
+	deserializer.ReadPropertyWithDefault<vector<unique_ptr<DataChunkWrapper>>>(3, "append_chunks",
+	                                                                           result->append_chunks);
 	return result;
 }
 

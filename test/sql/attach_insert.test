@@ -1,0 +1,83 @@
+# name: test/sql/attach_insert.test
+# description: INSERT and CREATE TABLE AS over an rpc attach - batched append flush thresholds, edges, small-insert no-regression
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+# INSERT above the client flush threshold (STANDARD_VECTOR_SIZE * 100 = 204800): at least one
+# mid-statement flush AND the Finalize flush both fire.
+statement ok
+create table rpc.big(i bigint);
+
+statement ok
+insert into rpc.big select * from range(500000)
+
+query IIII
+select count(*), min(i), max(i), sum(i) from rpc.big
+----
+500000	0	499999	124999750000
+
+# Single-row insert must not regress: buffers one row, flushes once at Finalize.
+statement ok
+create table rpc.small(a int, b int);
+
+statement ok
+insert into rpc.small values (1, 2)
+
+query II
+select a, b from rpc.small
+----
+1	2
+
+# Empty input: no rows, no append request body.
+statement ok
+create table rpc.emptytbl(i int);
+
+statement ok
+insert into rpc.emptytbl select * from range(0)
+
+query I
+select count(*) from rpc.emptytbl
+----
+0
+
+# Small CTAS: single Finalize flush.
+statement ok
+create table rpc.ctas_small as select range a from range(10);
+
+query I
+select count(a) from rpc.ctas_small
+----
+10
+
+# CTAS above the flush threshold: mid-statement flush + Finalize flush.
+statement ok
+create table rpc.ctas_big as select * from range(300000) t(i)
+
+query II
+select count(*), sum(i) from rpc.ctas_big
+----
+300000	44999850000
+
+statement ok
+drop table rpc.big;
+
+statement ok
+drop table rpc.small;
+
+statement ok
+drop table rpc.emptytbl;
+
+statement ok
+drop table rpc.ctas_small;
+
+statement ok
+drop table rpc.ctas_big;
+
+statement ok con2
+detach rpc;
+
+include test/template/quack_teardown.test_template
