@@ -131,6 +131,20 @@
     ]
   },
   {
+    "class": "ProgressRequestMessage",
+    "members": []
+  },
+  {
+    "class": "ProgressResponseMessage",
+    "members": [
+      {
+        "id": 1,
+        "name": "progress",
+        "type": "double"
+      }
+    ]
+  },
+  {
     "class": "ConnectionRequestMessage",
     "members": [
       {

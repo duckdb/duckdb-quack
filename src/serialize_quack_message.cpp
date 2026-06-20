@@ -138,6 +138,24 @@ unique_ptr<PrepareResponseMessage> PrepareResponseMessage::Deserialize(Deseriali
 	return result;
 }
 
+void ProgressRequestMessage::Serialize(Serializer &serializer) const {
+}
+
+unique_ptr<ProgressRequestMessage> ProgressRequestMessage::Deserialize(Deserializer &deserializer) {
+	auto result = duckdb::unique_ptr<ProgressRequestMessage>(new ProgressRequestMessage());
+	return result;
+}
+
+void ProgressResponseMessage::Serialize(Serializer &serializer) const {
+	serializer.WriteProperty<double>(1, "progress", progress);
+}
+
+unique_ptr<ProgressResponseMessage> ProgressResponseMessage::Deserialize(Deserializer &deserializer) {
+	auto result = duckdb::unique_ptr<ProgressResponseMessage>(new ProgressResponseMessage());
+	deserializer.ReadProperty<double>(1, "progress", result->progress);
+	return result;
+}
+
 void SuccessResponse::Serialize(Serializer &serializer) const {
 }
 

@@ -1,4 +1,7 @@
+#include "duckdb/common/progress_bar/progress_bar.hpp"
+#include "duckdb/common/progress_bar/progress_bar_display.hpp"
 #include "duckdb/function/table_function.hpp"
+#include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/main/secret/secret.hpp"
@@ -11,7 +14,132 @@
 #include "storage/quack_transaction.hpp"
 
 #include <queue>
+#include <thread>
+#include <chrono>
 namespace duckdb {
+
+//! Polls server-side query progress on a *separate* HTTP connection (reusing the scan's
+//! connection_id) so progress can reach the client while a query runs server-side.
+//!
+//! Two usage modes:
+//!  - feed-only: the latest percentage is exposed via LatestProgress() and surfaced to DuckDB's
+//!    own progress bar through table_scan_progress. Used during the streaming FETCH phase, where
+//!    the client's main thread is free to pump the bar.
+//!  - direct-render: the poller additionally drives a ProgressBarDisplay itself. Used while the
+//!    main thread is blocked inside a bind-phase PREPARE and therefore cannot pump the bar. The
+//!    display is created from the client's own ClientConfig, so it only happens when the embedding
+//!    (e.g. the shell) actually wants a progress bar printed.
+class QuackProgressPoller {
+public:
+	QuackProgressPoller(shared_ptr<QuackClientConnection> connection_p, shared_ptr<DatabaseInstance> db_p)
+	    : connection(std::move(connection_p)), db(std::move(db_p)) {
+	}
+	~QuackProgressPoller() {
+		Stop();
+	}
+
+	//! Start polling, feeding LatestProgress() only.
+	void Start() {
+		StartInternal(nullptr, 0);
+	}
+	//! Start polling and render directly to `display` (no-op rendering if `display` is null), waiting
+	//! `wait_time_ms` before the first paint to mirror DuckDB's own progress-bar startup delay.
+	void StartWithDisplay(unique_ptr<ProgressBarDisplay> display_p, idx_t wait_time_ms) {
+		StartInternal(std::move(display_p), wait_time_ms);
+	}
+	void Stop() {
+		stop = true;
+		if (poll_thread.joinable()) {
+			poll_thread.join();
+		}
+	}
+	//! Latest server-reported progress as a percentage in [0, 100], or negative if unknown.
+	double LatestProgress() const {
+		return latest_progress.load();
+	}
+
+private:
+	void StartInternal(unique_ptr<ProgressBarDisplay> display_p, idx_t wait_time_ms) {
+		display = std::move(display_p);
+		wait_time_ms_v = wait_time_ms;
+		poll_thread = std::thread(&QuackProgressPoller::PollLoop, this);
+	}
+
+	void PollLoop() {
+		auto uri = connection->ServerURI();
+		auto connection_id = connection->ConnectionId();
+		unique_ptr<QuackClient> client;
+		auto started_at = std::chrono::steady_clock::now();
+		bool rendered = false;
+		while (!stop) {
+			// Sleep in small slices so a stop request is honored promptly.
+			for (idx_t i = 0; i < 10 && !stop; i++) {
+				std::this_thread::sleep_for(std::chrono::milliseconds(20));
+			}
+			if (stop) {
+				break;
+			}
+			try {
+				if (!client) {
+					client = QuackClient::GetClient(*db, uri);
+				}
+				auto response =
+				    client->Request<ProgressResponseMessage>(nullptr, make_uniq<ProgressRequestMessage>(connection_id));
+				auto progress = response->Progress();
+				latest_progress = progress;
+
+				if (display && progress >= 0) {
+					auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+					                      std::chrono::steady_clock::now() - started_at)
+					                      .count();
+					if (static_cast<idx_t>(elapsed_ms) >= wait_time_ms_v) {
+						display->Update(progress);
+						rendered = true;
+					}
+				}
+			} catch (...) {
+				// Progress is best-effort: drop the client and retry on the next tick.
+				client.reset();
+			}
+		}
+		if (display && rendered) {
+			display->Finish();
+		}
+	}
+
+	shared_ptr<QuackClientConnection> connection;
+	shared_ptr<DatabaseInstance> db;
+	atomic<double> latest_progress {-1};
+	atomic<bool> stop {false};
+	unique_ptr<ProgressBarDisplay> display;
+	idx_t wait_time_ms_v = 0;
+	std::thread poll_thread;
+};
+
+//! Build the same progress-bar display DuckDB would use for this client, but only when the client
+//! actually wants a progress bar printed (e.g. an interactive shell). Returns null otherwise.
+static unique_ptr<ProgressBarDisplay> MaybeCreateProgressDisplay(ClientContext &context) {
+	auto &config = context.config;
+	if (!config.enable_progress_bar || !config.print_progress_bar) {
+		return nullptr;
+	}
+	auto create_func = config.display_create_func ? config.display_create_func : ProgressBar::DefaultProgressBarDisplay;
+	return create_func();
+}
+
+//! RAII helper that renders server-side progress directly while a blocking bind-phase PREPARE runs
+//! on the (otherwise stalled) main thread. A no-op when no progress bar is wanted.
+struct ScopedBindProgress {
+	ScopedBindProgress(ClientContext &context, const shared_ptr<QuackClientConnection> &connection) {
+		auto display = MaybeCreateProgressDisplay(context);
+		if (!display) {
+			return;
+		}
+		poller = make_uniq<QuackProgressPoller>(connection, context.db);
+		poller->StartWithDisplay(std::move(display), NumericCast<idx_t>(context.config.wait_time));
+	}
+	unique_ptr<QuackProgressPoller> poller;
+};
 
 static unique_ptr<FunctionData> QuackScanBind(ClientContext &context, TableFunctionBindInput &input,
                                               vector<LogicalType> &return_types, vector<string> &names) {
@@ -47,8 +175,13 @@ static unique_ptr<FunctionData> QuackScanBind(ClientContext &context, TableFunct
 	auto client_wrapper = client_connection.GetClient(context);
 	auto &client = client_wrapper->GetClient();
 
-	auto bind_response = client.Request<PrepareResponseMessage>(
-	    context, make_uniq<PrepareRequestMessage>(client_connection.ConnectionId(), query));
+	unique_ptr<PrepareResponseMessage> bind_response;
+	{
+		// The query runs server-side while this request blocks the main thread; render progress directly.
+		ScopedBindProgress progress(context, bind_data->client_connection);
+		bind_response = client.Request<PrepareResponseMessage>(
+		    context, make_uniq<PrepareRequestMessage>(client_connection.ConnectionId(), query));
+	}
 
 	return_types = bind_response->Types();
 	names = bind_response->Names();
@@ -87,8 +220,12 @@ static unique_ptr<FunctionData> QuackScanBindCatalogName(ClientContext &context,
 	bind_data->client_connection = catalog.GetClientConnection();
 	auto client_wrapper = bind_data->client_connection->GetClient(context);
 	auto &client = client_wrapper->GetClient();
-	auto bind_response = client.Request<PrepareResponseMessage>(
-	    context, make_uniq<PrepareRequestMessage>(bind_data->client_connection->ConnectionId(), query));
+	unique_ptr<PrepareResponseMessage> bind_response;
+	{
+		ScopedBindProgress progress(context, bind_data->client_connection);
+		bind_response = client.Request<PrepareResponseMessage>(
+		    context, make_uniq<PrepareRequestMessage>(bind_data->client_connection->ConnectionId(), query));
+	}
 
 	return_types = bind_response->Types();
 	names = bind_response->Names();
@@ -139,10 +276,12 @@ struct QuackScanLocalState : public LocalTableFunctionState {
 
 struct QuackScanGlobalState : GlobalTableFunctionState {
 	explicit QuackScanGlobalState(vector<ColumnIndex> column_ids_p, vector<idx_t> projection_id_p,
-	                              vector<ChunkResult> results_p, bool needs_more_fetch_p, hugeint_t result_uuid_p)
+	                              vector<ChunkResult> results_p, bool needs_more_fetch_p, hugeint_t result_uuid_p,
+	                              shared_ptr<QuackClientConnection> client_connection_p,
+	                              shared_ptr<DatabaseInstance> db_p)
 	    : max_threads(needs_more_fetch_p ? MAX_THREADS : 1), column_ids(std::move(column_ids_p)),
 	      projection_ids(std::move(projection_id_p)), needs_more_fetch(needs_more_fetch_p), result_uuid(result_uuid_p),
-	      results(std::move(results_p)) {
+	      poller(std::move(client_connection_p), std::move(db_p)), results(std::move(results_p)) {
 	}
 	idx_t MaxThreads() const override {
 		return max_threads;
@@ -158,10 +297,31 @@ struct QuackScanGlobalState : GlobalTableFunctionState {
 		return std::move(results);
 	}
 
+	//! Start polling server progress for the streaming phase (surfaced via table_scan_progress).
+	//! No-op when the query already finished in a single batch, so there is nothing left to stream.
+	void StartProgressPolling() {
+		if (!needs_more_fetch) {
+			return;
+		}
+		poller.Start();
+	}
+	double LatestProgress() const {
+		return poller.LatestProgress();
+	}
+
 private:
 	mutex lock;
+	QuackProgressPoller poller;
 	vector<ChunkResult> results;
 };
+
+static double QuackScanProgress(ClientContext &, const FunctionData *, const GlobalTableFunctionState *global_state_p) {
+	auto &global_state = global_state_p->Cast<QuackScanGlobalState>();
+	auto progress = global_state.LatestProgress();
+	// A negative value means the server hasn't reported progress yet; surface 0 so DuckDB shows a
+	// fresh bar rather than a nonsensical percentage.
+	return progress < 0 ? 0.0 : progress;
+}
 
 static string BuildPushdownQuery(const QuackScanBindData &bind_data, const TableFunctionInitInput &input) {
 	string query;
@@ -248,8 +408,12 @@ unique_ptr<GlobalTableFunctionState> QuackScanInitGlobal(ClientContext &context,
 		auto &client_connection = *bind_data.client_connection;
 		auto client_wrapper = client_connection.GetClient(context);
 		auto &client = client_wrapper->GetClient();
-		auto response_message = client.Request<PrepareResponseMessage>(
-		    context, make_uniq<PrepareRequestMessage>(client_connection.ConnectionId(), query));
+		unique_ptr<PrepareResponseMessage> response_message;
+		{
+			ScopedBindProgress progress(context, bind_data.client_connection);
+			response_message = client.Request<PrepareResponseMessage>(
+			    context, make_uniq<PrepareRequestMessage>(client_connection.ConnectionId(), query));
+		}
 		needs_more_fetch = response_message->NeedsMoreFetch();
 		// fetch the result
 		for (auto &chunk_ref : response_message->MutableResults()) {
@@ -265,8 +429,12 @@ unique_ptr<GlobalTableFunctionState> QuackScanInitGlobal(ClientContext &context,
 		result_uuid = bind_data.result_uuid;
 	}
 	// we only multithread if there is more to fetch
-	return make_uniq<QuackScanGlobalState>(input.column_indexes, input.projection_ids, std::move(results),
-	                                       needs_more_fetch, result_uuid);
+	auto global_state =
+	    make_uniq<QuackScanGlobalState>(input.column_indexes, input.projection_ids, std::move(results),
+	                                    needs_more_fetch, result_uuid, bind_data.client_connection, context.db);
+	// Surface server-side query progress to the local progress bar while we stream results.
+	global_state->StartProgressPolling();
+	return std::move(global_state);
 }
 
 unique_ptr<LocalTableFunctionState> QuackScanInitLocal(ExecutionContext &context, TableFunctionInitInput &input,
@@ -385,6 +553,7 @@ TableFunction QuackScanFunction::GetFunction() {
 	fun.serialize = QuackScanSerialize;
 	fun.deserialize = QuackScanDeserialize;
 	fun.get_bind_info = QuackScanGetBindInfo;
+	fun.table_scan_progress = QuackScanProgress;
 	// fun.filter_pushdown = true;
 	// fun.filter_prune = true;
 	return fun;
@@ -399,6 +568,7 @@ TableFunction QuackScanByNameFunction::GetFunction() {
 	fun.serialize = QuackScanSerialize;
 	fun.deserialize = QuackScanDeserialize;
 	fun.get_bind_info = QuackScanGetBindInfo;
+	fun.table_scan_progress = QuackScanProgress;
 	fun.named_parameters["use_transaction"] = LogicalType::BOOLEAN;
 	// fun.filter_pushdown = true;
 	// fun.filter_prune = true;

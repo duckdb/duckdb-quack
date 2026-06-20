@@ -18,6 +18,8 @@ enum class MessageType : uint8_t {
 	APPEND_REQUEST = 9,
 	SUCCESS_RESPONSE = 10,
 	DISCONNECT_MESSAGE = 11,
+	PROGRESS_REQUEST = 12,
+	PROGRESS_RESPONSE = 13,
 	ERROR_RESPONSE = 100
 };
 
@@ -329,6 +331,44 @@ private:
 	string schema_name;
 	string table_name;
 	unique_ptr<DataChunkWrapper> append_chunk;
+};
+
+// Sent on a *separate* HTTP connection (but carrying the connection_id of the connection whose query
+// is running) to poll server-side query progress without blocking on the in-flight PREPARE/FETCH.
+class ProgressRequestMessage : public QuackMessage {
+public:
+	static constexpr MessageType TYPE = MessageType::PROGRESS_REQUEST;
+
+	explicit ProgressRequestMessage(string connection_id_p) : QuackMessage(TYPE, std::move(connection_id_p)) {};
+
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<ProgressRequestMessage> Deserialize(Deserializer &deserializer);
+
+protected:
+	ProgressRequestMessage() : QuackMessage(TYPE) {
+	}
+};
+
+class ProgressResponseMessage : public QuackMessage {
+public:
+	static constexpr MessageType TYPE = MessageType::PROGRESS_RESPONSE;
+
+	explicit ProgressResponseMessage(double progress_p) : QuackMessage(TYPE), progress(progress_p) {};
+
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<ProgressResponseMessage> Deserialize(Deserializer &deserializer);
+
+	//! Query progress as a percentage in [0, 100], or a negative value if unknown / no active query.
+	double Progress() const {
+		return progress;
+	}
+
+protected:
+	ProgressResponseMessage() : QuackMessage(TYPE) {
+	}
+
+private:
+	double progress = -1;
 };
 
 class DisconnectMessage : public QuackMessage {

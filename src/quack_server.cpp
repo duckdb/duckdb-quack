@@ -69,7 +69,10 @@ string QuackServer::CreateNewConnection(const string &session_id) {
 	}
 	auto new_connection = make_shared_ptr<QuackConnection>(session_id);
 	new_connection->duckdb_connection = make_uniq<Connection>(*db);
-	new_connection->duckdb_connection->context->config.enable_progress_bar = false;
+	// Track query progress so clients can poll it via PROGRESS_REQUEST, but never print it
+	// server-side (no display is created when print_progress_bar is false).
+	new_connection->duckdb_connection->context->config.enable_progress_bar = true;
+	new_connection->duckdb_connection->context->config.print_progress_bar = false;
 	// new_connection->duckdb_connection->context->config.streaming_buffer_size = 10 * 1000000; // 10 MB
 	active_connections[session_id] = std::move(new_connection);
 	return session_id;
@@ -169,6 +172,7 @@ bool ServerSupportsMessage(MessageType type) {
 	case MessageType::FETCH_REQUEST:
 	case MessageType::APPEND_REQUEST:
 	case MessageType::DISCONNECT_MESSAGE:
+	case MessageType::PROGRESS_REQUEST:
 		return true;
 	default:
 		return false;
@@ -391,6 +395,14 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		return make_uniq<FetchResponseMessage>(std::move(results), optional_idx(assigned_batch_index));
 	}
 
+	case MessageType::PROGRESS_REQUEST: {
+		auto &connection = *connection_p;
+		// Deliberately do NOT take connection.lock here: another thread may be holding it while
+		// executing the query (PREPARE/FETCH). GetQueryProgress only reads atomic progress counters
+		// on the ClientContext, so it is safe to call concurrently and returns immediately.
+		double progress = connection.duckdb_connection->GetQueryProgress();
+		return make_uniq<ProgressResponseMessage>(progress);
+	}
 	case MessageType::APPEND_REQUEST: {
 		auto &append_request_message = received_message.Cast<AppendRequestMessage>();
 		auto &connection = *connection_p;
