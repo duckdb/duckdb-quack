@@ -36,7 +36,9 @@ protected:
 public:
 	// Sink interface
 	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override;
+	unique_ptr<LocalSinkState> GetLocalSinkState(ExecutionContext &context) const override;
 	SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const override;
+	SinkCombineResultType Combine(ExecutionContext &context, OperatorSinkCombineInput &input) const override;
 	SinkFinalizeType Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
 	                          OperatorSinkFinalizeInput &input) const override;
 
@@ -48,8 +50,10 @@ public:
 		return true;
 	}
 
+	//! Each sink thread buffers and ships its own batches over its own connection, mirroring how the
+	//! scan parallelizes FETCH. Server-side appends still serialize under the connection lock.
 	bool ParallelSink() const override {
-		return false;
+		return true;
 	}
 
 	string GetName() const override;
