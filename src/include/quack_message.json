@@ -43,6 +43,11 @@
         "id": 1,
         "name": "sql_query",
         "type": "string"
+      },
+      {
+        "id": 2,
+        "name": "query_uuid",
+        "type": "hugeint_t"
       }
     ]
   },
@@ -89,11 +94,11 @@
       },
       {
         "id": 5,
-        "name": "result_uuid",
+        "name": "query_uuid",
         "type": "hugeint_t"
       }
     ],
-    "constructor": ["result_types", "result_names",  "results", "needs_more_fetch", "result_uuid"]
+    "constructor": ["result_types", "result_names",  "results", "needs_more_fetch", "query_uuid"]
   },
   {
     "class": "AppendRequestMessage",
@@ -191,6 +196,16 @@
         "id": 3,
         "name": "quack_version",
         "type": "idx_t"
+      }
+    ]
+  },
+  {
+    "class": "CancelRequestMessage",
+    "members": [
+      {
+        "id": 1,
+        "name": "query_uuid",
+        "type": "hugeint_t"
       }
     ]
   }

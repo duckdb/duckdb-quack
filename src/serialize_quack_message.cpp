@@ -23,6 +23,16 @@ unique_ptr<AppendRequestMessage> AppendRequestMessage::Deserialize(Deserializer 
 	return result;
 }
 
+void CancelRequestMessage::Serialize(Serializer &serializer) const {
+	serializer.WriteProperty<hugeint_t>(1, "query_uuid", query_uuid);
+}
+
+unique_ptr<CancelRequestMessage> CancelRequestMessage::Deserialize(Deserializer &deserializer) {
+	auto result = duckdb::unique_ptr<CancelRequestMessage>(new CancelRequestMessage());
+	deserializer.ReadProperty<hugeint_t>(1, "query_uuid", result->query_uuid);
+	return result;
+}
+
 void ConnectionRequestMessage::Serialize(Serializer &serializer) const {
 	serializer.WritePropertyWithDefault<string>(1, "auth_string", auth_string);
 	serializer.WritePropertyWithDefault<string>(2, "client_duckdb_version", client_duckdb_version);
@@ -163,17 +173,6 @@ void SuccessResponse::Serialize(Serializer &serializer) const {
 
 unique_ptr<SuccessResponse> SuccessResponse::Deserialize(Deserializer &deserializer) {
 	auto result = duckdb::unique_ptr<SuccessResponse>(new SuccessResponse());
-	return result;
-}
-
-
-void CancelRequestMessage::Serialize(Serializer &serializer) const {
-	serializer.WriteProperty<hugeint_t>(1, "query_uuid", query_uuid);
-}
-
-unique_ptr<CancelRequestMessage> CancelRequestMessage::Deserialize(Deserializer &deserializer) {
-	auto result = duckdb::unique_ptr<CancelRequestMessage>(new CancelRequestMessage());
-	deserializer.ReadProperty<hugeint_t>(1, "query_uuid", result->query_uuid);
 	return result;
 }
 
