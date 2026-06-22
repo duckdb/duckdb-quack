@@ -53,6 +53,8 @@ public:
 	                               idx_t max_connections_cached = 1);
 	~QuackClientConnection();
 
+	void CancelQuery(hugeint_t query_uuid);
+
 	const string &ConnectionId() const {
 		return connection_id;
 	}

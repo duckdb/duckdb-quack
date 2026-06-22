@@ -17,6 +17,8 @@ static string QueryStateToString(QuackQueryState state) {
 		return "finished";
 	case QuackQueryState::CANCELLED:
 		return "cancelled";
+	case QuackQueryState::QUACK_ERROR:
+		return "error";
 	default:
 		return "unknown";
 	}

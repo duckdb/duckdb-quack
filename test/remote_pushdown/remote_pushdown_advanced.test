@@ -431,7 +431,7 @@ statement ok quack_db:quack_server_con
 insert into nulls values (1), (NULL), (3), (NULL), (5);
 
 statement ok
-from quack_clear_cache();
+CALL quack_clear_cache();
 
 # COUNT(*) counts nulls, COUNT(i) skips them
 query II

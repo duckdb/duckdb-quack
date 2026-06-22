@@ -18,8 +18,9 @@ enum class MessageType : uint8_t {
 	APPEND_REQUEST = 9,
 	SUCCESS_RESPONSE = 10,
 	DISCONNECT_MESSAGE = 11,
-	PROGRESS_REQUEST = 12,
-	PROGRESS_RESPONSE = 13,
+	CANCEL_REQUEST = 12,
+	PROGRESS_REQUEST = 13,
+	PROGRESS_RESPONSE = 14,
 	ERROR_RESPONSE = 100
 };
 
@@ -122,13 +123,16 @@ class PrepareRequestMessage : public QuackMessage {
 public:
 	static constexpr MessageType TYPE = MessageType::PREPARE_REQUEST;
 
-	PrepareRequestMessage(string connection_id_p, string sql_query_p)
-	    : QuackMessage(TYPE, std::move(connection_id_p)), sql_query(std::move(sql_query_p)) {
+	PrepareRequestMessage(string connection_id_p, string sql_query_p, hugeint_t query_uuid_p)
+	    : QuackMessage(TYPE, std::move(connection_id_p)), sql_query(std::move(sql_query_p)), query_uuid(query_uuid_p) {
 	}
 
 public:
 	const string &Query() const {
 		return sql_query;
+	}
+	hugeint_t QueryUUID() const {
+		return query_uuid;
 	}
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<PrepareRequestMessage> Deserialize(Deserializer &deserializer);
@@ -139,6 +143,7 @@ protected:
 
 private:
 	string sql_query;
+	hugeint_t query_uuid;
 };
 
 class PrepareResponseMessage : public QuackMessage {
@@ -147,9 +152,9 @@ public:
 
 	PrepareResponseMessage(const vector<LogicalType> &types_p, const vector<string> &names_p,
 	                       vector<unique_ptr<DataChunkWrapper>> results_p, bool needs_more_fetch_p,
-	                       hugeint_t result_uuid)
+	                       hugeint_t query_uuid)
 	    : QuackMessage(TYPE), result_types(types_p), result_names(names_p), results(std::move(results_p)),
-	      needs_more_fetch(needs_more_fetch_p), result_uuid(result_uuid) {
+	      needs_more_fetch(needs_more_fetch_p), query_uuid(query_uuid) {
 	}
 
 public:
@@ -168,8 +173,8 @@ public:
 	bool NeedsMoreFetch() const {
 		return needs_more_fetch;
 	}
-	hugeint_t ResultUUID() const {
-		return result_uuid;
+	hugeint_t QueryUUID() const {
+		return query_uuid;
 	}
 
 	void Serialize(Serializer &serializer) const override;
@@ -184,7 +189,7 @@ private:
 	vector<string> result_names;
 	vector<unique_ptr<DataChunkWrapper>> results;
 	bool needs_more_fetch = false;
-	hugeint_t result_uuid;
+	hugeint_t query_uuid;
 };
 
 // TODO this is where auth goes
@@ -422,6 +427,24 @@ protected:
 
 private:
 	ErrorData error;
+};
+
+class CancelRequestMessage : public QuackMessage {
+public:
+	static constexpr MessageType TYPE = MessageType::CANCEL_REQUEST;
+
+	explicit CancelRequestMessage(string connection_id_p, hugeint_t query_uuid_p)
+	    : QuackMessage(TYPE, std::move(connection_id_p)), query_uuid(query_uuid_p) {
+	}
+
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<CancelRequestMessage> Deserialize(Deserializer &deserializer);
+
+	hugeint_t query_uuid;
+
+protected:
+	CancelRequestMessage() : QuackMessage(TYPE) {
+	}
 };
 
 } // namespace duckdb

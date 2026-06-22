@@ -14,6 +14,7 @@ add_library(
   quack_start_stop.cpp
   quack_storage.cpp
   quack_uri.cpp
+  quack_cancel.cpp
   serialize_quack_message.cpp)
 set(EXTENSION_SOURCES
     ${EXTENSION_SOURCES} $<TARGET_OBJECTS:quack_library>

@@ -2,8 +2,11 @@
 
 #include <thread>
 
+#include "duckdb/common/atomic.hpp"
+#include "duckdb/common/mutex.hpp"
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/shared_ptr.hpp"
+#include "duckdb/common/unordered_map.hpp"
 
 #include "quack_uri.hpp"
 
@@ -20,7 +23,7 @@ class DatabaseInstance;
 class PreparedStatement;
 class EncryptionState;
 
-enum class QuackQueryState : uint8_t { IDLE, ACTIVE, FINISHED, CANCELLED };
+enum class QuackQueryState : uint8_t { IDLE, ACTIVE, FINISHED, CANCELLED, QUACK_ERROR };
 
 struct QuackConnection {
 	explicit QuackConnection(string session_id_p);
@@ -31,8 +34,8 @@ struct QuackConnection {
 	unique_ptr<QueryResult> duckdb_query_result;
 	//! Monotonic counter assigned per FETCH batch — enables order-preserving parallel scans on
 	idx_t next_batch_index = 1;
-	//! Current result UUID
-	hugeint_t result_uuid;
+	//! Current query UUID
+	hugeint_t query_uuid;
 	string session_id;
 	string sql_query;
 	QuackQueryState query_state = QuackQueryState::IDLE;

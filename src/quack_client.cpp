@@ -14,6 +14,16 @@ string GetUriPart(T ele) {
 	return string(ele.first, ele.afterLast - ele.first);
 }
 
+void QuackClientConnection::CancelQuery(hugeint_t query_uuid) {
+	lock_guard<mutex> guard(lock);
+	if (cached_clients.empty()) {
+		return;
+	}
+	// get a cached client, if any
+	auto &client = cached_clients.back();
+	client->Request<SuccessResponse>(nullptr, make_uniq<CancelRequestMessage>(connection_id, query_uuid));
+}
+
 QuackClient::QuackClient(DatabaseInstance &db_p, const QuackUri &uri_p) : db(db_p), uri(uri_p) {
 }
 

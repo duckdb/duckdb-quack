@@ -51,6 +51,9 @@ MessageType EnumUtil::FromString<MessageType>(const char *value) {
 	if (StringUtil::Equals(value, "DISCONNECT_MESSAGE")) {
 		return MessageType::DISCONNECT_MESSAGE;
 	}
+	if (StringUtil::Equals(value, "CANCEL_REQUEST")) {
+		return MessageType::CANCEL_REQUEST;
+	}
 	if (StringUtil::Equals(value, "PROGRESS_REQUEST")) {
 		return MessageType::PROGRESS_REQUEST;
 	}
@@ -85,6 +88,8 @@ const char *EnumUtil::ToChars<MessageType>(MessageType value) {
 		return "SUCCESS_RESPONSE";
 	case MessageType::DISCONNECT_MESSAGE:
 		return "DISCONNECT_MESSAGE";
+	case MessageType::CANCEL_REQUEST:
+		return "CANCEL_REQUEST";
 	case MessageType::PROGRESS_REQUEST:
 		return "PROGRESS_REQUEST";
 	case MessageType::PROGRESS_RESPONSE:
@@ -135,6 +140,8 @@ unique_ptr<QuackMessage> QuackMessage::Deserialize(Deserializer &deserializer, M
 		return SuccessResponse::Deserialize(deserializer);
 	case MessageType::DISCONNECT_MESSAGE:
 		return DisconnectMessage::Deserialize(deserializer);
+	case MessageType::CANCEL_REQUEST:
+		return CancelRequestMessage::Deserialize(deserializer);
 	case MessageType::PROGRESS_REQUEST:
 		return ProgressRequestMessage::Deserialize(deserializer);
 	case MessageType::PROGRESS_RESPONSE:

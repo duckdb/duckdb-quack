@@ -28,7 +28,7 @@ public:
 	string GetCatalogType() override {
 		return "quack";
 	}
-
+	static QuackCatalog &GetQuackCatalog(ClientContext &context, Value &catalog_name);
 	static bool IsQuackScan(const string &name);
 	bool SupportsPushdown(const TableRef &ref) override;
 	void Initialize(bool load_builtin) override;
@@ -77,7 +77,6 @@ public:
 	const string &GetConnectionId();
 
 	shared_ptr<QuackClientConnection> GetClientConnection();
-	static QuackCatalog &GetQuackCatalog(ClientContext &context, Value &catalog_name);
 
 	void Refresh(ClientContext &context);
 
