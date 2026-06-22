@@ -38,12 +38,12 @@ public:
 		Stop();
 	}
 
-	//! Start polling, feeding LatestProgress() only.
-	void Start() {
-		StartInternal(nullptr, 0);
+	//! Start polling, feeding LatestProgress() only. Waits `wait_time_ms` before connecting.
+	void Start(idx_t wait_time_ms) {
+		StartInternal(nullptr, wait_time_ms);
 	}
 	//! Start polling and render directly to `display` (no-op rendering if `display` is null), waiting
-	//! `wait_time_ms` before the first paint to mirror DuckDB's own progress-bar startup delay.
+	//! `wait_time_ms` before connecting to mirror DuckDB's own progress-bar startup delay.
 	void StartWithDisplay(unique_ptr<ProgressBarDisplay> display_p, idx_t wait_time_ms) {
 		StartInternal(std::move(display_p), wait_time_ms);
 	}
@@ -65,20 +65,30 @@ private:
 		poll_thread = std::thread(&QuackProgressPoller::PollLoop, this);
 	}
 
+	//! Sleep up to `ms` in small slices so a stop request is honored promptly.
+	//! Returns false if a stop was requested while sleeping.
+	bool SleepInterruptible(idx_t ms) {
+		for (idx_t slept = 0; slept < ms; slept += 20) {
+			if (stop) {
+				return false;
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(20));
+		}
+		return !stop;
+	}
+
 	void PollLoop() {
+		// Defer connecting until the progress-bar wait time has elapsed — the same delay DuckDB waits
+		// before showing its own progress bar. Queries that finish within this window never open the
+		// extra polling connection: the owning scan is torn down, Stop() fires, and we exit here.
+		if (!SleepInterruptible(wait_time_ms_v)) {
+			return;
+		}
 		auto uri = connection->ServerURI();
 		auto connection_id = connection->ConnectionId();
 		unique_ptr<QuackClient> client;
-		auto started_at = std::chrono::steady_clock::now();
 		bool rendered = false;
 		while (!stop) {
-			// Sleep in small slices so a stop request is honored promptly.
-			for (idx_t i = 0; i < 10 && !stop; i++) {
-				std::this_thread::sleep_for(std::chrono::milliseconds(20));
-			}
-			if (stop) {
-				break;
-			}
 			try {
 				if (!client) {
 					client = QuackClient::GetClient(*db, uri);
@@ -89,18 +99,15 @@ private:
 				latest_progress = progress;
 
 				if (display && progress >= 0) {
-					auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-					                      std::chrono::steady_clock::now() - started_at)
-					                      .count();
-					if (static_cast<idx_t>(elapsed_ms) >= wait_time_ms_v) {
-						display->Update(progress);
-						rendered = true;
-					}
+					display->Update(progress);
+					rendered = true;
 				}
 			} catch (...) {
 				// Progress is best-effort: drop the client and retry on the next tick.
 				client.reset();
 			}
+			// Sleep between polls, honoring stop promptly.
+			SleepInterruptible(200);
 		}
 		if (display && rendered) {
 			display->Finish();
@@ -303,11 +310,12 @@ struct QuackScanGlobalState : GlobalTableFunctionState {
 
 	//! Start polling server progress for the streaming phase (surfaced via table_scan_progress).
 	//! No-op when the query already finished in a single batch, so there is nothing left to stream.
-	void StartProgressPolling() {
+	//! Waits `wait_time_ms` before connecting, mirroring DuckDB's own progress-bar startup delay.
+	void StartProgressPolling(idx_t wait_time_ms) {
 		if (!needs_more_fetch) {
 			return;
 		}
-		poller.Start();
+		poller.Start(wait_time_ms);
 	}
 	double LatestProgress() const {
 		return poller.LatestProgress();
@@ -437,7 +445,7 @@ unique_ptr<GlobalTableFunctionState> QuackScanInitGlobal(ClientContext &context,
 	    make_uniq<QuackScanGlobalState>(input.column_indexes, input.projection_ids, std::move(results),
 	                                    needs_more_fetch, query_uuid, bind_data.client_connection, context.db);
 	// Surface server-side query progress to the local progress bar while we stream results.
-	global_state->StartProgressPolling();
+	global_state->StartProgressPolling(NumericCast<idx_t>(context.config.wait_time));
 	return std::move(global_state);
 }
 
