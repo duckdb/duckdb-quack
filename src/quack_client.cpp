@@ -1,6 +1,7 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
 
 #include "quack_client.hpp"
 #include "quack_uri.hpp"
@@ -31,18 +32,6 @@ unique_ptr<QuackMessage> HttpsQuackClient::RequestInternal(optional_ptr<ClientCo
 
 	lock_guard<mutex> guard(request_mutex);
 
-	auto &http_util = HTTPUtil::Get(db);
-	auto request_url = uri.Http() + "/quack";
-	if (!http_params) {
-		if (context && context->transaction.HasActiveTransaction()) {
-			http_params = http_util.InitializeParameters(*context, request_url);
-		} else {
-			http_params = http_util.InitializeParameters(db, request_url);
-		}
-	}
-
-	HTTPHeaders headers;
-
 	// Inject client_query_id from context into the message before sending.
 	// Guard against reading the active query during transaction start itself
 	// (e.g. BEGIN TRANSACTION via QuackCatalog::ExecuteCommand), where the
@@ -57,27 +46,15 @@ unique_ptr<QuackMessage> HttpsQuackClient::RequestInternal(optional_ptr<ClientCo
 	}
 
 	request_message->ToMemoryStream(write_stream);
-	PostRequestInfo post_request(request_url, headers, *http_params, write_stream.GetData(),
-	                             write_stream.GetPosition());
-	unique_ptr<HTTPResponse> response;
 
 	// Time the request
 	int64_t start_time = std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now())
 	                         .time_since_epoch()
 	                         .count();
 
-	try {
-		response = http_util.Request(post_request);
-	} catch (std::exception &ex) {
-		ErrorData error(ex);
-		throw IOException("Failed to send message: %s", error.Message());
-	}
-	if (!response || !response->Success()) {
-		string error = response ? response->GetError() : "no response";
-		throw IOException("Failed to send message: %s", error);
-	}
+	auto buffer_out = PostRawLocked(context, write_stream.GetData(), write_stream.GetPosition());
 
-	MemoryStream non_owning_read_stream((data_ptr_t)post_request.buffer_out.data(), post_request.buffer_out.size());
+	MemoryStream non_owning_read_stream((data_ptr_t)buffer_out.data(), buffer_out.size());
 	auto response_message = QuackMessage::FromMemoryStream(non_owning_read_stream);
 
 	// logging stuff, own scope
@@ -122,6 +99,40 @@ unique_ptr<QuackMessage> HttpsQuackClient::RequestInternal(optional_ptr<ClientCo
 	}
 
 	return response_message;
+}
+
+string HttpsQuackClient::PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size) {
+	lock_guard<mutex> guard(request_mutex);
+	return PostRawLocked(context, data, size);
+}
+
+string HttpsQuackClient::PostRawLocked(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size) {
+	auto &http_util = HTTPUtil::Get(db);
+	auto request_url = uri.Http() + "/quack";
+	if (!http_params) {
+		if (context && context->transaction.HasActiveTransaction()) {
+			http_params = http_util.InitializeParameters(*context, request_url);
+		} else {
+			http_params = http_util.InitializeParameters(db, request_url);
+		}
+	}
+
+	HTTPHeaders headers;
+	PostRequestInfo post_request(request_url, headers, *http_params, data, size);
+
+	unique_ptr<HTTPResponse> response;
+	try {
+		response = http_util.Request(post_request);
+	} catch (std::exception &ex) {
+		ErrorData error(ex);
+		throw IOException("Failed to send message: %s", error.Message());
+	}
+	if (!response || !response->Success()) {
+		string error = response ? response->GetError() : "no response";
+		throw IOException("Failed to send message: %s", error);
+	}
+
+	return std::move(post_request.buffer_out);
 }
 
 unique_ptr<QuackClient> QuackClient::GetClient(DatabaseInstance &db, const QuackUri &uri) {
@@ -180,7 +191,12 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 	// success! we got a connection id
 	// construct the client connection and return it
 	auto connection_id = connection_request_response->ConnectionId();
-	return make_shared_ptr<QuackClientConnection>(std::move(client), uri, std::move(connection_id));
+	// Size the client cache to the async upload concurrency so parallel appends keep warm connections
+	// instead of reconnecting per batch (one socket cannot serve concurrent POSTs).
+	auto async_threads = TaskScheduler::GetScheduler(context).NumberOfAsyncThreads();
+	auto max_connections_cached = MaxValue<idx_t>(NumericCast<idx_t>(async_threads), 1);
+	return make_shared_ptr<QuackClientConnection>(std::move(client), uri, std::move(connection_id),
+	                                              max_connections_cached);
 }
 
 unique_ptr<QuackClientWrapper> QuackClientConnection::GetClient(ClientContext &context) const {

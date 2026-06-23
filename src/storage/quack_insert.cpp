@@ -3,6 +3,9 @@
 #include "duckdb/planner/operator/logical_insert.hpp"
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 
+#include "duckdb/common/serializer/async_task_queue.hpp"
+#include "duckdb/common/serializer/memory_stream.hpp"
+
 #include "storage/quack_catalog.hpp"
 #include "quack_message.hpp"
 #include "storage/quack_insert.hpp"
@@ -29,12 +32,24 @@ public:
 	QuackInsertGlobalState(QuackTableCatalogEntry &table_p, idx_t flush_rows_p)
 	    : table(table_p), insert_count(0), flush_rows(flush_rows_p) {
 	}
+	~QuackInsertGlobalState() override {
+		// Defensive: if the statement errored before Finalize, the queue may still own in-flight sends.
+		// Close drains/cancels them so the queue's drained-on-destroy invariant holds. Best-effort.
+		if (queue) {
+			try {
+				queue->Close();
+			} catch (...) { // NOLINT: a destructor must not throw
+			}
+		}
+	}
 
 	QuackTableCatalogEntry &table;
 	//! Total rows inserted, summed from per-thread counts at Combine time
 	atomic<idx_t> insert_count;
 	//! Rows a thread buffers before shipping one APPEND_REQUEST (from quack_append_flush_rows)
 	idx_t flush_rows;
+	//! Shared async upload queue: regular threads register serialized batches, ASYNC-pool threads POST them.
+	unique_ptr<ManagedAsyncTaskQueue> queue;
 };
 
 class QuackInsertLocalState : public LocalSinkState {
@@ -43,8 +58,6 @@ public:
 	vector<unique_ptr<DataChunk>> buffer;
 	idx_t buffered_rows = 0;
 	idx_t local_count = 0;
-	//! One warm connection held for this thread's lifetime, mirroring QuackScanLocalState
-	unique_ptr<QuackClientWrapper> client_wrapper;
 };
 
 // Default rows a thread buffers before shipping one APPEND_REQUEST; overridable via the
@@ -64,15 +77,21 @@ static idx_t GetFlushRows(ClientContext &context) {
 
 unique_ptr<GlobalSinkState> QuackInsert::GetGlobalSinkState(ClientContext &context) const {
 	auto flush_rows = GetFlushRows(context);
+	unique_ptr<QuackInsertGlobalState> global_state;
 	if (table) {
-		return make_uniq<QuackInsertGlobalState>(table.get_mutable()->Cast<QuackTableCatalogEntry>(), flush_rows);
-	}
-	// CREATE TABLE AS path: create the table on the remote side first
-	auto &quack_schema = schema.get_mutable()->Cast<QuackSchemaCatalogEntry>();
-	auto &quack_catalog = quack_schema.catalog.Cast<QuackCatalog>();
+		global_state =
+		    make_uniq<QuackInsertGlobalState>(table.get_mutable()->Cast<QuackTableCatalogEntry>(), flush_rows);
+	} else {
+		// CREATE TABLE AS path: create the table on the remote side first
+		auto &quack_schema = schema.get_mutable()->Cast<QuackSchemaCatalogEntry>();
+		auto &quack_catalog = quack_schema.catalog.Cast<QuackCatalog>();
 
-	auto entry = quack_schema.CreateTable(CatalogTransaction(quack_catalog, context), *info);
-	return make_uniq<QuackInsertGlobalState>(entry->Cast<QuackTableCatalogEntry>(), flush_rows);
+		auto entry = quack_schema.CreateTable(CatalogTransaction(quack_catalog, context), *info);
+		global_state = make_uniq<QuackInsertGlobalState>(entry->Cast<QuackTableCatalogEntry>(), flush_rows);
+	}
+	// One shared upload queue per statement; concurrency K defaults to async_threads, decoupled from `threads`.
+	global_state->queue = make_uniq<ManagedAsyncTaskQueue>(context);
+	return std::move(global_state);
 }
 
 unique_ptr<LocalSinkState> QuackInsert::GetLocalSinkState(ExecutionContext &context) const {
@@ -80,17 +99,52 @@ unique_ptr<LocalSinkState> QuackInsert::GetLocalSinkState(ExecutionContext &cont
 }
 
 //===--------------------------------------------------------------------===//
+// Async send task
+//===--------------------------------------------------------------------===//
+// Performs the blocking APPEND POST on an ASYNC-pool thread. The payload was serialized on the producing
+// (regular) execution thread; this task only does the low-CPU network send and checks the server's ack. It
+// owns a pooled connection for the duration of the request (one socket cannot do concurrent POSTs).
+class QuackAppendSendTask : public AsyncTask {
+public:
+	QuackAppendSendTask(unique_ptr<QuackClientWrapper> client_wrapper_p, unique_ptr<MemoryStream> payload_p,
+	                    idx_t payload_size_p)
+	    : client_wrapper(std::move(client_wrapper_p)), payload(std::move(payload_p)), payload_size(payload_size_p) {
+	}
+
+	void Execute() override {
+		auto &client = client_wrapper->GetClient();
+		// context=nullptr: this runs off the execution thread, so it must not touch the ClientContext.
+		auto response_body = client.PostRaw(nullptr, payload->GetData(), payload_size);
+		MemoryStream read_stream((data_ptr_t)response_body.data(), response_body.size());
+		auto response = QuackMessage::FromMemoryStream(read_stream);
+		if (response->Type() == MessageType::ERROR_RESPONSE) {
+			response->Cast<ErrorResponse>().Error().Throw();
+		}
+		if (response->Type() != SuccessResponse::TYPE) {
+			throw IOException("Expected success response for append, got %s instead",
+			                  MessageTypeToString(response->Type()));
+		}
+	}
+
+private:
+	unique_ptr<QuackClientWrapper> client_wrapper;
+	unique_ptr<MemoryStream> payload;
+	idx_t payload_size;
+};
+
+//===--------------------------------------------------------------------===//
 // Append buffering
 //===--------------------------------------------------------------------===//
-// Ship all buffered chunks to the server in one APPEND_REQUEST. The wrappers reference the buffered
-// chunks (no copy) and the request is serialized synchronously inside Request(), so the buffer only
-// needs to stay alive until Request() returns. Each thread reuses one warm connection across flushes,
-// like the scan path; server-side appends serialize under the connection lock.
-static void FlushAppendBuffer(ClientContext &context, QuackTableCatalogEntry &tbl,
+// Serialize the buffered chunks into one APPEND_REQUEST on this (regular) execution thread, then hand the
+// bytes to the async task queue: an ASYNC-pool thread performs the blocking POST over a pooled connection
+// while this thread returns to producing the next batch. Concurrency is bounded by async_threads, and the
+// queue's TemporaryMemoryManager reservation bounds how much serialized-but-unsent data we retain.
+static void FlushAppendBuffer(ClientContext &context, QuackInsertGlobalState &global_state,
                               QuackInsertLocalState &local_state) {
 	if (local_state.buffer.empty()) {
 		return;
 	}
+	auto &tbl = global_state.table;
 	auto &quack_catalog = tbl.catalog.Cast<QuackCatalog>();
 
 	vector<unique_ptr<DataChunkWrapper>> wrappers;
@@ -102,11 +156,23 @@ static void FlushAppendBuffer(ClientContext &context, QuackTableCatalogEntry &tb
 	    make_uniq<AppendRequestMessage>(quack_catalog.GetConnectionId(), tbl.schema.name.GetIdentifierName(),
 	                                    tbl.name.GetIdentifierName(), std::move(wrappers));
 
-	if (!local_state.client_wrapper) {
-		local_state.client_wrapper = quack_catalog.GetClientConnection()->GetClient(context);
+	// Correlate with the server-side query for logging. Read the active query on this regular thread; the
+	// async task must not touch the ClientContext.
+	if (context.transaction.HasActiveTransaction()) {
+		auto raw_query_id = context.transaction.GetActiveQuery();
+		if (raw_query_id != DConstants::INVALID_INDEX) {
+			append_message->SetClientQueryId(raw_query_id);
+		}
 	}
-	auto &client = local_state.client_wrapper->GetClient();
-	client.Request<SuccessResponse>(context, std::move(append_message));
+
+	// Serialize on this regular thread (the CPU part); the ASYNC pool only does the network send.
+	auto payload = make_uniq<MemoryStream>();
+	append_message->ToMemoryStream(*payload);
+	auto payload_size = payload->GetPosition();
+
+	auto client_wrapper = quack_catalog.GetClientConnection()->GetClient(context);
+	global_state.queue->Register(
+	    make_uniq<QuackAppendSendTask>(std::move(client_wrapper), std::move(payload), payload_size), payload_size);
 
 	local_state.buffer.clear();
 	local_state.buffered_rows = 0;
@@ -133,7 +199,9 @@ SinkResultType QuackInsert::Sink(ExecutionContext &context, DataChunk &chunk, Op
 	local_state.buffer.push_back(std::move(owned));
 
 	if (local_state.buffered_rows >= global_state.flush_rows) {
-		FlushAppendBuffer(context.client, global_state.table, local_state);
+		FlushAppendBuffer(context.client, global_state, local_state);
+		// Bound queued upload memory and surface async send errors promptly.
+		global_state.queue->ApplyBackpressure();
 	}
 	return SinkResultType::NEED_MORE_INPUT;
 }
@@ -144,8 +212,8 @@ SinkResultType QuackInsert::Sink(ExecutionContext &context, DataChunk &chunk, Op
 SinkCombineResultType QuackInsert::Combine(ExecutionContext &context, OperatorSinkCombineInput &input) const {
 	auto &global_state = input.global_state.Cast<QuackInsertGlobalState>();
 	auto &local_state = input.local_state.Cast<QuackInsertLocalState>();
-	// Ship this thread's remaining rows, then fold its count into the global total.
-	FlushAppendBuffer(context.client, global_state.table, local_state);
+	// Register this thread's remaining rows; the shared queue is drained once in Finalize.
+	FlushAppendBuffer(context.client, global_state, local_state);
 	global_state.insert_count += local_state.local_count;
 	return SinkCombineResultType::FINISHED;
 }
@@ -155,8 +223,12 @@ SinkCombineResultType QuackInsert::Combine(ExecutionContext &context, OperatorSi
 //===--------------------------------------------------------------------===//
 SinkFinalizeType QuackInsert::Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
                                        OperatorSinkFinalizeInput &input) const {
-	// Every thread drained its buffer in Combine, so by the time Finalize runs all rows for the
-	// statement have been sent — transaction visibility/rollback semantics match the unbuffered path.
+	auto &global_state = input.global_state.Cast<QuackInsertGlobalState>();
+	// Every thread registered its rows in Combine; drain all async sends here so that by the time Finalize
+	// returns, all rows for the statement are on the server (matching the unbuffered path's visibility/rollback
+	// semantics) and any async send error is surfaced. Close waits, releases the memory reservation, and
+	// rejects further registration.
+	global_state.queue->Close();
 	return SinkFinalizeType::READY;
 }
 
