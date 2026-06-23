@@ -154,6 +154,7 @@ struct QuackScanGlobalState : GlobalTableFunctionState {
 	vector<ColumnIndex> column_ids;
 	vector<idx_t> projection_ids;
 	atomic<bool> needs_more_fetch;
+	atomic<bool> ack_sent {false};
 	hugeint_t query_uuid;
 
 	vector<ChunkResult> TryGetResults() {
@@ -287,6 +288,27 @@ unique_ptr<LocalTableFunctionState> QuackScanInitLocal(ExecutionContext &context
 	return local_state;
 }
 
+static bool ReconnectsEnabled(ClientContext &context) {
+	Value val;
+	if (!context.TryGetCurrentSetting("quack_enable_reconnects", val)) {
+		return false;
+	}
+	return val.GetValue<bool>();
+}
+
+static void SendAcknowledgement(ClientContext &context, QuackScanGlobalState &global_state,
+                                QuackScanLocalState &local_state, QuackScanBindData &bind_data) {
+	if (!ReconnectsEnabled(context)) {
+		return;
+	}
+	if (global_state.ack_sent.exchange(true)) {
+		return;
+	}
+	auto &client = local_state.client_wrapper->GetClient();
+	client.Request<SuccessResponse>(context,
+	                                make_uniq<AcknowledgementMessage>(bind_data.client_connection->ConnectionId()));
+}
+
 static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
 	auto &bind_data = input.bind_data->CastNoConst<QuackScanBindData>();
 	auto &global_state = input.global_state->Cast<QuackScanGlobalState>();
@@ -330,6 +352,7 @@ static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChu
 				// server is done, we are done
 				global_state.needs_more_fetch = false;
 				bind_data.completed = true;
+				SendAcknowledgement(context, global_state, local_state, bind_data);
 				return;
 			}
 			// set up buffer for scan in next iteration
@@ -341,6 +364,7 @@ static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChu
 		}
 		// we did not have anything cached and then request to the server did not yield anything - we are done
 		bind_data.completed = true;
+		SendAcknowledgement(context, global_state, local_state, bind_data);
 		break;
 	}
 }

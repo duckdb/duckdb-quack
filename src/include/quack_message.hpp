@@ -19,6 +19,7 @@ enum class MessageType : uint8_t {
 	SUCCESS_RESPONSE = 10,
 	DISCONNECT_MESSAGE = 11,
 	CANCEL_REQUEST = 12,
+	ACKNOWLEDGEMENT = 13,
 	ERROR_RESPONSE = 100
 };
 
@@ -358,6 +359,20 @@ public:
 
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<SuccessResponse> Deserialize(Deserializer &deserializer);
+};
+
+class AcknowledgementMessage : public QuackMessage {
+public:
+	static constexpr MessageType TYPE = MessageType::ACKNOWLEDGEMENT;
+
+	explicit AcknowledgementMessage(string connection_id_p) : QuackMessage(TYPE, std::move(connection_id_p)) {};
+
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<AcknowledgementMessage> Deserialize(Deserializer &deserializer);
+
+protected:
+	AcknowledgementMessage() : QuackMessage(TYPE) {
+	}
 };
 
 class ErrorResponse : public QuackMessage {

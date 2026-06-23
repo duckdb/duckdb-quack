@@ -149,6 +149,14 @@ unique_ptr<SuccessResponse> SuccessResponse::Deserialize(Deserializer &deseriali
 }
 
 
+void AcknowledgementMessage::Serialize(Serializer &serializer) const {
+}
+
+unique_ptr<AcknowledgementMessage> AcknowledgementMessage::Deserialize(Deserializer &deserializer) {
+	auto result = duckdb::unique_ptr<AcknowledgementMessage>(new AcknowledgementMessage());
+	return result;
+}
+
 void CancelRequestMessage::Serialize(Serializer &serializer) const {
 	serializer.WriteProperty<hugeint_t>(1, "query_uuid", query_uuid);
 }

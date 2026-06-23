@@ -113,6 +113,9 @@ unique_ptr<QuackMessage> HttpsQuackClient::RequestInternal(optional_ptr<ClientCo
 		case MessageType::APPEND_REQUEST:
 			connection_id = request_message->Cast<AppendRequestMessage>().ConnectionId();
 			break;
+		case MessageType::ACKNOWLEDGEMENT:
+			connection_id = request_message->Cast<AcknowledgementMessage>().ConnectionId();
+			break;
 		default:
 			break;
 		}

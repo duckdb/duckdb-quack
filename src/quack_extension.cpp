@@ -171,6 +171,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("quack_fetch_batch_chunks", "Maximum number of DataChunks returned per FETCH response",
 	                          LogicalType::UBIGINT, Value::UBIGINT(12));
 
+	config.AddExtensionOption("quack_enable_reconnects",
+	                          "Send an acknowledgement to the server after a query completes", LogicalType::BOOLEAN,
+	                          Value::BOOLEAN(false));
+
 	// Process-wide fallback anchor for whoami().uptime when whoami_started_at isn't set.
 	// Stored as BIGINT epoch-microseconds to stay TZ-invariant regardless of ICU state.
 	config.AddExtensionOption("quack_loaded_at_us", "Epoch microseconds at extension load", LogicalType::BIGINT,
