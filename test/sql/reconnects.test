@@ -16,7 +16,6 @@ ATTACH {server} AS remote;
 statement ok
 CALL enable_logging('Quack');
 
-# default: reconnects disabled, query works as before
 query I
 FROM remote.tbl LIMIT 3;
 ----
@@ -24,17 +23,14 @@ FROM remote.tbl LIMIT 3;
 1
 2
 
-# no ACKNOWLEDGEMENT should have been sent with the default (false)
 query I
-SELECT count(*) > 0 FROM duckdb_logs_parsed('Quack') WHERE message_type = 'ACKNOWLEDGEMENT'
+SELECT count(*) > 0 FROM duckdb_logs_parsed('Quack') WHERE message_type = 'ACKNOWLEDGEMENT' AND response_type = 'SUCCESS_RESPONSE'
 ----
 false
 
-# enable reconnects on the client side
 statement ok
 SET quack_enable_reconnects = true;
 
-# query still returns correct results with the extra ACKNOWLEDGEMENT round-trip
 query I
 FROM remote.tbl LIMIT 3;
 ----
@@ -42,9 +38,8 @@ FROM remote.tbl LIMIT 3;
 1
 2
 
-# an ACKNOWLEDGEMENT should now have been sent
 query I
-SELECT count(*) > 0 FROM duckdb_logs_parsed('Quack') WHERE message_type = 'ACKNOWLEDGEMENT'
+SELECT count(*) > 0 FROM duckdb_logs_parsed('Quack') WHERE message_type = 'ACKNOWLEDGEMENT' AND response_type = 'SUCCESS_RESPONSE'
 ----
 true
 

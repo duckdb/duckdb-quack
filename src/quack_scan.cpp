@@ -155,6 +155,7 @@ struct QuackScanGlobalState : GlobalTableFunctionState {
 	vector<idx_t> projection_ids;
 	atomic<bool> needs_more_fetch;
 	atomic<bool> ack_sent {false};
+	atomic<int> active_fetches {0};
 	hugeint_t query_uuid;
 
 	vector<ChunkResult> TryGetResults() {
@@ -344,15 +345,24 @@ static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChu
 		// if that did not work, we request more results
 		if (local_state.results.empty() && global_state.needs_more_fetch) {
 			auto &client = local_state.client_wrapper->GetClient();
+			bool reconnects_enabled = ReconnectsEnabled(context);
+			if (reconnects_enabled) {
+				global_state.active_fetches++;
+			}
+
 			auto fetch_response = client.Request<FetchResponseMessage>(
 			    context,
 			    make_uniq<FetchRequestMessage>(bind_data.client_connection->ConnectionId(), global_state.query_uuid));
-
+			if (reconnects_enabled) {
+				global_state.active_fetches--;
+			}
 			if (fetch_response->MutableResults().empty()) {
 				// server is done, we are done
 				global_state.needs_more_fetch = false;
 				bind_data.completed = true;
-				SendAcknowledgement(context, global_state, local_state, bind_data);
+				if (global_state.active_fetches == 0) {
+					SendAcknowledgement(context, global_state, local_state, bind_data);
+				}
 				return;
 			}
 			// set up buffer for scan in next iteration
@@ -364,7 +374,9 @@ static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChu
 		}
 		// we did not have anything cached and then request to the server did not yield anything - we are done
 		bind_data.completed = true;
-		SendAcknowledgement(context, global_state, local_state, bind_data);
+		if (global_state.active_fetches == 0) {
+			SendAcknowledgement(context, global_state, local_state, bind_data);
+		}
 		break;
 	}
 }
