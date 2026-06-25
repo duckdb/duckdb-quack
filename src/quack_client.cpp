@@ -101,6 +101,17 @@ unique_ptr<QuackMessage> HttpsQuackClient::RequestInternal(optional_ptr<ClientCo
 	return response_message;
 }
 
+void QuackClient::LogRequest(MessageType request_type, const string &connection_id, optional_idx client_query_id,
+                             const string &query, int64_t duration_ms, MessageType response_type, const string &error) {
+	auto &logger = Logger::Get(db);
+	if (!logger.ShouldLog(QuackLogType::NAME, QuackLogType::LEVEL)) {
+		return;
+	}
+	auto msg = QuackLogType::ConstructLogMessage(request_type, connection_id, client_query_id, query, uri.Http(),
+	                                             duration_ms, response_type, error);
+	logger.WriteLog(QuackLogType::NAME, QuackLogType::LEVEL, msg);
+}
+
 string HttpsQuackClient::PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size) {
 	lock_guard<mutex> guard(request_mutex);
 	return PostRawLocked(context, data, size);

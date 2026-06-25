@@ -13,6 +13,10 @@ void AppendRequestMessage::Serialize(Serializer &serializer) const {
 	serializer.WritePropertyWithDefault<string>(1, "schema_name", schema_name);
 	serializer.WritePropertyWithDefault<string>(2, "table_name", table_name);
 	serializer.WritePropertyWithDefault<vector<unique_ptr<DataChunkWrapper>>>(3, "append_chunks", append_chunks);
+	serializer.WriteProperty<optional_idx>(4, "batch_index", batch_index);
+	serializer.WriteProperty<optional_idx>(5, "chunk_index", chunk_index);
+	serializer.WritePropertyWithDefault<bool>(6, "last_chunk", last_chunk);
+	serializer.WriteProperty<optional_idx>(7, "min_batch_index", min_batch_index);
 }
 
 unique_ptr<AppendRequestMessage> AppendRequestMessage::Deserialize(Deserializer &deserializer) {
@@ -21,6 +25,10 @@ unique_ptr<AppendRequestMessage> AppendRequestMessage::Deserialize(Deserializer 
 	deserializer.ReadPropertyWithDefault<string>(2, "table_name", result->table_name);
 	deserializer.ReadPropertyWithDefault<vector<unique_ptr<DataChunkWrapper>>>(3, "append_chunks",
 	                                                                           result->append_chunks);
+	deserializer.ReadProperty<optional_idx>(4, "batch_index", result->batch_index);
+	deserializer.ReadProperty<optional_idx>(5, "chunk_index", result->chunk_index);
+	deserializer.ReadPropertyWithDefault<bool>(6, "last_chunk", result->last_chunk);
+	deserializer.ReadProperty<optional_idx>(7, "min_batch_index", result->min_batch_index);
 	return result;
 }
 

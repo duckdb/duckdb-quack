@@ -36,6 +36,12 @@ public:
 	//! pass context=nullptr when called off the execution thread (parameters fall back to the database).
 	virtual string PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size) = 0;
 
+	//! Emit a Quack request log entry. Shared by the synchronous request path and the async append sender
+	//! (which uses PostRaw) so both surface in duckdb_logs_parsed('Quack'). Logs against the database-level
+	//! logger, so it is safe to call from off the execution thread.
+	void LogRequest(MessageType request_type, const string &connection_id, optional_idx client_query_id,
+	                const string &query, int64_t duration_ms, MessageType response_type, const string &error);
+
 	static unique_ptr<QuackClient> GetClient(DatabaseInstance &db, const QuackUri &uri);
 	static unique_ptr<QuackClient> GetClient(ClientContext &context, const QuackUri &uri);
 
