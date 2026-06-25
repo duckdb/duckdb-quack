@@ -62,6 +62,85 @@ select count(*), sum(i) from rpc.ctas_big
 ----
 300000	44999850000
 
+# A server-side append rejection (CHECK constraint) on a >threshold insert must surface as a
+# failed statement: the error travels back through the async upload queue, not just at Finalize,
+# and the defensive drain on the errored statement must not wedge the connection.
+statement ok
+create table rpc.checked(i bigint check (i < 250000));
+
+statement error
+insert into rpc.checked select * from range(500000)
+----
+CHECK constraint failed
+
+# The connection survives the async error and stays usable for the next statement.
+statement ok
+create table rpc.recovered(i bigint);
+
+statement ok
+insert into rpc.recovered select * from range(1000)
+
+query I
+select count(*) from rpc.recovered
+----
+1000
+
+# async_threads knob: =0 is the synchronous fallback, =1 serialized. Both must produce the same
+# result as the default concurrent path.
+statement ok
+set async_threads=0;
+
+statement ok
+create table rpc.sync_load(i bigint);
+
+statement ok
+insert into rpc.sync_load select * from range(500000)
+
+statement ok
+set async_threads=1;
+
+statement ok
+insert into rpc.sync_load select * from range(500000)
+
+query III
+select count(*), min(i), max(i) from rpc.sync_load
+----
+1000000	0	499999
+
+statement ok
+reset async_threads;
+
+# Parallel sink: several worker threads flush into the one shared upload queue (Combine path);
+# the row count/sum must stay deterministic.
+statement ok
+set threads=4;
+
+statement ok
+create table rpc.parallel_load(i bigint);
+
+statement ok
+insert into rpc.parallel_load select * from range(500000)
+
+query II
+select count(*), sum(i) from rpc.parallel_load
+----
+500000	124999750000
+
+statement ok
+reset threads;
+
+statement ok
+drop table rpc.checked;
+
+statement ok
+drop table rpc.recovered;
+
+statement ok
+drop table rpc.sync_load;
+
+statement ok
+drop table rpc.parallel_load;
+
 statement ok
 drop table rpc.big;
 
