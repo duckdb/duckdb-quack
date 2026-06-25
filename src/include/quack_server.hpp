@@ -22,6 +22,10 @@ class EncryptionState;
 
 enum class QuackQueryState : uint8_t { IDLE, ACTIVE, FINISHED, CANCELLED };
 
+//! Per-connection state for the order-preserving append path: out-of-order batches are buffered and
+//! applied in source (batch_index, chunk_index) order. Defined in quack_server.cpp.
+struct AppendReorderState;
+
 struct QuackConnection {
 	explicit QuackConnection(string session_id_p);
 	~QuackConnection();
@@ -29,6 +33,8 @@ struct QuackConnection {
 	mutex lock;
 	unique_ptr<Connection> duckdb_connection;
 	unique_ptr<QueryResult> duckdb_query_result;
+	//! Order-preserving append reorder buffer (lazily created on the first stamped APPEND).
+	unique_ptr<AppendReorderState> append_reorder;
 	//! Monotonic counter assigned per FETCH batch — enables order-preserving parallel scans on
 	idx_t next_batch_index = 1;
 	//! Current result UUID

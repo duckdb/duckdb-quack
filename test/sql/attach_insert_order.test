@@ -1,0 +1,161 @@
+# name: test/sql/attach_insert_order.test
+# description: order-preserving INSERT over an rpc attach — EXECUTOR (scan/parquet), MINTED (range), mid-batch
+#              splits, filtered gaps, async_threads sweep, CTAS, and the preserve_insertion_order=false fast path
+# group: [sql]
+
+require quack
+
+require httpfs
+
+require parquet
+
+include test/template/quack_setup.test_template
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+# A local ordered source. Scanning it is a parallel producer that supplies an executor batch index.
+statement ok
+create table src as select * from range(300000) t(i);
+
+statement ok
+SET threads=4;
+
+# --- EXECUTOR path: parallel table-scan source must land in source order despite parallel producers + async.
+statement ok
+create table rpc.t_scan(i bigint);
+
+statement ok
+insert into rpc.t_scan select i from src;
+
+query III
+select count(*), min(i), max(i) from rpc.t_scan;
+----
+300000	0	299999
+
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_scan) where i != rn;
+----
+0
+
+# --- MINTED path: range() has no executor batch index, so the single producer mints its own sequence and the
+# upload still runs async. Order must still be exact.
+statement ok
+create table rpc.t_range(i bigint);
+
+statement ok
+insert into rpc.t_range select * from range(300000) t(i);
+
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_range) where i != rn;
+----
+0
+
+# --- Parquet source (EXECUTOR via a multi-row-group scan).
+statement ok
+copy (select * from range(300000) t(i)) to '{TEST_DIR}/ord.parquet' (row_group_size 50000);
+
+statement ok
+create table rpc.t_parq(i bigint);
+
+statement ok
+insert into rpc.t_parq select i from read_parquet('{TEST_DIR}/ord.parquet');
+
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_parq) where i != rn;
+----
+0
+
+# --- Mid-batch split: a tiny flush threshold splits each source batch across many concurrent APPENDs, which
+# exercises the within-batch chunk_index ordering.
+statement ok
+SET quack_append_flush_rows=2048;
+
+statement ok
+create table rpc.t_split(i bigint);
+
+statement ok
+insert into rpc.t_split select i from src;
+
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_split) where i != rn;
+----
+0
+
+statement ok
+reset quack_append_flush_rows;
+
+# --- Filtered insert: a predicate that empties whole morsels creates true gaps in the batch-index sequence.
+# The order-preserving end-of-session drain must still commit the surviving rows in order, count exact.
+statement ok
+create table rpc.t_filt(i bigint);
+
+statement ok
+insert into rpc.t_filt select i from src where i < 150000;
+
+query II
+select count(*), (select count(*) from src where i < 150000) from rpc.t_filt;
+----
+150000	150000
+
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_filt) where i != rn;
+----
+0
+
+# --- async_threads sweep: order holds whether sends are synchronous (=0), serialized (=1), or wide (=8).
+foreach at 0 1 8
+
+statement ok
+SET async_threads={at};
+
+statement ok
+create table rpc.t_at(i bigint);
+
+statement ok
+insert into rpc.t_at select i from src;
+
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_at) where i != rn;
+----
+0
+
+statement ok
+drop table rpc.t_at;
+
+endloop
+
+statement ok
+reset async_threads;
+
+# --- CTAS preserves order too.
+statement ok
+create table rpc.t_ctas as select i from src;
+
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_ctas) where i != rn;
+----
+0
+
+# --- Fast path: with order off, every row is still inserted (order itself is not asserted).
+statement ok
+SET preserve_insertion_order=false;
+
+statement ok
+create table rpc.t_fast(i bigint);
+
+statement ok
+insert into rpc.t_fast select i from src;
+
+query II
+select count(*), sum(i) from rpc.t_fast;
+----
+300000	44999850000
+
+statement ok
+reset preserve_insertion_order;
+
+statement ok con2
+detach rpc;
+
+include test/template/quack_teardown.test_template

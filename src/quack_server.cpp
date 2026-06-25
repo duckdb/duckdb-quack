@@ -15,6 +15,67 @@
 #include "quack_storage.hpp"
 
 namespace duckdb {
+
+//===--------------------------------------------------------------------===//
+// Order-preserving append reorder buffer
+//===--------------------------------------------------------------------===//
+// The client stamps each APPEND with a source-order (batch_index, chunk_index) and a watermark
+// (min_batch_index = the lowest batch still in flight at the producer). Sends race on the wire, so we
+// buffer out-of-order batches and commit them in (batch_index, chunk_index) order — incrementally, as
+// each next-in-order batch becomes complete — so only the out-of-order window is held in memory, not the
+// whole insert. The end-of-session drain commits any tail / gaps left when the watermark couldn't advance.
+struct AppendReorderState {
+	//! Header client_query_id of the current append session; a change resets the buffer (new statement).
+	optional_idx epoch;
+	//! Out-of-order buffer: dense source-order index -> its rows.
+	map<idx_t, unique_ptr<ColumnDataCollection>> batches;
+	//! Next dense index to commit. The client emits a contiguous 0-based sequence, so this starts at 0.
+	idx_t committed_up_to = 0;
+};
+
+// Commit every contiguous batch starting from committed_up_to. The client re-maps the sparse, out-of-order
+// executor batch indices into a dense 0-based sequence before sending (mirroring core's
+// PhysicalBatchCopyToFile), so the server has no start anchor to guess and no gaps to skip — it just drains
+// the contiguous prefix as it fills in.
+static void AdvanceCommitted(QuackConnection &connection, TableDescription &table_info) {
+	auto &rs = *connection.append_reorder;
+	for (;;) {
+		auto it = rs.batches.find(rs.committed_up_to);
+		if (it == rs.batches.end()) {
+			break; // next batch not here yet — stop; it'll resume on a later append
+		}
+		if (it->second) {
+			connection.duckdb_connection->Append(table_info, *it->second);
+		}
+		rs.batches.erase(it);
+		rs.committed_up_to++;
+	}
+}
+
+static void StashOrderedAppend(QuackConnection &connection, ClientContext &context, TableDescription &table_info,
+                               AppendRequestMessage &msg) {
+	if (!connection.append_reorder) {
+		connection.append_reorder = make_uniq<AppendReorderState>();
+	}
+	auto &rs = *connection.append_reorder;
+	auto epoch = msg.ClientQueryId();
+	if (rs.epoch != epoch) {
+		rs.batches.clear();
+		rs.committed_up_to = 0;
+		rs.epoch = epoch;
+	}
+	auto &chunks = msg.MutableAppendChunks();
+	unique_ptr<ColumnDataCollection> collection;
+	if (!chunks.empty()) {
+		collection = make_uniq<ColumnDataCollection>(Allocator::Get(context), chunks[0]->Chunk().GetTypes());
+		for (auto &wrapper : chunks) {
+			collection->Append(wrapper->Chunk());
+		}
+	}
+	rs.batches[msg.BatchIndex().GetIndex()] = std::move(collection);
+	AdvanceCommitted(connection, table_info);
+}
+
 QuackConnection::QuackConnection(string session_id_p) : session_id(std::move(session_id_p)) {
 }
 
@@ -424,16 +485,27 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			                                SQLIdentifier(append_request_message.TableName()));
 		}
 		try {
-			auto &chunks = append_request_message.MutableAppendChunks();
-			if (!chunks.empty()) {
-				ColumnDataCollection collection(Allocator::Get(context), chunks[0]->Chunk().GetTypes());
-				for (auto &wrapper : chunks) {
-					collection.Append(wrapper->Chunk());
+			auto batch_index = append_request_message.BatchIndex();
+			if (batch_index.IsValid()) {
+				// Order-preserving path: buffer this dense source-order batch and commit the contiguous prefix
+				// as soon as it fills in (the client already linearized the sparse executor indices).
+				StashOrderedAppend(connection, context, *table_info, append_request_message);
+			} else {
+				// Fast / serial path: apply immediately in arrival order (= source order on those paths).
+				auto &chunks = append_request_message.MutableAppendChunks();
+				if (!chunks.empty()) {
+					ColumnDataCollection collection(Allocator::Get(context), chunks[0]->Chunk().GetTypes());
+					for (auto &wrapper : chunks) {
+						collection.Append(wrapper->Chunk());
+					}
+					connection.duckdb_connection->Append(*table_info, collection);
 				}
-				connection.duckdb_connection->Append(*table_info, collection);
 			}
 		} catch (std::exception &ex) {
 			// append failed - directly pass error to user
+			if (connection.append_reorder) {
+				connection.append_reorder.reset(); // discard partial buffer; the statement fails as a whole
+			}
 			return make_uniq<ErrorResponse>(ErrorData(ex));
 		}
 		return make_uniq<SuccessResponse>();
