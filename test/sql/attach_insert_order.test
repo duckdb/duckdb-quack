@@ -1,6 +1,5 @@
 # name: test/sql/attach_insert_order.test
-# description: order-preserving INSERT over an rpc attach — EXECUTOR (scan/parquet), MINTED (range), tiny
-#              flush threshold, filtered gaps, async_threads sweep, CTAS, and the preserve_insertion_order=false fast path
+# description: order-preserving rpc INSERT: PARALLEL_ORDERED scan/parquet, SERIAL_ORDERED range, flush splitting, filtered gaps, async sweep, CTAS, unordered fast path
 # group: [sql]
 
 require quack
@@ -38,6 +37,12 @@ select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_scan) 
 ----
 0
 
+# Pin the historical rotation bug: the first stored row must be 0 (it once started at a later row group).
+query I
+select i from (select i, row_number() over () as rn from rpc.t_scan) where rn = 1;
+----
+0
+
 # --- MINTED path: range() has no executor batch index, so the single producer mints its own sequence and the
 # upload still runs async. Order must still be exact.
 statement ok
@@ -66,8 +71,12 @@ select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_parq) 
 ----
 0
 
-# --- Tiny flush threshold: a no-op for the EXECUTOR path (the whole batch is buffered to the NextBatch
-# boundary regardless), but a regression guard that the setting doesn't perturb ordering.
+# --- EXECUTOR honors quack_append_flush_rows: each (large) row group is split into flush-sized APPENDs.
+# Without splitting, a parallel scan ships a whole row group as one message, bypassing the user's size
+# limit. Order must still be exact, and far more client APPENDs must go out than the 3 source row groups.
+statement ok
+CALL enable_logging('Quack', storage='memory');
+
 statement ok
 SET quack_append_flush_rows=2048;
 
@@ -82,8 +91,19 @@ select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_split)
 ----
 0
 
+# server != '' isolates the client-side outgoing APPENDs (the server logs incoming ones to the same sink).
+# 300000 rows over 3 row groups at flush_rows=2048 splits into ~147 messages — far above the unsplit 3.
+query I
+select count(*) > 50 from duckdb_logs_parsed('Quack')
+where message_type = 'APPEND_REQUEST' and server is not null and server != '';
+----
+true
+
 statement ok
 reset quack_append_flush_rows;
+
+statement ok
+CALL disable_logging();
 
 # --- Filtered insert: a predicate that empties whole morsels creates gaps in the executor batch-index
 # sequence. The client's dense re-map closes those gaps (only non-empty batches get a dense index), so the
