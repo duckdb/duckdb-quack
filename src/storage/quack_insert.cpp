@@ -199,8 +199,8 @@ static void SendChunks(ClientContext &context, QuackInsertGlobalState &global_st
 	    make_uniq<AppendRequestMessage>(quack_catalog.GetConnectionId(), tbl.schema.name.GetIdentifierName(),
 	                                    tbl.name.GetIdentifierName(), std::move(wrappers));
 	if (dense_batch.IsValid()) {
-		// One complete batch per append (chunk 0, last_chunk) at this dense source-order index.
-		append_message->SetAppendOrder(dense_batch, optional_idx(0), /*last_chunk=*/true, optional_idx());
+		// One complete batch per append, at this dense source-order index.
+		append_message->SetBatchIndex(dense_batch);
 	}
 
 	// Correlate with the server-side query for logging. Read the active query on this regular thread; the
@@ -386,7 +386,7 @@ InsertionOrderPreservingMap<string> QuackInsert::ParamsToString() const {
 //  - preserve_insertion_order=false → fast concurrent path, no stamping (server applies on arrival).
 //  - preserve order + source has an executor batch index → stamp with it (parallel producers).
 //  - preserve order + source has no batch index → MINTED: single producer mints its own sequence.
-// Both order-preserving variants stay async; the server reorders by the (batch_index, chunk_index) stamp.
+// Both order-preserving variants stay async; the server reorders by the dense batch_index stamp.
 static void ConfigureOrdering(ClientContext &context, QuackInsert &insert, PhysicalOperator &source) {
 	if (!PhysicalPlanGenerator::PreserveInsertionOrder(context, source)) {
 		insert.order_mode = AppendOrderMode::NONE;

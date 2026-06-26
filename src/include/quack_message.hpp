@@ -321,29 +321,13 @@ public:
 		return table_name;
 	}
 
-	//! Order-preserving append metadata (set by the client when preserve_insertion_order is on; unset on
-	//! the fast/serial paths). batch_index/chunk_index give the source order key; last_chunk marks a batch's
-	//! final sub-request.
-	void SetAppendOrder(optional_idx batch_index_p, optional_idx chunk_index_p, bool last_chunk_p,
-	                    optional_idx min_batch_index_p) {
+	//! Dense, contiguous source-order index, set by the client when preserve_insertion_order is on (unset on
+	//! the fast/serial path). The server commits appends in ascending order of it.
+	void SetBatchIndex(optional_idx batch_index_p) {
 		batch_index = batch_index_p;
-		chunk_index = chunk_index_p;
-		last_chunk = last_chunk_p;
-		min_batch_index = min_batch_index_p;
 	}
 	optional_idx BatchIndex() const {
 		return batch_index;
-	}
-	optional_idx ChunkIndex() const {
-		return chunk_index;
-	}
-	bool LastChunk() const {
-		return last_chunk;
-	}
-	//! Watermark: the lowest batch index still in flight at the producer when this append was sent. The
-	//! server uses it to find where the sequence starts so it can commit batches incrementally, in order.
-	optional_idx MinBatchIndex() const {
-		return min_batch_index;
 	}
 
 protected:
@@ -355,9 +339,6 @@ private:
 	string table_name;
 	vector<unique_ptr<DataChunkWrapper>> append_chunks;
 	optional_idx batch_index;
-	optional_idx chunk_index;
-	bool last_chunk = false;
-	optional_idx min_batch_index;
 };
 
 class DisconnectMessage : public QuackMessage {

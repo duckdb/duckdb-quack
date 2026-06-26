@@ -23,7 +23,7 @@ class EncryptionState;
 enum class QuackQueryState : uint8_t { IDLE, ACTIVE, FINISHED, CANCELLED };
 
 //! Per-connection state for the order-preserving append path: out-of-order batches are buffered and
-//! applied in source (batch_index, chunk_index) order. Defined in quack_server.cpp.
+//! applied in ascending batch_index order. Defined in quack_server.cpp.
 struct AppendReorderState;
 
 struct QuackConnection {

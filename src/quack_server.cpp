@@ -19,11 +19,10 @@ namespace duckdb {
 //===--------------------------------------------------------------------===//
 // Order-preserving append reorder buffer
 //===--------------------------------------------------------------------===//
-// The client stamps each APPEND with a source-order (batch_index, chunk_index) and a watermark
-// (min_batch_index = the lowest batch still in flight at the producer). Sends race on the wire, so we
-// buffer out-of-order batches and commit them in (batch_index, chunk_index) order — incrementally, as
-// each next-in-order batch becomes complete — so only the out-of-order window is held in memory, not the
-// whole insert. The end-of-session drain commits any tail / gaps left when the watermark couldn't advance.
+// The client stamps each APPEND with a dense, contiguous 0-based batch_index in source order. Sends race
+// on the wire, so we buffer out-of-order batches and commit them in ascending batch_index order —
+// incrementally, as each next-in-order batch arrives — so only the out-of-order window is held in memory,
+// not the whole insert.
 struct AppendReorderState {
 	//! Header client_query_id of the current append session; a change resets the buffer (new statement).
 	optional_idx epoch;
@@ -35,7 +34,7 @@ struct AppendReorderState {
 
 // Commit every contiguous batch starting from committed_up_to. The client re-maps the sparse, out-of-order
 // executor batch indices into a dense 0-based sequence before sending (mirroring core's
-// PhysicalBatchCopyToFile), so the server has no start anchor to guess and no gaps to skip — it just drains
+// PhysicalBatchCopyToFile), so the server has no start anchor to guess and no gaps to skip — it just commits
 // the contiguous prefix as it fills in.
 static void AdvanceCommitted(QuackConnection &connection, TableDescription &table_info) {
 	auto &rs = *connection.append_reorder;

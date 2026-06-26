@@ -1,6 +1,6 @@
 # name: test/sql/attach_insert_order.test
-# description: order-preserving INSERT over an rpc attach — EXECUTOR (scan/parquet), MINTED (range), mid-batch
-#              splits, filtered gaps, async_threads sweep, CTAS, and the preserve_insertion_order=false fast path
+# description: order-preserving INSERT over an rpc attach — EXECUTOR (scan/parquet), MINTED (range), tiny
+#              flush threshold, filtered gaps, async_threads sweep, CTAS, and the preserve_insertion_order=false fast path
 # group: [sql]
 
 require quack
@@ -66,8 +66,8 @@ select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_parq) 
 ----
 0
 
-# --- Mid-batch split: a tiny flush threshold splits each source batch across many concurrent APPENDs, which
-# exercises the within-batch chunk_index ordering.
+# --- Tiny flush threshold: a no-op for the EXECUTOR path (the whole batch is buffered to the NextBatch
+# boundary regardless), but a regression guard that the setting doesn't perturb ordering.
 statement ok
 SET quack_append_flush_rows=2048;
 
@@ -85,8 +85,9 @@ select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_split)
 statement ok
 reset quack_append_flush_rows;
 
-# --- Filtered insert: a predicate that empties whole morsels creates true gaps in the batch-index sequence.
-# The order-preserving end-of-session drain must still commit the surviving rows in order, count exact.
+# --- Filtered insert: a predicate that empties whole morsels creates gaps in the executor batch-index
+# sequence. The client's dense re-map closes those gaps (only non-empty batches get a dense index), so the
+# server still commits a contiguous sequence in order, count exact.
 statement ok
 create table rpc.t_filt(i bigint);
 
