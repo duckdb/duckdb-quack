@@ -52,10 +52,9 @@ public:
 	idx_t flush_rows;
 	//! Shared async upload queue: regular threads register serialized batches, ASYNC-pool threads POST them.
 	unique_ptr<ManagedAsyncTaskQueue> queue;
-	//! Dense order coordinator (mirrors core's PhysicalBatchCopyToFile). The sparse, out-of-order executor
-	//! batch indices are re-mapped here to a contiguous 0-based sequence: finished batches are buffered keyed
-	//! by their executor batch index, and released — in ascending order, as `min_batch_index` finalizes them —
-	//! each getting the next `next_dense`. The server then reorders by this dense sequence (trivially: from 0).
+	//! Dense order coordinator (mirrors core's PhysicalBatchCopyToFile): finished executor batches are buffered
+	//! by their sparse batch index and released in ascending order — as the watermark finalizes them — onto a
+	//! contiguous 0-based sequence the server commits from 0.
 	mutex remap_lock;
 	map<idx_t, vector<unique_ptr<DataChunk>>> pending; // executor batch_index -> its chunks
 	idx_t next_dense = 0;                              // next dense sequence number to hand out
@@ -174,14 +173,10 @@ private:
 //===--------------------------------------------------------------------===//
 // Append buffering
 //===--------------------------------------------------------------------===//
-// Serialize the buffered chunks into one APPEND_REQUEST on this (regular) execution thread, then hand the
-// bytes to the async task queue: an ASYNC-pool thread performs the blocking POST over a pooled connection
-// while this thread returns to producing the next batch. Concurrency is bounded by async_threads, and the
-// queue's TemporaryMemoryManager reservation bounds how much serialized-but-unsent data we retain.
-// Serialize `chunks` into one APPEND_REQUEST on this (regular) execution thread and hand the bytes to the
-// async queue (an ASYNC-pool thread does the blocking POST). `dense_batch` valid → the order-preserving path:
-// the append carries a dense, contiguous source-order index that the server reorders by. Invalid → the fast
-// path (server applies on arrival). The caller owns `chunks`.
+// Serialize `chunks` into one APPEND_REQUEST on this (regular) execution thread, then hand the bytes to the
+// async queue (an ASYNC-pool thread does the blocking POST; concurrency bounded by async_threads). A valid
+// `dense_batch` is the order-preserving path: the append carries a dense source-order index the server
+// commits by. Invalid is the fast path (server applies on arrival). The caller owns `chunks`.
 static void SendChunks(ClientContext &context, QuackInsertGlobalState &global_state,
                        const vector<unique_ptr<DataChunk>> &chunks, optional_idx dense_batch) {
 	if (chunks.empty()) {
@@ -199,7 +194,6 @@ static void SendChunks(ClientContext &context, QuackInsertGlobalState &global_st
 	    make_uniq<AppendRequestMessage>(quack_catalog.GetConnectionId(), tbl.schema.name.GetIdentifierName(),
 	                                    tbl.name.GetIdentifierName(), std::move(wrappers));
 	if (dense_batch.IsValid()) {
-		// One complete batch per append, at this dense source-order index.
 		append_message->SetBatchIndex(dense_batch);
 	}
 
@@ -227,9 +221,46 @@ static void SendChunks(ClientContext &context, QuackInsertGlobalState &global_st
 	                             payload_size);
 }
 
+// Ship the buffered chunks for the non-parallel paths and clear the buffer: SERIAL_ORDERED stamps the next
+// minted dense index, UNORDERED sends unstamped. PARALLEL_ORDERED routes through the coordinator instead.
+static void FlushBuffer(ClientContext &context, QuackInsertGlobalState &gstate, QuackInsertLocalState &lstate,
+                        AppendOrderMode mode) {
+	if (lstate.buffer.empty()) {
+		return;
+	}
+	optional_idx dense;
+	if (mode == AppendOrderMode::SERIAL_ORDERED) {
+		dense = gstate.mint_counter++;
+	}
+	SendChunks(context, gstate, lstate.buffer, dense);
+	lstate.buffer.clear();
+	lstate.buffered_rows = 0;
+}
+
+// Split one released executor batch (one source row group, which can far exceed quack_append_flush_rows)
+// into flush_rows-sized groups, each taking the next dense index — so a parallel scan respects the user's
+// per-request size limit instead of shipping a whole row group as one APPEND. Caller holds remap_lock.
+static void SplitIntoDenseGroups(QuackInsertGlobalState &gstate, vector<unique_ptr<DataChunk>> chunks,
+                                 vector<std::pair<idx_t, vector<unique_ptr<DataChunk>>>> &ready) {
+	vector<unique_ptr<DataChunk>> group;
+	idx_t group_rows = 0;
+	for (auto &chunk : chunks) {
+		group_rows += chunk->size();
+		group.push_back(std::move(chunk));
+		if (group_rows >= gstate.flush_rows) {
+			ready.emplace_back(gstate.next_dense++, std::move(group));
+			group.clear();
+			group_rows = 0;
+		}
+	}
+	if (!group.empty()) {
+		ready.emplace_back(gstate.next_dense++, std::move(group));
+	}
+}
+
 // Order-preserving release: hand this thread's finished executor batch to the global coordinator, then
 // release every batch the watermark has finalized (executor index < min_index) in ascending order, each
-// stamped with the next dense sequence number. Serialization/send happens outside the lock (stays parallel).
+// split into flush_rows-sized groups stamped with consecutive dense indices. Send happens outside the lock.
 static void ReleaseDenseBatches(ClientContext &context, QuackInsertGlobalState &gstate, QuackInsertLocalState &lstate,
                                 idx_t min_index) {
 	vector<std::pair<idx_t, vector<unique_ptr<DataChunk>>>> ready;
@@ -242,7 +273,7 @@ static void ReleaseDenseBatches(ClientContext &context, QuackInsertGlobalState &
 		lstate.buffered_rows = 0;
 		while (!gstate.pending.empty() && gstate.pending.begin()->first < min_index) {
 			auto it = gstate.pending.begin();
-			ready.emplace_back(gstate.next_dense++, std::move(it->second));
+			SplitIntoDenseGroups(gstate, std::move(it->second), ready);
 			gstate.pending.erase(it);
 		}
 	}
@@ -257,7 +288,7 @@ static void ReleaseDenseBatches(ClientContext &context, QuackInsertGlobalState &
 SinkResultType QuackInsert::Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const {
 	auto &global_state = input.global_state.Cast<QuackInsertGlobalState>();
 	auto &local_state = input.local_state.Cast<QuackInsertLocalState>();
-	if (order_mode == AppendOrderMode::EXECUTOR) {
+	if (order_mode == AppendOrderMode::PARALLEL_ORDERED) {
 		// Every chunk between NextBatch boundaries belongs to one executor batch index; accumulate the whole
 		// batch and hand it to the coordinator at the boundary.
 		local_state.current_batch = input.local_state.partition_info.batch_index;
@@ -274,15 +305,9 @@ SinkResultType QuackInsert::Sink(ExecutionContext &context, DataChunk &chunk, Op
 	local_state.local_count += chunk.size();
 	local_state.buffer.push_back(std::move(owned));
 
-	// EXECUTOR flushes at the batch boundary (NextBatch); MINTED/NONE flush at the row threshold.
-	if (order_mode != AppendOrderMode::EXECUTOR && local_state.buffered_rows >= global_state.flush_rows) {
-		optional_idx dense; // MINTED: single producer mints the next dense index; NONE: fast path (unstamped).
-		if (order_mode == AppendOrderMode::MINTED) {
-			dense = global_state.mint_counter++;
-		}
-		SendChunks(context.client, global_state, local_state.buffer, dense);
-		local_state.buffer.clear();
-		local_state.buffered_rows = 0;
+	// PARALLEL_ORDERED flushes at the batch boundary (NextBatch); the others flush at the row threshold.
+	if (order_mode != AppendOrderMode::PARALLEL_ORDERED && local_state.buffered_rows >= global_state.flush_rows) {
+		FlushBuffer(context.client, global_state, local_state, order_mode);
 		global_state.queue->ApplyBackpressure();
 	}
 	return SinkResultType::NEED_MORE_INPUT;
@@ -294,7 +319,7 @@ SinkResultType QuackInsert::Sink(ExecutionContext &context, DataChunk &chunk, Op
 // The owning thread has crossed from `current_batch` to a new executor batch index — so `current_batch` is
 // final. Hand it to the coordinator and release every now-finalized batch (executor index < min) in dense order.
 SinkNextBatchType QuackInsert::NextBatch(ExecutionContext &context, OperatorSinkNextBatchInput &input) const {
-	if (order_mode != AppendOrderMode::EXECUTOR) {
+	if (order_mode != AppendOrderMode::PARALLEL_ORDERED) {
 		return SinkNextBatchType::READY;
 	}
 	auto &global_state = input.global_state.Cast<QuackInsertGlobalState>();
@@ -312,7 +337,7 @@ SinkNextBatchType QuackInsert::NextBatch(ExecutionContext &context, OperatorSink
 SinkCombineResultType QuackInsert::Combine(ExecutionContext &context, OperatorSinkCombineInput &input) const {
 	auto &global_state = input.global_state.Cast<QuackInsertGlobalState>();
 	auto &local_state = input.local_state.Cast<QuackInsertLocalState>();
-	if (order_mode == AppendOrderMode::EXECUTOR) {
+	if (order_mode == AppendOrderMode::PARALLEL_ORDERED) {
 		// Hand this thread's final batch to the coordinator; Finalize releases everything still pending in order.
 		lock_guard<mutex> guard(global_state.remap_lock);
 		if (local_state.current_batch.IsValid() && !local_state.buffer.empty()) {
@@ -320,12 +345,7 @@ SinkCombineResultType QuackInsert::Combine(ExecutionContext &context, OperatorSi
 		}
 		local_state.buffer.clear();
 	} else {
-		optional_idx dense; // MINTED: final minted batch; NONE: fast-path remainder.
-		if (order_mode == AppendOrderMode::MINTED && !local_state.buffer.empty()) {
-			dense = global_state.mint_counter++;
-		}
-		SendChunks(context.client, global_state, local_state.buffer, dense);
-		local_state.buffer.clear();
+		FlushBuffer(context.client, global_state, local_state, order_mode);
 	}
 	global_state.insert_count += local_state.local_count;
 	return SinkCombineResultType::FINISHED;
@@ -337,14 +357,14 @@ SinkCombineResultType QuackInsert::Combine(ExecutionContext &context, OperatorSi
 SinkFinalizeType QuackInsert::Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
                                        OperatorSinkFinalizeInput &input) const {
 	auto &global_state = input.global_state.Cast<QuackInsertGlobalState>();
-	if (order_mode == AppendOrderMode::EXECUTOR) {
-		// Everything is now final: release the remaining buffered batches in ascending executor order, each at
-		// the next dense index (runs single-threaded after all Combines).
+	if (order_mode == AppendOrderMode::PARALLEL_ORDERED) {
+		// Everything is now final: release the remaining buffered batches in ascending executor order, each
+		// split into flush_rows-sized groups at consecutive dense indices (runs single-threaded after Combines).
 		vector<std::pair<idx_t, vector<unique_ptr<DataChunk>>>> ready;
 		{
 			lock_guard<mutex> guard(global_state.remap_lock);
 			for (auto &entry : global_state.pending) {
-				ready.emplace_back(global_state.next_dense++, std::move(entry.second));
+				SplitIntoDenseGroups(global_state, std::move(entry.second), ready);
 			}
 			global_state.pending.clear();
 		}
@@ -383,17 +403,17 @@ InsertionOrderPreservingMap<string> QuackInsert::ParamsToString() const {
 }
 
 // Decide the insert ordering strategy at plan time (mirrors core's plan_insert.cpp):
-//  - preserve_insertion_order=false → fast concurrent path, no stamping (server applies on arrival).
-//  - preserve order + source has an executor batch index → stamp with it (parallel producers).
-//  - preserve order + source has no batch index → MINTED: single producer mints its own sequence.
-// Both order-preserving variants stay async; the server reorders by the dense batch_index stamp.
+//  - preserve_insertion_order=false → UNORDERED: fast concurrent path, no stamping (server applies on arrival).
+//  - preserve order + source has an executor batch index → PARALLEL_ORDERED: re-map the executor's index.
+//  - preserve order + source has no batch index → SERIAL_ORDERED: the single producer mints its own sequence.
+// Both ordered variants stay async; the server reorders by the dense batch_index stamp.
 static void ConfigureOrdering(ClientContext &context, QuackInsert &insert, PhysicalOperator &source) {
 	if (!PhysicalPlanGenerator::PreserveInsertionOrder(context, source)) {
-		insert.order_mode = AppendOrderMode::NONE;
+		insert.order_mode = AppendOrderMode::UNORDERED;
 	} else if (PhysicalPlanGenerator::UseBatchIndex(context, source)) {
-		insert.order_mode = AppendOrderMode::EXECUTOR;
+		insert.order_mode = AppendOrderMode::PARALLEL_ORDERED;
 	} else {
-		insert.order_mode = AppendOrderMode::MINTED;
+		insert.order_mode = AppendOrderMode::SERIAL_ORDERED;
 	}
 }
 
