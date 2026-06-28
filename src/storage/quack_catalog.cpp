@@ -33,7 +33,7 @@ QuackCatalog::QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri, C
 
 	// register a secret storage named after the attach alias, so `CREATE SECRET ... IN <alias>` ships secrets to the
 	// server (where federated queries actually execute). Inert until explicitly targeted via `IN <alias>`.
-	QuackSecretStorage::Register(context, db_p.GetName(), client_connection);
+	QuackSecretStorage::Register(context, db_p.GetName());
 }
 
 QuackLoadCatalogData QuackCatalog::LoadCatalog(ClientContext &context) {

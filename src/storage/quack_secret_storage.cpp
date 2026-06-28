@@ -1,89 +1,57 @@
 #include "storage/quack_secret_storage.hpp"
 
+#include "duckdb/catalog/catalog.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/enums/on_create_conflict.hpp"
 #include "duckdb/common/enums/on_entry_not_found.hpp"
-#include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/secret/secret.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
 
 #include "quack_client.hpp"
 #include "quack_message.hpp"
+#include "storage/quack_catalog.hpp"
 #include "storage/quack_connection_secret_storage.hpp"
 
 namespace duckdb {
 
 std::atomic<int64_t> QuackSecretStorage::next_tie_break_offset(25);
 
-QuackSecretStorage::QuackSecretStorage(const string &storage_name_p, shared_ptr<QuackClientConnection> connection_p)
-    : SecretStorage(storage_name_p, GetNextTieBreakOffset()), connection(connection_p) {
+QuackSecretStorage::QuackSecretStorage(const string &storage_name_p)
+    : SecretStorage(storage_name_p, GetNextTieBreakOffset()) {
 	// The secret physically lives on the server (beyond this local statement), so from DuckDB's point of view this is
 	// a persistent backend - this also makes the ergonomic `CREATE SECRET ... IN <alias>` resolve correctly (a named,
 	// non-"memory" storage is treated as PERSISTENT, and persistent secrets may only go into a persistent backend).
 	persistent = true;
 }
 
-namespace {
-//! Process-wide registry of quack secret storages by (lower-cased) name. There is no SecretManager unregister API, so
-//! a storage outlives DETACH; on re-ATTACH of the same alias we rebind the existing instance to the new connection
-//! instead of registering a duplicate (which would throw). The raw pointers are owned by the SecretManager and, since
-//! storages are never removed, stay valid for the lifetime of the process.
-mutex &RegistryLock() {
-	static mutex lock;
-	return lock;
-}
-unordered_map<string, QuackSecretStorage *> &Registry() {
-	static unordered_map<string, QuackSecretStorage *> registry;
-	return registry;
-}
-} // namespace
-
-void QuackSecretStorage::Register(ClientContext &context, const string &storage_name,
-                                  shared_ptr<QuackClientConnection> connection) {
-	lock_guard<mutex> registry_guard(RegistryLock());
-	auto &registry = Registry();
-	auto key = StringUtil::Lower(storage_name);
-
-	auto it = registry.find(key);
-	if (it != registry.end()) {
-		// Re-ATTACH of the same alias: reconnect the existing storage.
-		it->second->Rebind(std::move(connection));
-		return;
-	}
-
+void QuackSecretStorage::Register(ClientContext &context, const string &storage_name) {
 	auto &secret_manager = SecretManager::Get(context);
-	auto storage = make_uniq<QuackSecretStorage>(storage_name, std::move(connection));
-	auto storage_ptr = storage.get();
 	try {
-		secret_manager.LoadSecretStorage(std::move(storage));
+		secret_manager.LoadSecretStorage(make_uniq<QuackSecretStorage>(storage_name));
 	} catch (std::exception &) {
-		// Name collides with a pre-existing (non-quack) secret storage. Don't fail the ATTACH over it - the database
-		// is still usable, you just can't `CREATE SECRET ... IN <alias>` into it.
-		return;
+		// Either a storage for this alias is already registered (re-ATTACH on the same instance) or the name collides
+		// with a pre-existing non-quack storage. Either way there's nothing to do: the storage carries no connection
+		// state (it resolves the live one by alias), so re-ATTACH needs no rebind, and a collision just means you
+		// can't `CREATE SECRET ... IN <alias>` into it. Never fail the ATTACH over this.
 	}
-	registry[key] = storage_ptr;
 }
 
-void QuackSecretStorage::Rebind(shared_ptr<QuackClientConnection> connection_p) {
-	lock_guard<mutex> guard(lock);
-	connection = connection_p;
-}
-
-shared_ptr<QuackClientConnection> QuackSecretStorage::GetConnection() {
-	lock_guard<mutex> guard(lock);
-	auto conn = connection.lock();
-	if (!conn) {
+shared_ptr<QuackClientConnection> QuackSecretStorage::ResolveConnection(ClientContext &context) {
+	// storage_name is the attach alias. Look it up among the currently-attached catalogs; if it's gone the database
+	// has been detached.
+	auto catalog = Catalog::GetCatalogEntry(context, storage_name);
+	if (!catalog || catalog->GetCatalogType() != "quack") {
 		throw InvalidInputException(
-		    "quack secret storage '%s' is not connected - the database has been detached. Re-ATTACH it to use "
-		    "`CREATE SECRET ... IN %s` again.",
-		    storage_name, storage_name);
+		    "quack secret storage '%s' is not connected - no quack database is attached as '%s'. ATTACH it to use "
+		    "`CREATE SECRET ... IN %s`.",
+		    storage_name, storage_name, storage_name);
 	}
-	return conn;
+	return catalog->Cast<QuackCatalog>().GetClientConnection();
 }
 
 void QuackSecretStorage::RunOnServer(ClientContext &context, const string &sql) {
-	auto conn = GetConnection();
+	auto conn = ResolveConnection(context);
 	auto client_wrapper = conn->GetClient(context);
 	auto &client = client_wrapper->GetClient();
 	// Request<> throws the server-side error (e.g. unknown secret type) back to the client on failure.
