@@ -14,13 +14,123 @@
 #include "quack_message.hpp"
 #include "quack_log.hpp"
 #include "quack_storage.hpp"
+#include "quack_data_stream.hpp"
 
 namespace duckdb {
 QuackConnection::QuackConnection(string session_id_p) : session_id(std::move(session_id_p)) {
 }
 
+//! An insert stream + its driver thread, taken off a connection so finish/join can run unlocked.
+struct DetachedInsertStream {
+	shared_ptr<QuackDataStream> stream;
+	std::thread thread;
+	string id;
+};
+
+//! Atomically take the connection's active insert stream/thread/id, briefly under the lifecycle lock.
+static DetachedInsertStream DetachInsertStream(QuackConnection &connection) {
+	annotated_lock_guard<annotated_mutex> guard(connection.insert_lifecycle_lock);
+	DetachedInsertStream detached;
+	detached.stream = std::move(connection.insert_stream);
+	detached.thread = std::move(connection.insert_thread);
+	detached.id = std::move(connection.insert_stream_id);
+	connection.insert_stream.reset();
+	connection.insert_stream_id.clear();
+	return detached;
+}
+
+//! Commit a detached stream (Finish) + join, returning any INSERT error. Call WITHOUT the lock held.
+static ErrorData FinalizeDetached(DetachedInsertStream &detached) {
+	ErrorData error;
+	if (!detached.stream) {
+		return error;
+	}
+	detached.stream->Finish();
+	if (detached.thread.joinable()) {
+		detached.thread.join();
+	}
+	if (detached.stream->HasError()) {
+		error = detached.stream->GetError();
+	}
+	QuackStreamRegistry::Get().Erase(detached.id);
+	return error;
+}
+
+//! Abort a detached stream (roll the INSERT back) + join. Call WITHOUT the lock held.
+static void AbortDetached(DetachedInsertStream &detached, const string &reason) {
+	if (!detached.stream) {
+		return;
+	}
+	detached.stream->SetError(ErrorData(ExceptionType::INVALID_INPUT, reason));
+	if (detached.thread.joinable()) {
+		detached.thread.join();
+	}
+	QuackStreamRegistry::Get().Erase(detached.id);
+}
+
 QuackConnection::~QuackConnection() {
+	// Abort + join any in-flight INSERT before members are destroyed.
+	auto detached = DetachInsertStream(*this);
+	AbortDetached(detached, "connection closed during insert");
 	duckdb_query_result.reset();
+}
+
+//! Background thread: runs the INSERT that drains `stream` via scan_data_from_quack_client, holding
+//! the connection lock for the statement's duration (one transactional statement -> atomic).
+static void RunInsertStatement(QuackConnection &connection, shared_ptr<QuackDataStream> stream, string stream_id,
+                               string schema_name, string table_name) {
+	try {
+		unique_lock<mutex> lock(connection.lock);
+		auto sql = StringUtil::Format("INSERT INTO %s.%s SELECT * FROM scan_data_from_quack_client(%s)",
+		                              SQLIdentifier(schema_name), SQLIdentifier(table_name), SQLString(stream_id));
+		auto result = connection.duckdb_connection->Query(sql);
+		if (result->HasError()) {
+			stream->SetError(result->GetErrorObject());
+		}
+	} catch (std::exception &ex) {
+		stream->SetError(ErrorData(ex));
+	}
+	// Make sure the consumer side is released even on an unexpected early return.
+	stream->Finish();
+}
+
+//! Detach the active stream (briefly under the lifecycle lock) then finish + join it. Returns any
+//! error the INSERT produced. Safe to call when there is no active stream (returns an empty error).
+static ErrorData FinalizeInsertStream(QuackConnection &connection) {
+	auto detached = DetachInsertStream(connection);
+	return FinalizeDetached(detached);
+}
+
+//! Stream id a SEND_DATA/FINALIZE belongs to, or "" for any other message.
+static string StreamIdForMessage(QuackMessage &msg) {
+	if (msg.Type() == MessageType::SEND_DATA_REQUEST) {
+		auto &m = msg.Cast<SendDataRequestMessage>();
+		return QuackStreamRegistry::MakeId(m.ConnectionId(), m.QueryUUID());
+	}
+	if (msg.Type() == MessageType::FINALIZE) {
+		auto &m = msg.Cast<FinalizeMessage>();
+		return QuackStreamRegistry::MakeId(m.ConnectionId(), m.QueryUUID());
+	}
+	return string();
+}
+
+//! A message unrelated to the active insert stream means it was abandoned (client source failed,
+//! no FINALIZE) — abort it so it rolls back and releases the connection lock.
+static void AbortActiveStreamIfUnrelated(QuackConnection &connection, QuackMessage &msg) {
+	auto msg_stream_id = StreamIdForMessage(msg);
+	DetachedInsertStream detached;
+	{
+		annotated_lock_guard<annotated_mutex> guard(connection.insert_lifecycle_lock);
+		if (!connection.insert_stream || connection.insert_stream_id == msg_stream_id) {
+			return; // nothing active, or this message continues the active stream
+		}
+		detached.stream = std::move(connection.insert_stream);
+		detached.thread = std::move(connection.insert_thread);
+		detached.id = std::move(connection.insert_stream_id);
+		connection.insert_stream.reset();
+		connection.insert_stream_id.clear();
+	}
+	AbortDetached(detached, "insert stream abandoned");
 }
 
 void QuackServer::ValidateToken(const string &token) {
@@ -179,9 +289,10 @@ bool ServerSupportsMessage(MessageType type) {
 	case MessageType::CONNECTION_REQUEST:
 	case MessageType::PREPARE_REQUEST:
 	case MessageType::FETCH_REQUEST:
-	case MessageType::APPEND_REQUEST:
+	case MessageType::SEND_DATA_REQUEST:
 	case MessageType::DISCONNECT_MESSAGE:
 	case MessageType::CANCEL_REQUEST:
+	case MessageType::FINALIZE:
 		return true;
 	default:
 		return false;
@@ -281,11 +392,14 @@ static vector<unique_ptr<DataChunkWrapper>> CreateBatch(Allocator &allocator, un
 
 unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db, QuackMessage &received_message,
                                                             optional_ptr<QuackConnection> connection_p) {
+	if (connection_p) {
+		AbortActiveStreamIfUnrelated(*connection_p, received_message);
+	}
 	switch (received_message.Type()) {
 	case MessageType::CONNECTION_REQUEST: {
 		auto &connection_request_message = received_message.Cast<ConnectionRequestMessage>();
-		if (connection_request_message.MinimumSupportedQuackVersion() > 1ULL) {
-			return make_uniq<ErrorResponse>("Unsupported Quack version - server only supports version 1 of quack");
+		if (connection_request_message.MinimumSupportedQuackVersion() > 2ULL) {
+			return make_uniq<ErrorResponse>("Unsupported Quack version - server only supports version 2 of quack");
 		}
 		string session_id = GenerateSessionId();
 		auto auth_result = EvaluateAuthQuery(
@@ -413,50 +527,77 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		return make_uniq<FetchResponseMessage>(std::move(results), optional_idx(assigned_batch_index));
 	}
 
-	case MessageType::APPEND_REQUEST: {
-		auto &append_request_message = received_message.Cast<AppendRequestMessage>();
+	case MessageType::SEND_DATA_REQUEST: {
+		auto &send_data_message = received_message.Cast<SendDataRequestMessage>();
 		auto &connection = *connection_p;
 
 		// we never execute this query, but throw it at the authorization function so it can check if this user gets to
 		// insert into this table
 		auto dummy_insert_query =
-		    StringUtil::Format("INSERT INTO %s.%s VALUES (NULL)", SQLIdentifier(append_request_message.SchemaName()),
-		                       SQLIdentifier(append_request_message.TableName()));
+		    StringUtil::Format("INSERT INTO %s.%s VALUES (NULL)", SQLIdentifier(send_data_message.SchemaName()),
+		                       SQLIdentifier(send_data_message.TableName()));
 
 		// TODO do not do this if there is no fun set
 		{
 			auto auth_result = EvaluateAuthQuery(
 			    db, StringUtil::Format("SELECT %s(?, ?)", GetSettingString(db, "quack_authorization_function")),
-			    Value(append_request_message.ConnectionId()), Value(dummy_insert_query));
+			    Value(send_data_message.ConnectionId()), Value(dummy_insert_query));
 			if (auth_result.IsNull() ||
 			    (auth_result.type().id() == LogicalTypeId::BOOLEAN && !auth_result.GetValue<bool>())) {
 				return make_uniq<ErrorResponse>("Authorization failed");
 			}
 		}
 
-		std::unique_lock<std::mutex> lock(connection.lock);
-		auto &context = *connection.duckdb_connection->context;
-		auto table_info = context.TableInfo(Identifier(append_request_message.SchemaName()),
-		                                    Identifier(append_request_message.TableName()));
-		if (!table_info) {
-			return make_uniq<ErrorResponse>("Table %s.%s does not exist",
-			                                SQLIdentifier(append_request_message.SchemaName()),
-			                                SQLIdentifier(append_request_message.TableName()));
+		// First chunk lazily creates the stream + background INSERT (any different-id stream was aborted above).
+		auto stream_id = QuackStreamRegistry::MakeId(send_data_message.ConnectionId(), send_data_message.QueryUUID());
+		shared_ptr<QuackDataStream> stream;
+		{
+			annotated_lock_guard<annotated_mutex> guard(connection.insert_lifecycle_lock);
+			if (connection.insert_stream) {
+				stream = connection.insert_stream;
+			} else {
+				stream = QuackStreamRegistry::Get().Create(stream_id, send_data_message.AppendChunk().GetTypes());
+				connection.insert_stream = stream;
+				connection.insert_stream_id = stream_id;
+				connection.insert_thread = std::thread(RunInsertStatement, std::ref(connection), stream, stream_id,
+				                                       send_data_message.SchemaName(), send_data_message.TableName());
+			}
 		}
-		try {
-			ColumnDataCollection collection(Allocator::Get(context), append_request_message.AppendChunk().GetTypes());
-			collection.Append(append_request_message.AppendChunk());
-			connection.duckdb_connection->Append(*table_info, collection);
-		} catch (std::exception &ex) {
-			// apend failed - directly pass error to user
-			return make_uniq<ErrorResponse>(ErrorData(ex));
+
+		// Copy the chunk for the stream (the message is freed after this handler returns).
+		auto chunk = make_uniq<DataChunk>();
+		chunk->Initialize(Allocator::DefaultAllocator(), send_data_message.AppendChunk().GetTypes());
+		send_data_message.AppendChunk().Copy(*chunk);
+		stream->Push(std::move(chunk), optional_idx());
+
+		if (stream->HasError()) {
+			auto error = FinalizeInsertStream(connection);
+			return make_uniq<ErrorResponse>(error);
+		}
+		return make_uniq<SendDataResponseMessage>(); // accept_budget unset = unbounded (future flow control)
+	}
+	case MessageType::FINALIZE: {
+		auto &finalize_message = received_message.Cast<FinalizeMessage>();
+		auto &connection = *connection_p;
+		auto stream_id = QuackStreamRegistry::MakeId(finalize_message.ConnectionId(), finalize_message.QueryUUID());
+		{
+			annotated_lock_guard<annotated_mutex> guard(connection.insert_lifecycle_lock);
+			if (connection.insert_stream_id != stream_id) {
+				return make_uniq<SuccessResponse>(); // no matching stream (e.g. zero-chunk insert)
+			}
+		}
+		auto error = FinalizeInsertStream(connection);
+		if (error.HasError()) {
+			return make_uniq<ErrorResponse>(error);
 		}
 		return make_uniq<SuccessResponse>();
 	}
 	case MessageType::CANCEL_REQUEST: {
 		auto &cancel_request_message = received_message.Cast<CancelRequestMessage>();
 		auto &connection = *connection_p;
-		if (connection.query_uuid != cancel_request_message.query_uuid) {
+		// {0,0} is a wildcard — cancel whatever query is running on this connection
+		bool is_wildcard = cancel_request_message.query_uuid == hugeint_t {0, 0};
+		if (!is_wildcard && connection.query_uuid != cancel_request_message.query_uuid) {
 			return make_uniq<ErrorResponse>("Attempted to cancel a different query with id '%d' instead of '%d'",
 			                                cancel_request_message.query_uuid, connection.query_uuid);
 		}

@@ -22,6 +22,7 @@ class QueryResult;
 class DatabaseInstance;
 class PreparedStatement;
 class EncryptionState;
+class QuackDataStream;
 
 enum class QuackQueryState : uint8_t { IDLE, ACTIVE, FINISHED, CANCELLED, QUACK_ERROR };
 
@@ -44,6 +45,13 @@ struct QuackConnection {
 	string sql_query;
 	QuackQueryState query_state = QuackQueryState::IDLE;
 	timestamp_t query_started_at {0};
+
+	//! Per-connection SEND_DATA stream + background INSERT thread (keyed by `insert_stream_id`).
+	//! The lock is held only briefly — never across a Push or a join.
+	annotated_mutex insert_lifecycle_lock;
+	shared_ptr<QuackDataStream> insert_stream DUCKDB_GUARDED_BY(insert_lifecycle_lock);
+	std::thread insert_thread DUCKDB_GUARDED_BY(insert_lifecycle_lock);
+	string insert_stream_id DUCKDB_GUARDED_BY(insert_lifecycle_lock);
 };
 
 struct QuackConnectionSnapshot {
@@ -59,7 +67,7 @@ enum class QuackServerState { UNINITIALIZED, WAITING_TO_START, RUNNING, CLOSED }
 
 class QuackServer {
 public:
-	static constexpr const idx_t QUACK_VERSION = 1;
+	static constexpr const idx_t QUACK_VERSION = 2;
 
 public:
 	explicit QuackServer(ClientContext &context_p, const QuackUri &uri_p, const string &token_p);

@@ -15,10 +15,12 @@ enum class MessageType : uint8_t {
 	PREPARE_RESPONSE = 4,
 	FETCH_REQUEST = 7,
 	FETCH_RESPONSE = 8,
-	APPEND_REQUEST = 9,
+	SEND_DATA_REQUEST = 9,
 	SUCCESS_RESPONSE = 10,
 	DISCONNECT_MESSAGE = 11,
 	CANCEL_REQUEST = 12,
+	FINALIZE = 13,
+	SEND_DATA_RESPONSE = 14,
 	ERROR_RESPONSE = 100
 };
 
@@ -307,18 +309,20 @@ private:
 	optional_idx batch_index;
 };
 
-class AppendRequestMessage : public QuackMessage {
+// Streams one DataChunk of insert data to the server, keyed by (connection_id, query_uuid).
+// Answered by SendDataResponseMessage (or ErrorResponse on failure).
+class SendDataRequestMessage : public QuackMessage {
 public:
-	static constexpr MessageType TYPE = MessageType::APPEND_REQUEST;
+	static constexpr MessageType TYPE = MessageType::SEND_DATA_REQUEST;
 
-	explicit AppendRequestMessage(string connection_id_p, string schema_name_p, string table_name_p,
-	                              unique_ptr<DataChunkWrapper> append_chunk_p)
+	explicit SendDataRequestMessage(string connection_id_p, string schema_name_p, string table_name_p,
+	                                unique_ptr<DataChunkWrapper> append_chunk_p, hugeint_t query_uuid_p)
 	    : QuackMessage(TYPE, std::move(connection_id_p)), schema_name(std::move(schema_name_p)),
-	      table_name(std::move(table_name_p)), append_chunk(std::move(append_chunk_p)) {
+	      table_name(std::move(table_name_p)), append_chunk(std::move(append_chunk_p)), query_uuid(query_uuid_p) {
 	}
 
 	void Serialize(Serializer &serializer) const override;
-	static unique_ptr<AppendRequestMessage> Deserialize(Deserializer &deserializer);
+	static unique_ptr<SendDataRequestMessage> Deserialize(Deserializer &deserializer);
 
 	DataChunk &AppendChunk() const {
 		return append_chunk->Chunk();
@@ -329,15 +333,64 @@ public:
 	const string &TableName() const {
 		return table_name;
 	}
+	hugeint_t QueryUUID() const {
+		return query_uuid;
+	}
 
 protected:
-	AppendRequestMessage() : QuackMessage(TYPE) {
+	SendDataRequestMessage() : QuackMessage(TYPE) {
 	}
 
 private:
 	string schema_name;
 	string table_name;
 	unique_ptr<DataChunkWrapper> append_chunk;
+	hugeint_t query_uuid;
+};
+
+// Success reply to a SendDataRequestMessage. `accept_budget` is a placeholder for a future flow-control
+// hint (invalid means unbounded); the client currently ignores it.
+class SendDataResponseMessage : public QuackMessage {
+public:
+	static constexpr MessageType TYPE = MessageType::SEND_DATA_RESPONSE;
+
+	explicit SendDataResponseMessage(optional_idx accept_budget_p = optional_idx())
+	    : QuackMessage(TYPE), accept_budget(accept_budget_p) {
+	}
+
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<SendDataResponseMessage> Deserialize(Deserializer &deserializer);
+
+	optional_idx AcceptBudget() const {
+		return accept_budget;
+	}
+
+private:
+	optional_idx accept_budget;
+};
+
+// End-of-stream marker for a client->server stream (connection_id, query_uuid): server drains and
+// replies Success/Error. Used by SEND_DATA inserts today; reusable for future streams (e.g. reads).
+class FinalizeMessage : public QuackMessage {
+public:
+	static constexpr MessageType TYPE = MessageType::FINALIZE;
+
+	explicit FinalizeMessage(string connection_id_p, hugeint_t query_uuid_p)
+	    : QuackMessage(TYPE, std::move(connection_id_p)), query_uuid(query_uuid_p) {};
+
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<FinalizeMessage> Deserialize(Deserializer &deserializer);
+
+	hugeint_t QueryUUID() const {
+		return query_uuid;
+	}
+
+protected:
+	FinalizeMessage() : QuackMessage(TYPE) {
+	}
+
+private:
+	hugeint_t query_uuid;
 };
 
 class DisconnectMessage : public QuackMessage {

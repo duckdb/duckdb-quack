@@ -27,8 +27,6 @@ public:
 	optional_ptr<SchemaCatalogEntry> schema;
 	//! Create table info, in case of CREATE TABLE AS
 	unique_ptr<BoundCreateTableInfo> info;
-	//! Whether we can keep the copy alive during Sink calls
-	bool keep_copy_alive = true;
 
 protected:
 	// Source interface

@@ -26,11 +26,15 @@ QuackInsert::QuackInsert(PhysicalPlan &physical_plan, LogicalOperator &op, Schem
 //===--------------------------------------------------------------------===//
 class QuackInsertGlobalState : public GlobalSinkState {
 public:
-	explicit QuackInsertGlobalState(QuackTableCatalogEntry &table_p) : table(table_p), insert_count(0) {
+	explicit QuackInsertGlobalState(QuackTableCatalogEntry &table_p)
+	    : table(table_p), insert_count(0), query_uuid(UUID::GenerateRandomUUID()) {
 	}
 
 	QuackTableCatalogEntry &table;
 	idx_t insert_count;
+	//! Per-statement id for the server-side insert stream. Sent on every SEND_DATA and the FINALIZE so
+	//! the server keys the stream by (connection_id, query_uuid).
+	hugeint_t query_uuid;
 };
 
 unique_ptr<GlobalSinkState> QuackInsert::GetGlobalSinkState(ClientContext &context) const {
@@ -52,19 +56,20 @@ SinkResultType QuackInsert::Sink(ExecutionContext &context, DataChunk &chunk, Op
 	auto &global_state = input.global_state.Cast<QuackInsertGlobalState>();
 	auto &tbl = global_state.table;
 	auto &quack_catalog = tbl.catalog.Cast<QuackCatalog>();
-	auto append_chunk = make_uniq<DataChunk>();
-	append_chunk->Initialize(context.client, chunk.GetTypes());
-	append_chunk->Reference(chunk);
-	auto chunk_wrapper = make_uniq<DataChunkWrapper>(*append_chunk);
-	auto append_message =
-	    make_uniq<AppendRequestMessage>(quack_catalog.GetConnectionId(), tbl.schema.name.GetIdentifierName(),
-	                                    tbl.name.GetIdentifierName(), std::move(chunk_wrapper));
+	// Wrap (references chunk, no copy); serialized synchronously in Request below while `chunk` is alive.
+	auto chunk_wrapper = make_uniq<DataChunkWrapper>(chunk);
+	auto append_message = make_uniq<SendDataRequestMessage>(
+	    quack_catalog.GetConnectionId(), tbl.schema.name.GetIdentifierName(), tbl.name.GetIdentifierName(),
+	    std::move(chunk_wrapper), global_state.query_uuid);
 
 	auto client_connection = quack_catalog.GetClientConnection();
 	auto client_wrapper = client_connection->GetClient(context.client);
 	auto &client = client_wrapper->GetClient();
-	client.Request<SuccessResponse>(context.client, std::move(append_message));
+	// The response carries a placeholder accept-budget for future flow control; errors arrive as an
+	// ErrorResponse, which Request<>() rethrows.
+	client.Request<SendDataResponseMessage>(context.client, std::move(append_message));
 
+	// Client-side optimistic count (rows sent); exact because any server failure throws above before reporting.
 	global_state.insert_count += chunk.size();
 	return SinkResultType::NEED_MORE_INPUT;
 }
@@ -74,7 +79,16 @@ SinkResultType QuackInsert::Sink(ExecutionContext &context, DataChunk &chunk, Op
 //===--------------------------------------------------------------------===//
 SinkFinalizeType QuackInsert::Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
                                        OperatorSinkFinalizeInput &input) const {
-	// TODO nop?
+	auto &global_state = input.global_state.Cast<QuackInsertGlobalState>();
+	auto &tbl = global_state.table;
+	auto &quack_catalog = tbl.catalog.Cast<QuackCatalog>();
+	auto client_connection = quack_catalog.GetClientConnection();
+	auto client_wrapper = client_connection->GetClient(context);
+	auto &client = client_wrapper->GetClient();
+	// Signal end-of-stream so the server drains the source, completes the INSERT statement, and
+	// commits it. A server-side failure (e.g. a constraint violation) surfaces here as an error.
+	client.Request<SuccessResponse>(
+	    context, make_uniq<FinalizeMessage>(quack_catalog.GetConnectionId(), global_state.query_uuid));
 	return SinkFinalizeType::READY;
 }
 

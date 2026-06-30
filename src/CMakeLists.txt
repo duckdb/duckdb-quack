@@ -5,11 +5,13 @@ add_library(
   quack_active_connections.cpp
   quack_clear_cache.cpp
   quack_client.cpp
+  quack_data_stream.cpp
   quack_extension.cpp
   quack_http_server.cpp
   quack_log.cpp
   quack_message.cpp
   quack_scan.cpp
+  quack_scan_from_client.cpp
   quack_server.cpp
   quack_start_stop.cpp
   quack_storage.cpp
