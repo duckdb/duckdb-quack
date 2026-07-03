@@ -5,6 +5,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/storage/temporary_file_manager.hpp"
 #include "duckdb/common/serializer/binary_deserializer.hpp"
@@ -30,6 +31,17 @@ void QuackServer::ValidateToken(const string &token) {
 QuackServer::QuackServer(ClientContext &context_p, const QuackUri &uri_p, const string &token_p)
     : db_ptr(context_p.db), uri(uri_p), token(token_p) {
 	ValidateToken(token);
+}
+
+string QuackServer::TokenFromSecret(ClientContext &context, const QuackUri &uri) {
+	auto &secret_manager = SecretManager::Get(context);
+	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
+	auto match = secret_manager.LookupSecret(transaction, uri.Uri(), "quack");
+	if (match.HasMatch()) {
+		const auto &kv = dynamic_cast<const KeyValueSecret &>(*match.secret_entry->secret);
+		return kv.TryGetValue("token", true).ToString();
+	}
+	return "";
 }
 
 QuackServer::~QuackServer() {
