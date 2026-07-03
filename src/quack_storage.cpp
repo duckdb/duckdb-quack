@@ -97,7 +97,11 @@ static unique_ptr<Catalog> QuackAttach(optional_ptr<StorageExtensionInfo> storag
 	if (attach_options.options.find("token") != attach_options.options.end()) {
 		token = attach_options.options["token"].GetValue<string>();
 	}
-	return make_uniq<QuackCatalog>(db, QuackUri(uri, enable_ssl), context, token);
+	QuackHTTPHeaders headers;
+	if (attach_options.options.find("headers") != attach_options.options.end()) {
+		headers = QuackClient::ParseHTTPHeaders(attach_options.options["headers"]);
+	}
+	return make_uniq<QuackCatalog>(db, QuackUri(uri, enable_ssl), context, token, std::move(headers));
 }
 
 static unique_ptr<TransactionManager> QuackCreateTransactionManager(optional_ptr<StorageExtensionInfo> storage_info,

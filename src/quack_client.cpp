@@ -16,6 +16,40 @@ static int64_t NowMillis() {
 	    .count();
 }
 
+static void MergeHeaders(QuackHTTPHeaders &target, const QuackHTTPHeaders &source) {
+	for (auto &header : source) {
+		target[header.first] = header.second;
+	}
+}
+
+QuackHTTPHeaders QuackClient::ParseHTTPHeaders(const Value &value) {
+	if (value.IsNull()) {
+		throw InvalidInputException("headers cannot be NULL");
+	}
+	if (value.type().id() != LogicalTypeId::MAP) {
+		throw InvalidInputException("headers must be a MAP(VARCHAR, VARCHAR), got %s", value.type().ToString());
+	}
+	auto cast_value = value.DefaultCastAs(LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR));
+	QuackHTTPHeaders result;
+	for (auto &entry : MapValue::GetChildren(cast_value)) {
+		auto &key_value = StructValue::GetChildren(entry);
+		if (key_value[0].IsNull()) {
+			throw InvalidInputException("headers cannot contain NULL header names");
+		}
+		if (key_value[1].IsNull()) {
+			throw InvalidInputException("headers cannot contain NULL header values");
+		}
+		auto name = key_value[0].GetValue<string>();
+		auto trimmed_name = name;
+		StringUtil::Trim(trimmed_name);
+		if (trimmed_name.empty()) {
+			throw InvalidInputException("headers cannot contain empty header names");
+		}
+		result[name] = key_value[1].GetValue<string>();
+	}
+	return result;
+}
+
 template <class T>
 string GetUriPart(T ele) {
 	if (ele.afterLast - ele.first < 1) {
@@ -34,7 +68,8 @@ void QuackClientConnection::CancelQuery(hugeint_t query_uuid) {
 	client->Request<SuccessResponse>(nullptr, make_uniq<CancelRequestMessage>(connection_id, query_uuid));
 }
 
-QuackClient::QuackClient(DatabaseInstance &db_p, const QuackUri &uri_p) : db(db_p), uri(uri_p) {
+QuackClient::QuackClient(DatabaseInstance &db_p, const QuackUri &uri_p, QuackHTTPHeaders headers_p)
+    : db(db_p), uri(uri_p), headers(std::move(headers_p)) {
 }
 
 QuackClient::~QuackClient() {
@@ -77,7 +112,8 @@ void QuackClient::LogRequest(Logger &logger, MessageType request_type, const str
 	logger.WriteLog(QuackLogType::NAME, QuackLogType::LEVEL, msg);
 }
 
-HttpsQuackClient::HttpsQuackClient(DatabaseInstance &db, const QuackUri &uri_p) : QuackClient(db, uri_p) {};
+HttpsQuackClient::HttpsQuackClient(DatabaseInstance &db, const QuackUri &uri_p, QuackHTTPHeaders headers_p)
+    : QuackClient(db, uri_p, std::move(headers_p)) {};
 
 HttpsQuackClient::~HttpsQuackClient() {
 }
@@ -87,6 +123,9 @@ string HttpsQuackClient::PostRawLocked(const_data_ptr_t data, idx_t size) {
 	auto &http_util = HTTPUtil::Get(db);
 	auto request_url = uri.Http() + "/quack";
 	HTTPHeaders headers;
+	for (auto &header : this->headers) {
+		headers.Insert(header.first, header.second);
+	}
 	PostRequestInfo post_request(request_url, headers, *http_params, data, size);
 	unique_ptr<HTTPResponse> response;
 	try {
@@ -149,22 +188,23 @@ unique_ptr<QuackMessage> HttpsQuackClient::RequestInternal(optional_ptr<ClientCo
 	return response_message;
 }
 
-unique_ptr<QuackClient> QuackClient::GetClient(DatabaseInstance &db, const QuackUri &uri) {
+unique_ptr<QuackClient> QuackClient::GetClient(DatabaseInstance &db, const QuackUri &uri, QuackHTTPHeaders headers) {
 	ExtensionHelper::AutoLoadExtension(db, "httpfs");
 	if (!db.ExtensionIsLoaded("httpfs")) {
 		throw MissingExtensionException("The rpc extension requires the httpfs extension to be loaded!");
 	}
 
-	return make_uniq<HttpsQuackClient>(db, uri);
+	return make_uniq<HttpsQuackClient>(db, uri, std::move(headers));
 }
 
-unique_ptr<QuackClient> QuackClient::GetClient(ClientContext &context, const QuackUri &uri) {
-	return GetClient(*context.db, uri);
+unique_ptr<QuackClient> QuackClient::GetClient(ClientContext &context, const QuackUri &uri, QuackHTTPHeaders headers) {
+	return GetClient(*context.db, uri, std::move(headers));
 }
 
 QuackClientConnection::QuackClientConnection(unique_ptr<QuackClient> client_p, QuackUri uri_p, string connection_id_p,
-                                             idx_t max_connections_cached)
-    : uri(std::move(uri_p)), connection_id(std::move(connection_id_p)), max_connections_cached(max_connections_cached) {
+                                             QuackHTTPHeaders headers_p, idx_t max_connections_cached)
+    : uri(std::move(uri_p)), headers(std::move(headers_p)), connection_id(std::move(connection_id_p)),
+      max_connections_cached(max_connections_cached) {
 	if (client_p) {
 		StoreClient(std::move(client_p));
 	}
@@ -181,23 +221,29 @@ QuackClientConnection::~QuackClientConnection() {
 }
 
 shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &context, const QuackUri &uri,
-                                                               string token) {
-	// if no token is provided fetch it from the secret manager
-	if (token.empty()) {
-		auto &secret_manager = SecretManager::Get(context);
-		auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
-		auto match = secret_manager.LookupSecret(transaction, uri.Uri(), "quack");
-		if (match.HasMatch()) {
-			const auto &kv = dynamic_cast<const KeyValueSecret &>(*match.secret_entry->secret);
+                                                               string token, QuackHTTPHeaders headers) {
+	QuackHTTPHeaders secret_headers;
+	auto &secret_manager = SecretManager::Get(context);
+	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
+	auto match = secret_manager.LookupSecret(transaction, uri.Uri(), "quack");
+	if (match.HasMatch()) {
+		const auto &kv = dynamic_cast<const KeyValueSecret &>(*match.secret_entry->secret);
+		if (token.empty()) {
 			token = kv.TryGetValue("token", true).ToString();
+		}
+		Value secret_header_value;
+		if (kv.TryGetValue("headers", secret_header_value)) {
+			secret_headers = ParseHTTPHeaders(secret_header_value);
 		}
 	}
 	if (token.empty()) {
 		throw InvalidInputException("Could not find a Quack authentication token");
 	}
+	MergeHeaders(secret_headers, headers);
+	headers = std::move(secret_headers);
 
 	// open a HTTP client to the server
-	auto client = QuackClient::GetClient(context, uri);
+	auto client = QuackClient::GetClient(context, uri, headers);
 
 	// submit the connection request
 	auto connection_request_response =
@@ -210,7 +256,8 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 	// success! we got a connection id
 	auto connection_id = connection_request_response->ConnectionId();
 	idx_t pool_size = MaxValue<idx_t>(1, (idx_t)TaskScheduler::GetScheduler(context).NumberOfAsyncThreads());
-	return make_shared_ptr<QuackClientConnection>(std::move(client), uri, std::move(connection_id), pool_size);
+	return make_shared_ptr<QuackClientConnection>(std::move(client), uri, std::move(connection_id), std::move(headers),
+	                                              pool_size);
 }
 
 unique_ptr<QuackClientWrapper> QuackClientConnection::GetClient(ClientContext &context) const {
@@ -222,7 +269,7 @@ unique_ptr<QuackClientWrapper> QuackClientConnection::GetClient(ClientContext &c
 		cached_clients.pop_back();
 	} else {
 		// instantiate a new client
-		result = QuackClient::GetClient(context, uri);
+		result = QuackClient::GetClient(context, uri, headers);
 	}
 	// Stamp the checking-out query's logger so this client's POSTs (incl. off-thread async sends) are logged.
 	result->SetRequestLogger(context.logger);

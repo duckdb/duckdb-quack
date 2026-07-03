@@ -10,6 +10,7 @@
 
 #include "duckdb/catalog/catalog.hpp"
 #include "storage/quack_schema.hpp"
+#include "quack_client.hpp"
 #include "quack_uri.hpp"
 
 namespace duckdb {
@@ -21,7 +22,7 @@ class QuackClientConnection;
 class QuackCatalog : public Catalog {
 public:
 	explicit QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri_p, ClientContext &context,
-	                      const string &token);
+	                      const string &token, QuackHTTPHeaders headers = {});
 	~QuackCatalog() override;
 
 public:

@@ -1,0 +1,144 @@
+# name: test/sql/custom_headers.test
+# description: custom HTTP headers for quack_query, ATTACH, and quack secrets
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok
+CALL enable_logging('HTTP');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+from quack_query({server}, 'select 42', token='asdf', headers=MAP {'X-aws-proxy-auth': 'direct'})
+----
+42
+
+query I
+select count(*) > 0
+from duckdb_logs_parsed('HTTP')
+where request.type = 'POST'
+  and map_extract_value(request.headers, 'X-aws-proxy-auth') = 'direct'
+----
+true
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+attach {server} as rpc_headers (token 'asdf', headers MAP {'X-aws-proxy-auth': 'attach'})
+
+query I
+from rpc_headers.query('select 43')
+----
+43
+
+query I
+select count(*) > 0
+from duckdb_logs_parsed('HTTP')
+where request.type = 'POST'
+  and map_extract_value(request.headers, 'X-aws-proxy-auth') = 'attach'
+----
+true
+
+statement ok
+detach rpc_headers
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+create secret quack_headers_direct (type quack, token 'asdf', headers MAP {'X-aws-proxy-auth': 'secret-direct'}, scope {server})
+
+query I
+from quack_query({server}, 'select 44')
+----
+44
+
+query I
+select count(*) > 0
+from duckdb_logs_parsed('HTTP')
+where request.type = 'POST'
+  and map_extract_value(request.headers, 'X-aws-proxy-auth') = 'secret-direct'
+----
+true
+
+statement ok
+drop secret quack_headers_direct
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+create secret quack_headers_attach (type quack, token 'asdf', headers MAP {'X-aws-proxy-auth': 'secret-attach'}, scope {server})
+
+statement ok
+attach {server} as rpc_secret_headers
+
+query I
+from rpc_secret_headers.query('select 45')
+----
+45
+
+query I
+select count(*) > 0
+from duckdb_logs_parsed('HTTP')
+where request.type = 'POST'
+  and map_extract_value(request.headers, 'X-aws-proxy-auth') = 'secret-attach'
+----
+true
+
+statement ok
+detach rpc_secret_headers
+
+statement ok
+drop secret quack_headers_attach
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+create secret quack_headers_override (type quack, token 'asdf', headers MAP {'X-aws-proxy-auth': 'secret', 'X-Quack-Other': 'kept'}, scope {server})
+
+query I
+from quack_query({server}, 'select 46', headers=MAP {'x-AWS-proxy-auth': 'explicit'})
+----
+46
+
+query I
+select count(*) > 0
+from duckdb_logs_parsed('HTTP')
+where request.type = 'POST'
+  and map_extract_value(request.headers, 'X-aws-proxy-auth') = 'explicit'
+  and map_extract_value(request.headers, 'X-Quack-Other') = 'kept'
+----
+true
+
+statement ok
+drop secret quack_headers_override
+
+statement error
+from quack_query({server}, 'select 1', token='asdf', headers=NULL)
+----
+headers cannot be NULL
+
+statement error
+from quack_query({server}, 'select 1', token='asdf', headers=MAP {NULL: 'value'})
+----
+Map keys can not be NULL
+
+statement error
+from quack_query({server}, 'select 1', token='asdf', headers=MAP {'X-aws-proxy-auth': NULL})
+----
+headers cannot contain NULL header values
+
+statement error
+from quack_query({server}, 'select 1', token='asdf', headers=MAP {'': 'value'})
+----
+headers cannot contain empty header names
+
+statement ok
+CALL disable_logging();
+
+include test/template/quack_teardown.test_template

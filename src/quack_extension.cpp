@@ -15,6 +15,7 @@
 #include "include/storage/quack_catalog.hpp"
 #include "quack_active_connections.hpp"
 #include "quack_clear_cache.hpp"
+#include "quack_client.hpp"
 #include "quack_extension.hpp"
 #include "quack_log.hpp"
 #include "quack_scan.hpp"
@@ -41,11 +42,15 @@ static unique_ptr<BaseSecret> CreateQuackSecretFromConfig(ClientContext &, Creat
 		auto lower_name = StringUtil::Lower(named_param.first);
 		if (lower_name == "token") {
 			secret->secret_map["token"] = named_param.second.ToString();
+		} else if (lower_name == "headers") {
+			QuackClient::ParseHTTPHeaders(named_param.second);
+			secret->secret_map["headers"] =
+			    named_param.second.DefaultCastAs(LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR));
 		} else {
 			throw InvalidInputException("Unknown named parameter for quack secret: %s", lower_name);
 		}
 	}
-	secret->redact_keys = {"token"};
+	secret->redact_keys = {"token", "headers"};
 	return std::move(secret);
 }
 
@@ -59,6 +64,7 @@ static void RegisterQuackSecretType(ExtensionLoader &loader) {
 
 	CreateSecretFunction config_fun = {QUACK_SECRET_TYPE, "config", CreateQuackSecretFromConfig};
 	config_fun.named_parameters["token"] = LogicalType::VARCHAR;
+	config_fun.named_parameters["headers"] = LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR);
 	loader.RegisterFunction(config_fun);
 }
 

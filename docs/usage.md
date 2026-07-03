@@ -124,6 +124,28 @@ clients must have the server's token set in their session:
 SET rpc_default_token = '<token-from-rpc_start>';
 ```
 
+Clients can also attach deployment-specific HTTP headers to every
+request. Pass them explicitly for a one-off query or attach, or store
+them in a URI-scoped `quack` secret:
+
+```sql
+FROM rpc_call(
+  'quack:localhost',
+  'SELECT 42',
+  headers => MAP {'X-aws-proxy-auth': '<proxy-token>'}
+);
+
+ATTACH 'quack:localhost' AS rpc
+  (headers MAP {'X-aws-proxy-auth': '<proxy-token>'});
+
+CREATE SECRET quack_proxy (
+  TYPE quack,
+  TOKEN '<quack-token>',
+  HEADERS MAP {'X-aws-proxy-auth': '<proxy-token>'},
+  SCOPE 'quack:localhost'
+);
+```
+
 ---
 
 ## Function reference
@@ -140,7 +162,7 @@ SET rpc_default_token = '<token-from-rpc_start>';
 
 | Function                                         | Description                                                                 |
 |-------------------------------------------------|-----------------------------------------------------------------------------|
-| `rpc_call(uri, query, disable_ssl := false)`    | Run `query` on remote `uri`, stream result back.                            |
+| `rpc_call(uri, query, disable_ssl := false, headers := MAP {...})` | Run `query` on remote `uri`, stream result back. `headers` is an optional `MAP(VARCHAR, VARCHAR)` of custom HTTP headers sent with every request. |
 | `rpc_call_by_name(catalog, query)`              | Run `query` against an already-attached RPC catalog (used by `db.call()`). |
 
 ### Utility
@@ -153,9 +175,10 @@ SET rpc_default_token = '<token-from-rpc_start>';
 
 ### `ATTACH` options
 
-| Option         | Type    | Default | Description                      |
-|---------------|---------|---------|----------------------------------|
-| `disable_ssl` | BOOLEAN | `false` | Use plain HTTP instead of HTTPS. |
+| Option         | Type                   | Default | Description                      |
+|---------------|------------------------|---------|----------------------------------|
+| `disable_ssl` | BOOLEAN                | `false` | Use plain HTTP instead of HTTPS. |
+| `headers`     | MAP(VARCHAR, VARCHAR) | *(unset)* | Custom HTTP headers sent with every request for this attached catalog. |
 
 ---
 

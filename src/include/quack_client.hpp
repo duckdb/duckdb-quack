@@ -12,9 +12,11 @@ namespace duckdb {
 class QuackClientConnection;
 struct QuackClientWrapper;
 
+using QuackHTTPHeaders = HTTPHeaders::header_map_t;
+
 class QuackClient {
 public:
-	explicit QuackClient(DatabaseInstance &db_p, const QuackUri &uri_p);
+	explicit QuackClient(DatabaseInstance &db_p, const QuackUri &uri_p, QuackHTTPHeaders headers_p = {});
 	virtual ~QuackClient();
 
 	template <class TARGET>
@@ -53,10 +55,15 @@ public:
 	//! (incl. an async send whose pool thread has no ClientContext) logs under the checking-out query.
 	void SetRequestLogger(shared_ptr<Logger> logger);
 
-	static unique_ptr<QuackClient> GetClient(DatabaseInstance &db, const QuackUri &uri);
-	static unique_ptr<QuackClient> GetClient(ClientContext &context, const QuackUri &uri);
+	static QuackHTTPHeaders ParseHTTPHeaders(const Value &value);
 
-	static shared_ptr<QuackClientConnection> ConnectToServer(ClientContext &context, const QuackUri &uri, string token);
+	static unique_ptr<QuackClient> GetClient(DatabaseInstance &db, const QuackUri &uri,
+	                                         QuackHTTPHeaders headers = {});
+	static unique_ptr<QuackClient> GetClient(ClientContext &context, const QuackUri &uri,
+	                                         QuackHTTPHeaders headers = {});
+
+	static shared_ptr<QuackClientConnection> ConnectToServer(ClientContext &context, const QuackUri &uri, string token,
+	                                                         QuackHTTPHeaders headers = {});
 
 protected:
 	//! Resolve the logger for a request: the context (per-query) logger when available, else the db logger.
@@ -66,6 +73,7 @@ protected:
 	MemoryStream write_stream;
 	DatabaseInstance &db;
 	QuackUri uri;
+	QuackHTTPHeaders headers;
 	//! HTTP transport-log logger, stamped at checkout (see SetRequestLogger).
 	shared_ptr<Logger> request_logger;
 
@@ -77,7 +85,7 @@ private:
 class QuackClientConnection : public enable_shared_from_this<QuackClientConnection> {
 public:
 	explicit QuackClientConnection(unique_ptr<QuackClient> client_p, QuackUri uri_p, string connection_id_p,
-	                               idx_t max_connections_cached = 1);
+	                               QuackHTTPHeaders headers_p = {}, idx_t max_connections_cached = 1);
 	~QuackClientConnection();
 
 	void CancelQuery(hugeint_t query_uuid);
@@ -88,6 +96,9 @@ public:
 	const QuackUri &ServerURI() const {
 		return uri;
 	}
+	const QuackHTTPHeaders &Headers() const {
+		return headers;
+	}
 
 	//! Get a client (either a cached one, or open a new one if required)
 	unique_ptr<QuackClientWrapper> GetClient(ClientContext &context) const;
@@ -96,6 +107,7 @@ public:
 
 private:
 	QuackUri uri;
+	QuackHTTPHeaders headers;
 	string connection_id;
 	mutable mutex lock;
 	mutable vector<unique_ptr<QuackClient>> cached_clients;
@@ -115,7 +127,7 @@ private:
 
 class HttpsQuackClient : public QuackClient {
 public:
-	HttpsQuackClient(DatabaseInstance &db, const QuackUri &uri_p);
+	HttpsQuackClient(DatabaseInstance &db, const QuackUri &uri_p, QuackHTTPHeaders headers_p = {});
 	~HttpsQuackClient() override;
 
 	string PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size) override;
