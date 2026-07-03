@@ -302,22 +302,31 @@ static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChu
 
 			auto &response_chunk = chunk.Chunk();
 			if (response_chunk.size() > 0) {
-				if (!chunk.RequiresPushdown()) {
-					output.Reference(response_chunk);
-				} else {
-					for (idx_t i = 0; i < global_state.column_ids.size(); i++) {
-						auto &index = global_state.column_ids[i];
-						if (index.IsVirtualColumn()) {
-							// TODO
-							output.data[i].Reference(Value(output.data[i].GetType()));
-							return;
-						}
-						auto col_idx = index.GetPrimaryIndex();
-						output.data[i].Reference(response_chunk.data[col_idx]);
-					}
-					output.SetCardinality(response_chunk.size());
-				}
-				return;
+		    if (!chunk.RequiresPushdown()) {
+            output.Reference(response_chunk);
+        } else {
+            // Respect projection_ids if DuckDB pruned the columns during pushdown
+            bool has_projection = !global_state.projection_ids.empty();
+            idx_t num_cols = has_projection ? global_state.projection_ids.size() : global_state.column_ids.size();
+
+            for (idx_t i = 0; i < num_cols; i++) {
+                auto &index = has_projection
+                                ? global_state.column_ids[global_state.projection_ids[i]]
+                                : global_state.column_ids[i];
+
+                if (index.IsVirtualColumn()) {
+                    // Safely fill virtual columns (e.g., ROW_ID) with NULLs and continue
+                    output.data[i].SetVectorType(VectorType::CONSTANT_VECTOR);
+                    ConstantVector::SetNull(output.data[i], true);
+                    continue;
+                }
+
+                auto col_idx = index.GetPrimaryIndex();
+                output.data[i].Reference(response_chunk.data[col_idx]);
+            }
+            output.SetCardinality(response_chunk.size());
+        }
+        return;
 			}
 		}
 
@@ -333,10 +342,13 @@ static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChu
 				global_state.needs_more_fetch = false;
 				return;
 			}
-			// set up buffer for scan in next iteration
-			for (auto &chunk : fetch_response->MutableResults()) {
-				local_state.results.emplace(chunk->Chunk(), ChunkResultPushdownType::PUSHDOWN_ALREADY_APPLIED);
-			}
+            // set up buffer for scan in next iteration
+            for (auto &chunk : fetch_response->MutableResults()) {
+                auto pushdown_type = bind_data.table_name.empty()
+                                        ? ChunkResultPushdownType::REQUIRES_PUSHDOWN
+                                        : ChunkResultPushdownType::PUSHDOWN_ALREADY_APPLIED;
+                local_state.results.emplace(chunk->Chunk(), pushdown_type);
+            }
 			local_state.current_batch_index = fetch_response->BatchIndex();
 			continue;
 		}
