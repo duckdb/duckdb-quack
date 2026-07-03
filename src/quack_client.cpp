@@ -1,3 +1,5 @@
+#include "duckdb/catalog/catalog_transaction.hpp"
+#include "duckdb/common/types/value.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
@@ -12,6 +14,28 @@ string GetUriPart(T ele) {
 		throw InvalidInputException("Invalid URI");
 	}
 	return string(ele.first, ele.afterLast - ele.first);
+}
+
+//! Resolve the optional EXTRA_HTTP_HEADERS from the `quack` secret scoped to this URI and add them
+//! to `headers`. Silently does nothing when no matching secret / header map is present.
+static void LoadExtraHttpHeaders(optional_ptr<ClientContext> context, DatabaseInstance &db, const QuackUri &uri,
+                                 HTTPHeaders &headers) {
+	auto &secret_manager = SecretManager::Get(db);
+	auto transaction = context ? CatalogTransaction::GetSystemCatalogTransaction(*context)
+	                           : CatalogTransaction::GetSystemTransaction(db);
+	auto match = secret_manager.LookupSecret(transaction, uri.Uri(), "quack");
+	if (!match.HasMatch()) {
+		return;
+	}
+	const auto &kv = dynamic_cast<const KeyValueSecret &>(*match.secret_entry->secret);
+	Value headers_value;
+	if (!kv.TryGetValue("extra_http_headers", headers_value) || headers_value.IsNull()) {
+		return;
+	}
+	for (const auto &entry : MapValue::GetChildren(headers_value)) {
+		const auto &kv_pair = StructValue::GetChildren(entry);
+		headers.Insert(kv_pair[0].ToString(), kv_pair[1].ToString());
+	}
 }
 
 QuackClient::QuackClient(DatabaseInstance &db_p, const QuackUri &uri_p) : db(db_p), uri(uri_p) {
@@ -39,9 +63,11 @@ unique_ptr<QuackMessage> HttpsQuackClient::RequestInternal(optional_ptr<ClientCo
 		} else {
 			http_params = http_util.InitializeParameters(db, request_url);
 		}
+		// Resolve EXTRA_HTTP_HEADERS from the quack secret once; reused for every request on this client.
+		LoadExtraHttpHeaders(context, db, uri, extra_headers);
 	}
 
-	HTTPHeaders headers;
+	HTTPHeaders headers = extra_headers;
 
 	// Inject client_query_id from context into the message before sending.
 	// Guard against reading the active query during transaction start itself
