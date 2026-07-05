@@ -1,3 +1,4 @@
+#include "duckdb/common/types/column/column_data_collection.hpp"
 #include "duckdb/execution/operator/scan/physical_table_scan.hpp"
 #include "duckdb/planner/operator/logical_create_table.hpp"
 #include "duckdb/planner/operator/logical_insert.hpp"
@@ -12,7 +13,8 @@
 using namespace duckdb;
 
 QuackInsert::QuackInsert(PhysicalPlan &physical_plan, LogicalOperator &op, TableCatalogEntry &table)
-    : PhysicalOperator(physical_plan, PhysicalOperatorType::EXTENSION, op.types, 1), table(&table), schema(nullptr) {
+    : PhysicalOperator(physical_plan, PhysicalOperatorType::EXTENSION, op.types, 1), table(&table), schema(nullptr),
+      return_chunk(op.Cast<LogicalInsert>().return_chunk) {
 }
 
 QuackInsert::QuackInsert(PhysicalPlan &physical_plan, LogicalOperator &op, SchemaCatalogEntry &schema,
@@ -26,23 +28,31 @@ QuackInsert::QuackInsert(PhysicalPlan &physical_plan, LogicalOperator &op, Schem
 //===--------------------------------------------------------------------===//
 class QuackInsertGlobalState : public GlobalSinkState {
 public:
-	explicit QuackInsertGlobalState(QuackTableCatalogEntry &table_p) : table(table_p), insert_count(0) {
+	QuackInsertGlobalState(ClientContext &context, QuackTableCatalogEntry &table_p, bool return_chunk,
+	                       const vector<LogicalType> &return_types)
+	    : table(table_p), insert_count(0) {
+		if (return_chunk) {
+			return_collection = make_uniq<ColumnDataCollection>(context, return_types);
+		}
 	}
 
 	QuackTableCatalogEntry &table;
 	idx_t insert_count;
+	//! When RETURNING is used, holds the inserted rows to stream back as the result
+	unique_ptr<ColumnDataCollection> return_collection;
 };
 
 unique_ptr<GlobalSinkState> QuackInsert::GetGlobalSinkState(ClientContext &context) const {
 	if (table) {
-		return make_uniq<QuackInsertGlobalState>(table.get_mutable()->Cast<QuackTableCatalogEntry>());
+		return make_uniq<QuackInsertGlobalState>(context, table.get_mutable()->Cast<QuackTableCatalogEntry>(),
+		                                         return_chunk, types);
 	}
 	// CREATE TABLE AS path: create the table on the remote side first
 	auto &quack_schema = schema.get_mutable()->Cast<QuackSchemaCatalogEntry>();
 	auto &quack_catalog = quack_schema.catalog.Cast<QuackCatalog>();
 
 	auto entry = quack_schema.CreateTable(CatalogTransaction(quack_catalog, context), *info);
-	return make_uniq<QuackInsertGlobalState>(entry->Cast<QuackTableCatalogEntry>());
+	return make_uniq<QuackInsertGlobalState>(context, entry->Cast<QuackTableCatalogEntry>(), return_chunk, types);
 }
 
 //===--------------------------------------------------------------------===//
@@ -65,6 +75,9 @@ SinkResultType QuackInsert::Sink(ExecutionContext &context, DataChunk &chunk, Op
 	client.Request<SuccessResponse>(context.client, std::move(append_message));
 
 	global_state.insert_count += chunk.size();
+	if (return_chunk) {
+		global_state.return_collection->Append(chunk);
+	}
 	return SinkResultType::NEED_MORE_INPUT;
 }
 
@@ -80,12 +93,35 @@ SinkFinalizeType QuackInsert::Finalize(Pipeline &pipeline, Event &event, ClientC
 //===--------------------------------------------------------------------===//
 // GetData
 //===--------------------------------------------------------------------===//
+class QuackInsertSourceState : public GlobalSourceState {
+public:
+	explicit QuackInsertSourceState(const QuackInsert &op) {
+		if (op.return_chunk) {
+			D_ASSERT(op.sink_state);
+			auto &g = op.sink_state->Cast<QuackInsertGlobalState>();
+			g.return_collection->InitializeScan(scan_state);
+		}
+	}
+
+	ColumnDataScanState scan_state;
+};
+
+unique_ptr<GlobalSourceState> QuackInsert::GetGlobalSourceState(ClientContext &context) const {
+	return make_uniq<QuackInsertSourceState>(*this);
+}
+
 SourceResultType QuackInsert::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
                                               OperatorSourceInput &input) const {
 	auto &insert_gstate = sink_state->Cast<QuackInsertGlobalState>();
-	chunk.SetCardinality(1);
-	chunk.SetValue(0, 0, Value::BIGINT(NumericCast<int64_t>(insert_gstate.insert_count)));
-	return SourceResultType::FINISHED;
+	if (!return_chunk) {
+		chunk.SetCardinality(1);
+		chunk.SetValue(0, 0, Value::BIGINT(NumericCast<int64_t>(insert_gstate.insert_count)));
+		return SourceResultType::FINISHED;
+	}
+
+	auto &state = input.global_state.Cast<QuackInsertSourceState>();
+	insert_gstate.return_collection->Scan(state.scan_state, chunk);
+	return chunk.size() == 0 ? SourceResultType::FINISHED : SourceResultType::HAVE_MORE_OUTPUT;
 }
 
 //===--------------------------------------------------------------------===//

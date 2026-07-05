@@ -29,6 +29,8 @@ public:
 	unique_ptr<BoundCreateTableInfo> info;
 	//! Whether we can keep the copy alive during Sink calls
 	bool keep_copy_alive = true;
+	//! If the RETURNING clause is used, emit the inserted rows instead of the insert count
+	bool return_chunk = false;
 
 protected:
 	// Source interface
@@ -36,6 +38,9 @@ protected:
 	                                 OperatorSourceInput &input) const override;
 
 public:
+	// Source interface
+	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override;
+
 	// Sink interface
 	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override;
 	SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const override;

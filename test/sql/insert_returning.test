@@ -1,0 +1,79 @@
+# name: test/sql/insert_returning.test
+# description: INSERT ... RETURNING against an attached quack database returns the inserted rows (upstream #114)
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+foreach server 'quack:localhost'
+
+statement ok con1
+call quack_serve({server}, token='asdf');
+
+statement ok con2
+create secret (type quack, token 'asdf')
+
+statement ok con2
+attach {server} as rpc
+
+statement ok con2
+create table rpc.items(id integer, name varchar);
+
+# RETURNING * must return the actually-inserted row, not phantom data
+query IT con2
+insert into rpc.items values (1, 'apple') returning *;
+----
+1	apple
+
+# RETURNING a single explicit column
+query I con2
+insert into rpc.items values (2, 'banana') returning id;
+----
+2
+
+# RETURNING an expression over the inserted columns
+query IT con2
+insert into rpc.items values (3, 'cherry') returning id + 100, name;
+----
+103	cherry
+
+# Multi-row insert returns every inserted row
+query IT con2
+insert into rpc.items values (4, 'date'), (5, 'elderberry') returning *;
+----
+4	date
+5	elderberry
+
+# Partial insert: unspecified columns come back as their default (NULL here)
+query IT con2
+insert into rpc.items (id) values (6) returning *;
+----
+6	NULL
+
+# The rows actually landed on the server (write path was always correct)
+query IT con2
+from rpc.items order by id;
+----
+1	apple
+2	banana
+3	cherry
+4	date
+5	elderberry
+6	NULL
+
+# Plain INSERT without RETURNING still reports the inserted count
+query I con2
+insert into rpc.items values (7, 'fig');
+----
+1
+
+statement ok con2
+detach rpc;
+
+statement ok con1
+call quack_stop({server});
+
+endloop
