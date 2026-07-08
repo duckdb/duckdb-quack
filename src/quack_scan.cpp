@@ -354,8 +354,7 @@ static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChu
 				fetch_ahead.Buffer().GetError().Throw();
 				return;
 			case QuackDataStream::PopBatchStatus::EMPTY: {
-				// Self-healing: if a free pipeline slot and an idle client exist (e.g. a slot was
-				// released after this thread's last TopUp), refill before parking.
+				// refill any free pipeline slots before parking
 				fetch_ahead.TopUp();
 				vector<unique_ptr<AsyncTask>> tasks;
 				tasks.push_back(make_uniq<QuackWaitForChunkTask>(fetch_ahead.BufferPtr()));

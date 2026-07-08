@@ -347,8 +347,8 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
 			error = response->Cast<ErrorResponse>().ErrorMessage();
 		}
 		auto msg = QuackLogType::ConstructLogMessage(header.type, header.connection_id, header.client_query_id,
-		                                             ExtractQuery(*received_message), "", duration_ms,
-		                                             response->Type(), error);
+		                                             ExtractQuery(*received_message), "", duration_ms, response->Type(),
+		                                             error);
 		logger.WriteLog(QuackLogType::NAME, QuackLogType::LEVEL, msg);
 	}
 

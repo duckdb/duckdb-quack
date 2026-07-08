@@ -171,8 +171,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          LogicalType::VARCHAR, Value("quack_nop_authorization"), nullptr, SetScope::GLOBAL);
 
 	config.AddExtensionOption("quack_fetch_batch_rows",
-	                          "Rows accumulated per FETCH response batch; whole DataChunks are added until the "
-	                          "cap is reached, so sparse (filtered) chunks don't shrink the response",
+	                          "Rows accumulated per FETCH response batch (whole DataChunks, so the last chunk "
+	                          "may overshoot the cap)",
 	                          LogicalType::UBIGINT, Value::UBIGINT(24576));
 
 	config.AddExtensionOption("quack_fetch_read_ahead",

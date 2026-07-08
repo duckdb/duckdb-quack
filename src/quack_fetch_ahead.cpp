@@ -5,7 +5,6 @@
 
 namespace duckdb {
 
-
 //===--------------------------------------------------------------------===//
 // Async fetch task
 //===--------------------------------------------------------------------===//
@@ -61,8 +60,8 @@ private:
 
 		auto &fetch_response = response->Cast<FetchResponseMessage>();
 		auto &wrappers = fetch_response.MutableResults();
-		// Recycle the client BEFORE publishing: the consumer's TopUp fires as soon as the batch is
-		// visible, and it must find an idle client or the pipeline stalls (fatal at depth 1).
+		// Recycle the client before publishing: a consumer TopUp triggered by this batch must
+		// find an idle client.
 		fetch_ahead.ReturnClient(std::move(client_wrapper));
 		bool pushed = false;
 		if (wrappers.empty()) {
@@ -81,8 +80,7 @@ private:
 				owned->Reference(wrapper->Chunk());
 				chunks.push_back(std::move(owned));
 			}
-			// Ordered delivery: fetches complete out of order, but scan threads must observe
-			// monotonically increasing batch indices (order-preserving plans enforce this).
+			// deliver in index order: scan threads must observe monotonically increasing batch indices
 			fetch_ahead.buffer->PushOrdered(std::move(chunks), batch_index.GetIndex(), 0, true, optional_idx());
 			pushed = true;
 		}

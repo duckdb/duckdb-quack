@@ -6,7 +6,6 @@
 #include "quack_client.hpp"
 #include "quack_uri.hpp"
 
-
 namespace duckdb {
 
 template <class T>
