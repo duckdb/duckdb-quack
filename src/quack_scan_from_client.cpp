@@ -12,18 +12,6 @@
 
 namespace duckdb {
 
-class QuackWaitForChunkTask : public AsyncTask {
-public:
-	explicit QuackWaitForChunkTask(shared_ptr<QuackDataStream> stream_p) : stream(std::move(stream_p)) {
-	}
-	void Execute() override {
-		stream->WaitForData();
-	}
-
-private:
-	shared_ptr<QuackDataStream> stream;
-};
-
 struct QuackScanFromClientBindData : public FunctionData {
 	string stream_id;
 	shared_ptr<QuackDataStream> stream;
