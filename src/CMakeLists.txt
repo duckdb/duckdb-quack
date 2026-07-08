@@ -7,6 +7,7 @@ add_library(
   quack_client.cpp
   quack_data_stream.cpp
   quack_extension.cpp
+  quack_fetch_ahead.cpp
   quack_http_server.cpp
   quack_log.cpp
   quack_message.cpp
