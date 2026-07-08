@@ -1,3 +1,4 @@
+#include "duckdb/common/enums/task_scheduler_type.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension_helper.hpp"
@@ -7,6 +8,7 @@
 
 #include "quack_scan.hpp"
 #include "quack_client.hpp"
+#include "quack_fetch_ahead.hpp"
 #include "include/storage/quack_catalog.hpp"
 #include "storage/quack_transaction.hpp"
 
@@ -130,7 +132,6 @@ struct QuackScanLocalState : public LocalTableFunctionState {
 	~QuackScanLocalState() override {
 	}
 
-	unique_ptr<QuackClientWrapper> client_wrapper;
 	//! batch_index of the batch that `fetched_results` currently holds chunks from (server-assigned).
 	//! Surfaced to DuckDB via get_partition_data so downstream order-preserving operators
 	//! (CTAS, COPY TO, INSERT SELECT) can run the scan in parallel without losing order.
@@ -155,6 +156,8 @@ struct QuackScanGlobalState : GlobalTableFunctionState {
 	vector<idx_t> projection_ids;
 	atomic<bool> needs_more_fetch;
 	hugeint_t query_uuid;
+	//! FETCH read-ahead pipeline; set when needs_more_fetch (see QuackScanInitGlobal).
+	shared_ptr<QuackFetchAhead> fetch_ahead;
 
 	vector<ChunkResult> TryGetResults() {
 		lock_guard<mutex> guard(lock);
@@ -268,8 +271,14 @@ unique_ptr<GlobalTableFunctionState> QuackScanInitGlobal(ClientContext &context,
 		query_uuid = bind_data.query_uuid;
 	}
 	// we only multithread if there is more to fetch
-	return make_uniq<QuackScanGlobalState>(input.column_indexes, input.projection_ids, std::move(results),
-	                                       needs_more_fetch, query_uuid);
+	auto global_state = make_uniq<QuackScanGlobalState>(input.column_indexes, input.projection_ids, std::move(results),
+	                                                    needs_more_fetch, query_uuid);
+	if (needs_more_fetch) {
+		// start pipelining FETCH requests on the ASYNC pool before the first scan call
+		global_state->fetch_ahead = make_shared_ptr<QuackFetchAhead>(context, *bind_data.client_connection, query_uuid,
+		                                                             QuackFetchAhead::GetReadAheadDepth(context));
+	}
+	return std::move(global_state);
 }
 
 unique_ptr<LocalTableFunctionState> QuackScanInitLocal(ExecutionContext &context, TableFunctionInitInput &input,
@@ -278,8 +287,6 @@ unique_ptr<LocalTableFunctionState> QuackScanInitLocal(ExecutionContext &context
 	auto &global_state = global_state_p->Cast<QuackScanGlobalState>();
 	auto local_state = make_uniq<QuackScanLocalState>();
 
-	// re-use initial client from bind if possible
-	local_state->client_wrapper = bind_data.client_connection->GetClient(context.client);
 	auto results = global_state.TryGetResults();
 	for (auto &chunk : results) {
 		local_state->results.push(std::move(chunk));
@@ -319,29 +326,53 @@ static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChu
 			}
 		}
 
-		// if that did not work, we request more results
-		if (local_state.results.empty() && global_state.needs_more_fetch) {
-			auto &client = local_state.client_wrapper->GetClient();
-			auto fetch_response = client.Request<FetchResponseMessage>(
-			    context,
-			    make_uniq<FetchRequestMessage>(bind_data.client_connection->ConnectionId(), global_state.query_uuid));
-
-			if (fetch_response->MutableResults().empty()) {
+		// if that did not work, we consume the next prefetched batch from the read-ahead buffer
+		if (local_state.results.empty() && global_state.needs_more_fetch && global_state.fetch_ahead) {
+			auto &fetch_ahead = *global_state.fetch_ahead;
+			idx_t batch_index;
+			vector<unique_ptr<DataChunk>> chunks;
+			switch (fetch_ahead.Buffer().TryPopBatch(batch_index, chunks)) {
+			case QuackDataStream::PopBatchStatus::BATCH: {
+				fetch_ahead.BatchConsumed();
+				// tag fetched chunks like the initial batch (see QuackScanInitGlobal): direct queries
+				// return full-width chunks that still need projection, the catalog path already projected
+				auto fetched_pushdown_type = bind_data.table_name.empty()
+				                                 ? ChunkResultPushdownType::REQUIRES_PUSHDOWN
+				                                 : ChunkResultPushdownType::PUSHDOWN_ALREADY_APPLIED;
+				for (auto &chunk : chunks) {
+					local_state.results.emplace(*chunk, fetched_pushdown_type);
+				}
+				local_state.current_batch_index = batch_index;
+				continue;
+			}
+			case QuackDataStream::PopBatchStatus::FINISHED:
 				// server is done, we are done
 				global_state.needs_more_fetch = false;
 				bind_data.completed = true;
 				return;
+			case QuackDataStream::PopBatchStatus::ERRORED:
+				fetch_ahead.Buffer().GetError().Throw();
+				return;
+			case QuackDataStream::PopBatchStatus::EMPTY: {
+				// Self-healing: if a free pipeline slot and an idle client exist (e.g. a slot was
+				// released after this thread's last TopUp), refill before parking.
+				fetch_ahead.TopUp();
+				vector<unique_ptr<AsyncTask>> tasks;
+				tasks.push_back(make_uniq<QuackWaitForChunkTask>(fetch_ahead.BufferPtr()));
+				AsyncResult async_result(std::move(tasks), TaskSchedulerType::ASYNC);
+				if (input.results_execution_mode == AsyncResultsExecutionMode::TASK_EXECUTOR) {
+					// yield BLOCKED; the wait task reschedules this scan once a batch is ready
+					input.async_result = std::move(async_result);
+					return;
+				}
+				// Synchronous fallback (async_threads=0): run the wait inline, then retry.
+				async_result.ExecuteTasksSynchronously();
+				if (context.IsInterrupted()) {
+					throw InterruptException();
+				}
+				continue;
 			}
-			// tag fetched chunks like the initial batch (see QuackScanInitGlobal): direct queries
-			// return full-width chunks that still need projection, the catalog path already projected
-			auto fetched_pushdown_type = bind_data.table_name.empty()
-			                                 ? ChunkResultPushdownType::REQUIRES_PUSHDOWN
-			                                 : ChunkResultPushdownType::PUSHDOWN_ALREADY_APPLIED;
-			for (auto &chunk : fetch_response->MutableResults()) {
-				local_state.results.emplace(chunk->Chunk(), fetched_pushdown_type);
 			}
-			local_state.current_batch_index = fetch_response->BatchIndex();
-			continue;
 		}
 		// we did not have anything cached and then request to the server did not yield anything - we are done
 		bind_data.completed = true;
