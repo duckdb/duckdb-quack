@@ -170,8 +170,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("quack_authorization_function", "Name of a callback function for authorization",
 	                          LogicalType::VARCHAR, Value("quack_nop_authorization"), nullptr, SetScope::GLOBAL);
 
-	config.AddExtensionOption("quack_fetch_batch_chunks", "Maximum number of DataChunks returned per FETCH response",
-	                          LogicalType::UBIGINT, Value::UBIGINT(12));
+	config.AddExtensionOption("quack_fetch_batch_rows",
+	                          "Rows accumulated per FETCH response batch; whole DataChunks are added until the "
+	                          "cap is reached, so sparse (filtered) chunks don't shrink the response",
+	                          LogicalType::UBIGINT, Value::UBIGINT(24576));
+
+	config.AddExtensionOption("quack_fetch_read_ahead",
+	                          "FETCH requests kept in flight ahead of the scan (0 = number of async threads)",
+	                          LogicalType::UBIGINT, Value::UBIGINT(0));
 
 	config.AddExtensionOption("quack_send_data_flush_rows",
 	                          "Rows a thread buffers before flushing one SEND_DATA_REQUEST (0 = default 204800)",
