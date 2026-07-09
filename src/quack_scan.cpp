@@ -144,10 +144,11 @@ struct QuackScanLocalState : public LocalTableFunctionState {
 
 struct QuackScanGlobalState : GlobalTableFunctionState {
 	explicit QuackScanGlobalState(vector<ColumnIndex> column_ids_p, vector<idx_t> projection_id_p,
-	                              vector<ChunkResult> results_p, bool needs_more_fetch_p, hugeint_t result_uuid_p)
+	                              vector<ChunkResult> results_p, bool needs_more_fetch_p, hugeint_t result_uuid_p,
+	                              ChunkResultPushdownType fetch_pushdown_type_p)
 	    : max_threads(needs_more_fetch_p ? MAX_THREADS : 1), column_ids(std::move(column_ids_p)),
 	      projection_ids(std::move(projection_id_p)), needs_more_fetch(needs_more_fetch_p), result_uuid(result_uuid_p),
-	      results(std::move(results_p)) {
+	      fetch_pushdown_type(fetch_pushdown_type_p), results(std::move(results_p)) {
 	}
 	idx_t MaxThreads() const override {
 		return max_threads;
@@ -157,6 +158,12 @@ struct QuackScanGlobalState : GlobalTableFunctionState {
 	vector<idx_t> projection_ids;
 	atomic<bool> needs_more_fetch;
 	hugeint_t result_uuid;
+	//! How chunks fetched AFTER the initial batch must be treated. When the scan was
+	//! executed via a server-side pushdown query (catalog table scan), fetched chunks
+	//! already have the projection applied. When the scan consumes a bind-time result
+	//! (quack_query / quack_query_by_name, incl. ATTACH'd views), fetched chunks are
+	//! full-width continuations and still require client-side pushdown.
+	ChunkResultPushdownType fetch_pushdown_type;
 
 	vector<ChunkResult> TryGetResults() {
 		lock_guard<mutex> guard(lock);
@@ -247,6 +254,8 @@ unique_ptr<GlobalTableFunctionState> QuackScanInitGlobal(ClientContext &context,
 	vector<ChunkResult> results;
 	bool needs_more_fetch = bind_data.needs_more_fetch;
 	hugeint_t result_uuid;
+	auto fetch_pushdown_type = bind_data.table_name.empty() ? ChunkResultPushdownType::REQUIRES_PUSHDOWN
+	                                                        : ChunkResultPushdownType::PUSHDOWN_ALREADY_APPLIED;
 	if (!bind_data.table_name.empty()) {
 		// apply pushdown to the query
 		auto query = BuildPushdownQuery(bind_data, input);
@@ -271,7 +280,7 @@ unique_ptr<GlobalTableFunctionState> QuackScanInitGlobal(ClientContext &context,
 	}
 	// we only multithread if there is more to fetch
 	return make_uniq<QuackScanGlobalState>(input.column_indexes, input.projection_ids, std::move(results),
-	                                       needs_more_fetch, result_uuid);
+	                                       needs_more_fetch, result_uuid, fetch_pushdown_type);
 }
 
 unique_ptr<LocalTableFunctionState> QuackScanInitLocal(ExecutionContext &context, TableFunctionInitInput &input,
@@ -335,7 +344,7 @@ static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChu
 			}
 			// set up buffer for scan in next iteration
 			for (auto &chunk : fetch_response->MutableResults()) {
-				local_state.results.emplace(chunk->Chunk(), ChunkResultPushdownType::PUSHDOWN_ALREADY_APPLIED);
+				local_state.results.emplace(chunk->Chunk(), global_state.fetch_pushdown_type);
 			}
 			local_state.current_batch_index = fetch_response->BatchIndex();
 			continue;
