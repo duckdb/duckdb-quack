@@ -69,9 +69,11 @@ string QuackTableSet::GetLoadQuery() {
 	return R"(
 SELECT schema_name, sql, 'table'
 FROM duckdb_tables()
+WHERE NOT internal
 UNION ALL
 SELECT schema_name, view_name, 'view'
 FROM duckdb_views()
+WHERE NOT internal
 	)";
 }
 
@@ -93,7 +95,10 @@ unique_ptr<BaseStatistics> QuackTableCatalogEntry::GetStatistics(ClientContext &
 }
 
 TableStorageInfo QuackTableCatalogEntry::GetStorageInfo(ClientContext &context) {
-	throw NotImplementedException("GetStorageInfo not implemented yet");
+	// remote tables have no local storage; an empty result lets catalog
+	// functions like duckdb_tables() enumerate them
+	TableStorageInfo result;
+	return result;
 }
 
 } // namespace duckdb

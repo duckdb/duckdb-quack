@@ -1,0 +1,63 @@
+# name: test/sql/attach_catalog_scan.test
+# description: catalog enumeration of attached databases (duckdb_tables / duckdb_views / SHOW)
+# group: [sql]
+
+require quack
+
+require httpfs
+
+statement ok
+create table tbl_one as select 42 i;
+
+statement ok
+create table tbl_two as select 'hello' s;
+
+statement ok
+create view view_one as select i * 2 j from tbl_one;
+
+statement ok con1
+call quack_serve('quack:localhost', token='asdf');
+
+statement ok con2
+attach 'quack:localhost' as rpc (token 'asdf')
+
+# tables of the attached database enumerate through duckdb_tables()
+query I con2
+select table_name from duckdb_tables() where database_name = 'rpc' order by table_name;
+----
+tbl_one
+tbl_two
+
+# views enumerate through duckdb_views()
+query I con2
+select view_name from duckdb_views() where database_name = 'rpc' order by view_name;
+----
+view_one
+
+# enumerated table entries expose their resolved columns
+# (view columns are not resolved at attach time; enumerating them is a possible follow-up)
+query II con2
+select table_name, column_name from duckdb_columns() where database_name = 'rpc' and table_name like 'tbl%' order by table_name, column_name;
+----
+tbl_one	i
+tbl_two	s
+
+# SHOW TABLES works with the attached database as the default database
+statement ok con2
+use rpc;
+
+query I con2
+show tables;
+----
+tbl_one
+tbl_two
+view_one
+
+statement ok con2
+use memory;
+
+statement ok con2
+detach rpc;
+
+statement ok con1
+call quack_stop('quack:localhost');

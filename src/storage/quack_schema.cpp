@@ -68,10 +68,17 @@ optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::LookupEntry(CatalogTransacti
 
 void QuackSchemaCatalogEntry::Scan(ClientContext &context, CatalogType type,
                                    const std::function<void(CatalogEntry &)> &callback) {
-	// TODO
+	Scan(type, callback);
 }
 void QuackSchemaCatalogEntry::Scan(CatalogType type, const std::function<void(CatalogEntry &)> &callback) {
-	// TODO
+	if (type != CatalogType::TABLE_ENTRY && type != CatalogType::VIEW_ENTRY) {
+		return;
+	}
+	for (auto &entry : tables->GetAllCatalogEntries()) {
+		if (entry.get().type == type) {
+			callback(entry.get());
+		}
+	}
 }
 
 optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateIndex(CatalogTransaction transaction, CreateIndexInfo &info,
