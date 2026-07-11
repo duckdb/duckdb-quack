@@ -57,10 +57,12 @@ SELECT s FROM rpc.t2 ORDER BY s
 a
 b
 
+# the table is gone on the server, but our catalog cache still has it: the error comes back from the
+# server, carrying the type it was raised with there
 statement error
 SELECT i FROM rpc.t1
 ----
-Invalid Input Error: Table with name t1 does not exist
+Catalog Error: Table with name t1 does not exist
 
 statement ok
 CALL quack_clear_cache()

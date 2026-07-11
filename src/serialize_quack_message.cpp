@@ -77,11 +77,18 @@ unique_ptr<DisconnectMessage> DisconnectMessage::Deserialize(Deserializer &deser
 
 void ErrorResponse::Serialize(Serializer &serializer) const {
 	serializer.WritePropertyWithDefault<string>(1, "message", error.RawMessage());
+	serializer.WritePropertyWithDefault<string>(2, "exception_type", ExceptionTypeName());
+	serializer.WritePropertyWithDefault<unordered_map<string, string>>(3, "extra_info", TransferableExtraInfo());
+	serializer.WritePropertyWithDefault<bool>(4, "must_invalidate", must_invalidate);
 }
 
 unique_ptr<ErrorResponse> ErrorResponse::Deserialize(Deserializer &deserializer) {
 	auto message = deserializer.ReadPropertyWithDefault<string>(1, "message");
-	auto result = duckdb::unique_ptr<ErrorResponse>(new ErrorResponse(std::move(message)));
+	auto exception_type = deserializer.ReadPropertyWithDefault<string>(2, "exception_type");
+	auto extra_info = deserializer.ReadPropertyWithDefault<unordered_map<string, string>>(3, "extra_info");
+	auto must_invalidate = deserializer.ReadPropertyWithDefault<bool>(4, "must_invalidate");
+	auto result =
+	    ErrorResponse::FromWire(std::move(message), std::move(exception_type), std::move(extra_info), must_invalidate);
 	return result;
 }
 

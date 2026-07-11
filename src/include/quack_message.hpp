@@ -597,6 +597,21 @@ private:
 	hugeint_t query_uuid {0, 0};
 };
 
+//! Keys quack adds to an error's extra info, so a caller can act on the facts instead of reading English out
+//! of the message. They belong to the ErrorData rather than to the message ON PURPOSE: a quack server can
+//! itself be the client of another quack server, and there the error stops being a message - it is thrown,
+//! caught, and re-raised as that server's own query error, through DuckDB code that has never heard of quack.
+//! An ErrorData's extra info survives that hop; a field of ErrorResponse would not.
+namespace QuackErrorInfo {
+//! The type the SERVER raised, when it was too severe to rethrow as-is (see ErrorResponse::FromWire). It has
+//! to survive relaying: when a server passes on an error it got from ANOTHER server, this still names the
+//! type that originally went wrong.
+constexpr const char *ORIGINAL_EXCEPTION_TYPE = "original_exception_type";
+} // namespace QuackErrorInfo
+
+//! An error raised while handling a request. The exception type and the extra info travel along with the
+//! message, so the client rethrows the exception the server actually raised (a Catalog Error stays a Catalog
+//! Error) instead of a bare InvalidInputException.
 class ErrorResponse : public QuackMessage {
 public:
 	static constexpr MessageType TYPE = MessageType::ERROR_RESPONSE;
@@ -614,6 +629,24 @@ public:
 	const string &ErrorMessage() const {
 		return error.Message();
 	}
+	//! The exception type in its wire form (e.g. "Catalog"), empty if this response holds no error
+	string ExceptionTypeName() const;
+	//! The extra info minus the entries that only mean something in the process that raised the error
+	unordered_map<string, string> TransferableExtraInfo() const;
+
+	//! Whether the SENDER's database is now invalidated, i.e. this connection is a dead end and the receiver
+	//! should stop using it. It is deliberately a bare flag and not the sender's identity: a server behind a
+	//! proxy does not know the address it is reachable at (it may believe it is "quack:localhost"), while the
+	//! receiver always knows which server it dialed. Whoever holds the connection names it.
+	bool MustInvalidate() const {
+		return must_invalidate;
+	}
+	void SetMustInvalidate(bool must_invalidate_p) {
+		must_invalidate = must_invalidate_p;
+	}
+	//! Rebuild an error response from the wire fields - the inverse of Serialize
+	static unique_ptr<ErrorResponse> FromWire(const string &message, const string &exception_type,
+	                                          const unordered_map<string, string> &extra_info, bool must_invalidate);
 
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<ErrorResponse> Deserialize(Deserializer &deserializer);
@@ -624,6 +657,8 @@ protected:
 
 private:
 	ErrorData error;
+	//! Set by the server when its OWN database died with this error - see MustInvalidate()
+	bool must_invalidate = false;
 };
 
 class CancelRequestMessage : public QuackMessage {

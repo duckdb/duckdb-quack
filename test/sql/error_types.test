@@ -1,0 +1,81 @@
+# name: test/sql/error_types.test
+# description: errors raised by the server are rethrown by the client with their original exception type
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok
+create secret (type quack, token 'asdf')
+
+# a catalog error stays a catalog error - it used to arrive as "Invalid Input Error"
+statement error
+from quack_query({server}, 'select * from no_such_table')
+----
+Catalog Error: Table with name no_such_table does not exist!
+
+statement error
+from quack_query({server}, 'selexxxct 42')
+----
+Parser Error: syntax error at or near
+
+statement error
+from quack_query({server}, 'select ''abc''::int')
+----
+Conversion Error: Could not convert string 'abc' to INT32
+
+statement error
+from quack_query({server}, 'select no_such_column from range(10)')
+----
+Binder Error: Referenced column "no_such_column" not found
+
+# the error is raised while streaming the result (in a FETCH, not in the PREPARE): the batch is 12 chunks,
+# so the failing row is well past the first response
+statement error
+from quack_query({server}, 'select case when i < 30000 then i::varchar else ''abc'' end::int from range(60000) t(i)')
+----
+Conversion Error: Could not convert string 'abc' to INT32
+
+# errors raised by quack itself (not by a query) keep throwing as InvalidInputException
+statement error
+from quack_query({server}, 'select 42', token='wrong-token')
+----
+Invalid Input Error: Authentication failed
+
+# over an attached database: an insert rejected by the server surfaces as a constraint error, not as
+# an invalid input error (this one comes back on the SEND_DATA path)
+statement ok
+attach {server} as rpc (type quack)
+
+statement ok
+create table rpc.checked (i integer check (i < 30000))
+
+statement error
+insert into rpc.checked select i from range(60000) t(i)
+----
+Constraint Error: CHECK constraint failed
+
+statement ok
+detach rpc
+
+# A FATAL error says the process that raised it is no longer trustworthy: DuckDB reacts to one by
+# invalidating its whole database. That verdict is about the SERVER, so we keep the message but throw a type
+# that does not condemn the CLIENT's database along with it. Arm the server to fail its next checkpoint:
+statement ok
+from quack_query({server}, 'attach ''{TEST_DIR}/fatal.db'' as f; create table f.t as select 42 i')
+
+statement ok
+from quack_query({server}, 'pragma debug_checkpoint_abort=''before_header''')
+
+# the abort trips on whichever write reaches the header first (the insert's own flush, or the checkpoint), so
+# assert only what is invariant: whatever the server raised, it arrives as a FATAL that happened THERE
+statement error
+from quack_query({server}, 'insert into f.t values (43); checkpoint f;')
+----
+Invalid Input Error: FATAL Error on the Quack server:
+
+# the FATAL invalidated the SERVER's database. Ours is untouched and stays fully usable - rethrowing the
+# FatalException verbatim would have condemned this database along with the server's.
+query I
+select 42
+----
+42

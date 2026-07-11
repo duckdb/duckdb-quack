@@ -4,6 +4,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/valid_checker.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
 #include "duckdb/storage/temporary_file_manager.hpp"
@@ -493,8 +494,29 @@ bool MessageRequiresConnection(MessageType type) {
 	}
 }
 
-// main switcheroo happens here
 unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
+	unique_ptr<QuackMessage> response;
+	try {
+		response = DispatchMessage(read_stream);
+	} catch (std::exception &ex) {
+		// The message could not even be decoded (an exception raised while HANDLING one is caught below, where
+		// it can still be logged). Letting it escape to httplib would make it an HTTP 500, which the client can
+		// only report as a transport failure ("Failed to send message").
+		response = make_uniq<ErrorResponse>(ErrorData(ex));
+	} catch (...) {
+		response = make_uniq<ErrorResponse>("Unknown error while handling request");
+	}
+	if (response->Type() == MessageType::ERROR_RESPONSE) {
+		// Tell the client whether we are still usable at all. Ask the database itself rather than guessing from
+		// the exception type - it is the one that decides it has been invalidated.
+		auto db = db_ptr.lock();
+		response->Cast<ErrorResponse>().SetMustInvalidate(!db || ValidChecker::IsInvalidated(*db));
+	}
+	return response;
+}
+
+// main switcheroo happens here
+unique_ptr<QuackMessage> QuackServer::DispatchMessage(MemoryStream &read_stream) {
 	auto db = db_ptr.lock();
 	if (!db) {
 		return make_uniq<ErrorResponse>("Database was closed");
@@ -540,8 +562,14 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
 		}
 	}
 
-	// process the message
-	auto response = HandleMessageInternal(*db, *received_message, connection);
+	// process the message - an exception raised while handling it becomes the response, so that it reaches the
+	// client with the type and message it was raised with (and still shows up in the log below)
+	unique_ptr<QuackMessage> response;
+	try {
+		response = HandleMessageInternal(*db, *received_message, connection);
+	} catch (std::exception &ex) {
+		response = make_uniq<ErrorResponse>(ErrorData(ex));
+	}
 
 	if (should_log) {
 		auto duration_ms = QuackNowMillis() - start_time;
