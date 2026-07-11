@@ -54,28 +54,47 @@ insert into rpc.checked select i from range(60000) t(i)
 ----
 Constraint Error: CHECK constraint failed
 
-statement ok
-detach rpc
-
-# A FATAL error says the process that raised it is no longer trustworthy: DuckDB reacts to one by
-# invalidating its whole database. That verdict is about the SERVER, so we keep the message but throw a type
-# that does not condemn the CLIENT's database along with it. Arm the server to fail its next checkpoint:
+# A failed checkpoint on an ATTACHED database is scoped to that database: DuckDB invalidates only it and
+# raises an IOException (it invalidates the whole instance, with a FatalException, only for the initial
+# database - see SingleFileStorageManager::CheckpointDatabase). Arm the server to fail its next checkpoint:
 statement ok
 from quack_query({server}, 'attach ''{TEST_DIR}/fatal.db'' as f; create table f.t as select 42 i')
 
 statement ok
 from quack_query({server}, 'pragma debug_checkpoint_abort=''before_header''')
 
-# the abort trips on whichever write reaches the header first (the insert's own flush, or the checkpoint), so
-# assert only what is invariant: whatever the server raised, it arrives as a FATAL that happened THERE
-statement error
-from quack_query({server}, 'insert into f.t values (43); checkpoint f;')
-----
-Invalid Input Error: FATAL Error on the Quack server:
+# raise the WAL threshold first, so the insert cannot autocheckpoint on its own: the explicit CHECKPOINT is
+# then the only thing that can trip the abort, and the error arrives unwrapped rather than nested inside the
+# "COMMIT succeeded but the autocheckpoint failed" message.
+statement ok
+from quack_query({server}, 'set wal_autocheckpoint=''1TB''')
 
-# the FATAL invalidated the SERVER's database. Ours is untouched and stays fully usable - rethrowing the
-# FatalException verbatim would have condemned this database along with the server's.
+statement ok
+from quack_query({server}, 'insert into f.t values (43)')
+
+# the type survives the wire: an IO Error stays an IO Error, and names the database it was scoped to
+statement error
+from quack_query({server}, 'checkpoint f')
+----
+IO Error: Checkpoint failed for database "f". The database has been invalidated.
+
+# our own database is untouched and stays fully usable
 query I
 select 42
 ----
 42
+
+# and so is the SERVER's own database - only the attached "f" died, so rpc still answers
+query I
+select count(*) from rpc.checked
+----
+0
+
+statement ok
+detach rpc
+
+# NOTE: this test no longer covers the whole-server-invalidation path (the must_invalidate flag on
+# ErrorResponse, and the client-side "this attached database is gone with it" fallback). Reaching it needs a
+# FATAL on the server's INITIAL database, which the test harness cannot arrange: quack_serve runs on the same
+# in-memory DuckDB instance as the client, because sqllogictest's named connections ("quack_db:foo") are all
+# connections to the one runner database, not separate instances. That behaviour is currently untested.

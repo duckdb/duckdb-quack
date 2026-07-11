@@ -499,16 +499,16 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
 	try {
 		response = DispatchMessage(read_stream);
 	} catch (std::exception &ex) {
-		// The message could not even be decoded (an exception raised while HANDLING one is caught below, where
-		// it can still be logged). Letting it escape to httplib would make it an HTTP 500, which the client can
-		// only report as a transport failure ("Failed to send message").
+		// Letting this escape to httplib would make it an HTTP 500, which the client can only report as a
+		// transport failure ("Failed to send message"). Exceptions from HANDLING a message are caught below,
+		// where they can still be logged; this catches the ones from decoding it.
 		response = make_uniq<ErrorResponse>(ErrorData(ex));
 	} catch (...) {
 		response = make_uniq<ErrorResponse>("Unknown error while handling request");
 	}
 	if (response->Type() == MessageType::ERROR_RESPONSE) {
-		// Tell the client whether we are still usable at all. Ask the database itself rather than guessing from
-		// the exception type - it is the one that decides it has been invalidated.
+		// tell the client whether we are still usable - ask the database rather than guess from the exception
+		// type, it is the one that decides it has been invalidated
 		auto db = db_ptr.lock();
 		response->Cast<ErrorResponse>().SetMustInvalidate(!db || ValidChecker::IsInvalidated(*db));
 	}
@@ -520,6 +520,13 @@ unique_ptr<QuackMessage> QuackServer::DispatchMessage(MemoryStream &read_stream)
 	auto db = db_ptr.lock();
 	if (!db) {
 		return make_uniq<ErrorResponse>("Database was closed");
+	}
+	if (ValidChecker::IsInvalidated(*db)) {
+		// bail out before touching the database: the authentication query cannot run either, so a client
+		// reconnecting to an invalidated server would otherwise be told its token was rejected
+		return make_uniq<ErrorResponse>("The server database has been invalidated and the server must be "
+		                                "restarted before it can be used again. Original error: \"%s\"",
+		                                ValidChecker::Get(*db).InvalidatedMessage());
 	}
 	auto &logger = Logger::Get(*db);
 	bool should_log = logger.ShouldLog(QuackLogType::NAME, QuackLogType::LEVEL);
@@ -562,8 +569,8 @@ unique_ptr<QuackMessage> QuackServer::DispatchMessage(MemoryStream &read_stream)
 		}
 	}
 
-	// process the message - an exception raised while handling it becomes the response, so that it reaches the
-	// client with the type and message it was raised with (and still shows up in the log below)
+	// an exception raised while handling the message becomes the response, so it reaches the client with the
+	// type it was raised with (and still shows up in the log below)
 	unique_ptr<QuackMessage> response;
 	try {
 		response = HandleMessageInternal(*db, *received_message, connection);

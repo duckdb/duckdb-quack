@@ -185,12 +185,11 @@ unique_ptr<QuackMessage> QuackMessage::DeserializeMessage(BinaryDeserializer &de
 }
 
 //! Extra info that must not cross the wire, because it describes the process that raised the error:
-//! - exception_type / exception_message are reserved by the JSON error encoding (ExceptionToJSONMap asserts
-//!   on them), and a peer that sent them would overwrite the very type and message we decoded
+//! - exception_type / exception_message are reserved by ExceptionToJSONMap (it asserts on them), and a peer
+//!   sending them would overwrite the type and message we decoded
 //! - position is an offset into the SERVER's SQL - the client would point a caret into its own statement
-//!   (query errors have theirs folded into the message by the server already)
-//! - a stack trace holds frames of the server process: useless to the client, and it would hand out the
-//!   layout of the server binary to anyone who can trigger an error
+//! - a stack trace holds frames of the server process, and would hand out the layout of the server binary to
+//!   anyone who can trigger an error
 static bool IsTransferableErrorInfo(const string &key) {
 	static const char *const NON_TRANSFERABLE[] = {"exception_type", "exception_message", "position", "stack_trace",
 	                                               "stack_trace_pointers"};
@@ -212,9 +211,8 @@ static unordered_map<string, string> TransferableErrorInfo(const unordered_map<s
 	return result;
 }
 
-//! DuckDB invalidates its whole DatabaseInstance when it sees one of these (client_context.cpp): they say
-//! the process that raised them is no longer trustworthy. That verdict is about the SERVER, so rethrowing
-//! one verbatim would let a broken server poison THIS database - keep the message, drop the severity.
+//! DuckDB invalidates the whole DatabaseInstance when it sees one of these (client_context.cpp). That verdict
+//! is about the SERVER, so rethrowing one verbatim would let a broken server poison THIS database.
 static bool InvalidatesDatabase(ExceptionType type) {
 	return type == ExceptionType::INTERNAL || Exception::InvalidatesDatabase(type);
 }
@@ -235,8 +233,7 @@ unique_ptr<ErrorResponse> ErrorResponse::FromWire(const string &message, const s
                                                   bool must_invalidate) {
 	auto type = Exception::StringToExceptionType(exception_type);
 	if (type == ExceptionType::INVALID) {
-		// the peer named an exception type this DuckDB does not know (it may run a different version), or sent
-		// no type at all - fall back to the type quack has always thrown for remote errors
+		// the peer sent no type, or one this DuckDB does not know (it may run a different version)
 		type = ExceptionType::INVALID_INPUT;
 	}
 	// the peer controls this map, so filter it here too and not just on the way out
@@ -244,9 +241,7 @@ unique_ptr<ErrorResponse> ErrorResponse::FromWire(const string &message, const s
 
 	auto raw_message = message;
 	if (InvalidatesDatabase(type)) {
-		// The server condemned ITS database. Say so in the message for a human, and keep the type it raised in
-		// the extra info for a caller that wants to branch on it - but throw a type that does not make DuckDB
-		// condemn OUR database along with it. (`must_invalidate` carries the actionable half of this.)
+		// downgrade to a type that does not invalidate OUR database, keeping the original one in the extra info
 		received_info[QuackErrorInfo::ORIGINAL_EXCEPTION_TYPE] = Exception::ExceptionTypeToString(type);
 		raw_message =
 		    StringUtil::Format("%s Error on the Quack server: %s", Exception::ExceptionTypeToString(type), raw_message);
@@ -258,7 +253,7 @@ unique_ptr<ErrorResponse> ErrorResponse::FromWire(const string &message, const s
 	if (received_info.empty()) {
 		result->error = ErrorData(type, raw_message);
 	} else {
-		// ErrorData has no setter for its extra info: its JSON constructor is the only way to restore it
+		// ErrorData has no setter for its extra info: the JSON constructor is the only way to restore it
 		result->error = ErrorData(StringUtil::ExceptionToJSONMap(type, raw_message, received_info));
 	}
 	return result;
