@@ -1,0 +1,74 @@
+# name: test/sql/rpc_duplicate_columns.test
+# description: a remote query with duplicate output column names binds (names are deduplicated)
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+statement ok con1
+call quack_serve('quack:localhost', token='asdf');
+
+statement ok con2
+create secret (type quack, token 'asdf')
+
+# Duplicate names are legal in the remote query - the second one is renamed to x_1.
+query II con2
+SELECT * FROM quack_query('quack:localhost', 'SELECT 1 AS x, 2 AS x');
+----
+1	2
+
+query I con2
+SELECT x FROM quack_query('quack:localhost', 'SELECT 1 AS x, 2 AS x');
+----
+1
+
+query I con2
+SELECT x_1 FROM quack_query('quack:localhost', 'SELECT 1 AS x, 2 AS x');
+----
+2
+
+# Three-way duplicate, interleaved with a distinct column: x, y, x_1, x_2.
+query IIII con2
+SELECT * FROM quack_query('quack:localhost', 'SELECT 1 AS x, 2 AS y, 3 AS x, 4 AS x');
+----
+1	2	3	4
+
+query II con2
+SELECT x_2, y FROM quack_query('quack:localhost', 'SELECT 1 AS x, 2 AS y, 3 AS x, 4 AS x');
+----
+4	2
+
+# Duplicates that come from unaliased expressions on the server side.
+query II con2
+SELECT * FROM quack_query('quack:localhost', 'SELECT 42, 42');
+----
+42	42
+
+# Same via the catalog path: quack_query_by_name.
+statement ok con2
+attach 'quack:localhost' as q (type quack);
+
+query II con2
+SELECT * FROM quack_query_by_name('q', 'SELECT 1 AS x, 2 AS x');
+----
+1	2
+
+query II con2
+SELECT x_1, x FROM quack_query_by_name('q', 'SELECT 1 AS x, 2 AS x');
+----
+2	1
+
+# The catalog `query` table macro wraps quack_query_by_name.
+query II con2
+FROM q.query('SELECT 1 AS x, 2 AS x');
+----
+1	2
+
+statement ok con2
+detach q;
+
+statement ok con1
+call quack_stop('quack:localhost');
