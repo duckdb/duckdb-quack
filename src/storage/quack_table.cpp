@@ -25,16 +25,17 @@ QuackTableSet::QuackTableSet(ClientContext &context, QuackSchemaCatalogEntry &pa
                              const QuackLoadCatalogData &load_data)
     : QuackCatalogSet(parent.ParentCatalog().Cast<QuackCatalog>()), schema(parent) {
 	for (auto &row : load_data.tables->Rows()) {
-		auto schema_name = row.GetValue(0).GetValue<string>();
-		if (schema_name != parent.name) {
+		auto catalog_name = row.GetValue(0).GetValue<string>();
+		auto schema_name = row.GetValue(1).GetValue<string>();
+		if (catalog_name != parent.SourceCatalogName() || schema_name != parent.name) {
 			// does not belong to this schema
 			continue;
 		}
 		// parse the SQL to get the table definition
-		auto type = row.GetValue(2).GetValue<string>();
+		auto type = row.GetValue(3).GetValue<string>();
 		unique_ptr<CatalogEntry> entry;
 		if (type == "table") {
-			auto sql = row.GetValue(1).GetValue<string>();
+			auto sql = row.GetValue(2).GetValue<string>();
 			auto info = ParseCreateTable(sql);
 			if (info->type != CatalogType::TABLE_ENTRY) {
 				throw InternalException("Expected a CREATE TABLE");
@@ -45,12 +46,12 @@ QuackTableSet::QuackTableSet(ClientContext &context, QuackSchemaCatalogEntry &pa
 			auto table = make_uniq<QuackTableCatalogEntry>(catalog, parent, bound_info->Base());
 			entry = std::move(table);
 		} else {
-			auto view_name = row.GetValue(1).GetValue<string>();
+			auto view_name = row.GetValue(2).GetValue<string>();
 			// bind a remote procedure call to the view on the server side
 			// we don't actually care what the view contains server-side, we just treat it like an opaque object we can
 			// query
 			CreateViewInfo info(schema, view_name);
-			info.sql = QuackViewCatalogEntry::CreateViewSQL(catalog.GetName(), schema.name, view_name);
+			info.sql = QuackViewCatalogEntry::CreateViewSQL(catalog.GetName(), catalog_name, schema.name, view_name);
 			info.query = CreateViewInfo::ParseSelect(info.sql);
 
 			// bind to resolve the types
@@ -67,10 +68,10 @@ QuackTableSet::QuackTableSet(QuackSchemaCatalogEntry &parent)
 
 string QuackTableSet::GetLoadQuery() {
 	return R"(
-SELECT schema_name, sql, 'table'
+SELECT database_name, schema_name, sql, 'table'
 FROM duckdb_tables()
 UNION ALL
-SELECT schema_name, view_name, 'view'
+SELECT database_name, schema_name, view_name, 'view'
 FROM duckdb_views()
 	)";
 }
@@ -79,6 +80,8 @@ TableFunction QuackTableCatalogEntry::GetScanFunction(ClientContext &context, un
 	auto &quack_catalog = catalog.Cast<QuackCatalog>();
 	auto bind_data = make_uniq<QuackScanBindData>();
 	bind_data->client_connection = quack_catalog.GetClientConnection();
+	bind_data->catalog_name = schema.Cast<QuackSchemaCatalogEntry>().SourceCatalogName();
+	bind_data->schema_name = schema.name;
 	bind_data->table_name = name;
 	for (auto &col : GetColumns().Physical()) {
 		bind_data->column_names.push_back(col.Name());

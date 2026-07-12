@@ -13,6 +13,7 @@ void AppendRequestMessage::Serialize(Serializer &serializer) const {
 	serializer.WritePropertyWithDefault<string>(1, "schema_name", schema_name);
 	serializer.WritePropertyWithDefault<string>(2, "table_name", table_name);
 	serializer.WritePropertyWithDefault<unique_ptr<DataChunkWrapper>>(3, "append_chunk", append_chunk);
+	serializer.WritePropertyWithDefault<string>(4, "catalog_name", catalog_name);
 }
 
 unique_ptr<AppendRequestMessage> AppendRequestMessage::Deserialize(Deserializer &deserializer) {
@@ -20,6 +21,7 @@ unique_ptr<AppendRequestMessage> AppendRequestMessage::Deserialize(Deserializer 
 	deserializer.ReadPropertyWithDefault<string>(1, "schema_name", result->schema_name);
 	deserializer.ReadPropertyWithDefault<string>(2, "table_name", result->table_name);
 	deserializer.ReadPropertyWithDefault<unique_ptr<DataChunkWrapper>>(3, "append_chunk", result->append_chunk);
+	deserializer.ReadPropertyWithDefault<string>(4, "catalog_name", result->catalog_name);
 	return result;
 }
 
@@ -133,8 +135,7 @@ unique_ptr<PrepareResponseMessage> PrepareResponseMessage::Deserialize(Deseriali
 	auto needs_more_fetch = deserializer.ReadPropertyWithDefault<bool>(3, "needs_more_fetch");
 	auto results = deserializer.ReadPropertyWithDefault<vector<unique_ptr<DataChunkWrapper>>>(4, "results");
 	auto result_uuid = deserializer.ReadProperty<hugeint_t>(5, "result_uuid");
-	auto result = duckdb::unique_ptr<PrepareResponseMessage>(new PrepareResponseMessage(
-	    std::move(result_types), std::move(result_names), std::move(results), needs_more_fetch, result_uuid));
+	auto result = duckdb::unique_ptr<PrepareResponseMessage>(new PrepareResponseMessage(std::move(result_types), std::move(result_names), std::move(results), needs_more_fetch, result_uuid));
 	return result;
 }
 

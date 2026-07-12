@@ -112,6 +112,11 @@
         "id": 3,
         "name": "append_chunk",
         "type": "unique_ptr<DataChunkWrapper>"
+      },
+      {
+        "id": 4,
+        "name": "catalog_name",
+        "type": "string"
       }
     ]
   },
@@ -181,4 +186,3 @@
     ]
   }
 ]
-
