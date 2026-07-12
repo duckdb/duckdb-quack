@@ -158,11 +158,12 @@ struct QuackScanGlobalState : GlobalTableFunctionState {
 	vector<idx_t> projection_ids;
 	atomic<bool> needs_more_fetch;
 	hugeint_t result_uuid;
-	//! How chunks fetched AFTER the initial batch must be treated. When the scan was
-	//! executed via a server-side pushdown query (catalog table scan), fetched chunks
-	//! already have the projection applied. When the scan consumes a bind-time result
-	//! (quack_query / quack_query_by_name, incl. ATTACH'd views), fetched chunks are
-	//! full-width continuations and still require client-side pushdown.
+	//! How EVERY chunk of this scan must be treated - the initial batch and all fetched
+	//! continuation batches alike. PUSHDOWN_ALREADY_APPLIED only when the server-side query
+	//! actually carried the projection, i.e. when BuildPushdownQuery emitted a SELECT list.
+	//! Bind-time results (quack_query / quack_query_by_name, incl. ATTACH'd views) arrive
+	//! full-width and are projected client-side, as does a catalog scan whose pushdown query
+	//! degraded to a full-width "FROM <table>".
 	ChunkResultPushdownType fetch_pushdown_type;
 
 	vector<ChunkResult> TryGetResults() {
@@ -254,11 +255,17 @@ unique_ptr<GlobalTableFunctionState> QuackScanInitGlobal(ClientContext &context,
 	vector<ChunkResult> results;
 	bool needs_more_fetch = bind_data.needs_more_fetch;
 	hugeint_t result_uuid;
-	auto fetch_pushdown_type = bind_data.table_name.empty() ? ChunkResultPushdownType::REQUIRES_PUSHDOWN
-	                                                        : ChunkResultPushdownType::PUSHDOWN_ALREADY_APPLIED;
+	// Derive the pushdown tag ONCE, from the only thing that decides it: whether the query we
+	// send to the server carries the projection. BuildPushdownQuery only emits a SELECT list
+	// when column_indexes is non-empty - with an empty one it degrades to a full-width
+	// "FROM <table>", which still needs client-side pushdown like any bind-time result.
+	auto fetch_pushdown_type = ChunkResultPushdownType::REQUIRES_PUSHDOWN;
 	if (!bind_data.table_name.empty()) {
 		// apply pushdown to the query
 		auto query = BuildPushdownQuery(bind_data, input);
+		if (!input.column_indexes.empty()) {
+			fetch_pushdown_type = ChunkResultPushdownType::PUSHDOWN_ALREADY_APPLIED;
+		}
 		auto &client_connection = *bind_data.client_connection;
 		auto client_wrapper = client_connection.GetClient(context);
 		auto &client = client_wrapper->GetClient();
@@ -268,13 +275,13 @@ unique_ptr<GlobalTableFunctionState> QuackScanInitGlobal(ClientContext &context,
 		// fetch the result
 		for (auto &chunk_ref : response_message->MutableResults()) {
 			auto &chunk = chunk_ref->Chunk();
-			results.emplace_back(chunk, ChunkResultPushdownType::PUSHDOWN_ALREADY_APPLIED);
+			results.emplace_back(chunk, fetch_pushdown_type);
 		}
 		result_uuid = response_message->ResultUUID();
 	} else {
 		for (auto &chunk_ref : bind_data.results) {
 			auto &chunk = chunk_ref->Chunk();
-			results.emplace_back(chunk, ChunkResultPushdownType::REQUIRES_PUSHDOWN);
+			results.emplace_back(chunk, fetch_pushdown_type);
 		}
 		result_uuid = bind_data.result_uuid;
 	}
