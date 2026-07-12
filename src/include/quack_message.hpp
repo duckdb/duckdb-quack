@@ -119,13 +119,20 @@ class PrepareRequestMessage : public QuackMessage {
 public:
 	static constexpr MessageType TYPE = MessageType::PREPARE_REQUEST;
 
-	PrepareRequestMessage(string connection_id_p, string sql_query_p)
-	    : QuackMessage(TYPE, std::move(connection_id_p)), sql_query(std::move(sql_query_p)) {
+	PrepareRequestMessage(string connection_id_p, string sql_query_p, vector<Value> parameters_p = {})
+	    : QuackMessage(TYPE, std::move(connection_id_p)), sql_query(std::move(sql_query_p)),
+	      parameters(std::move(parameters_p)) {
 	}
 
 public:
 	const string &Query() const {
 		return sql_query;
+	}
+	vector<Value> &Parameters() {
+		return parameters;
+	}
+	const vector<Value> &Parameters() const {
+		return parameters;
 	}
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<PrepareRequestMessage> Deserialize(Deserializer &deserializer);
@@ -136,6 +143,7 @@ protected:
 
 private:
 	string sql_query;
+	vector<Value> parameters;
 };
 
 class PrepareResponseMessage : public QuackMessage {

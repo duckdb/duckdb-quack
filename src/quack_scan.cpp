@@ -23,6 +23,10 @@ static unique_ptr<FunctionData> QuackScanBind(ClientContext &context, TableFunct
 	}
 
 	auto query = input.inputs[1].GetValue<string>();
+	vector<Value> parameters;
+	for (idx_t i = 2; i < input.inputs.size(); i++) {
+		parameters.push_back(input.inputs[i]);
+	}
 	auto initial_uri = QuackUri(input.inputs[0].GetValue<string>());
 
 	// no ssl on local by default
@@ -47,7 +51,7 @@ static unique_ptr<FunctionData> QuackScanBind(ClientContext &context, TableFunct
 	auto &client = client_wrapper->GetClient();
 
 	auto bind_response = client.Request<PrepareResponseMessage>(
-	    context, make_uniq<PrepareRequestMessage>(client_connection.ConnectionId(), query));
+	    context, make_uniq<PrepareRequestMessage>(client_connection.ConnectionId(), query, std::move(parameters)));
 
 	return_types = bind_response->Types();
 	names = bind_response->Names();
@@ -88,12 +92,17 @@ static unique_ptr<FunctionData> QuackScanBindCatalogName(ClientContext &context,
 	// TODO some of this stuff below is duplicated af
 
 	auto query = input.inputs[1].GetValue<string>();
+	vector<Value> parameters;
+	for (idx_t i = 2; i < input.inputs.size(); i++) {
+		parameters.push_back(input.inputs[i]);
+	}
 	auto bind_data = make_uniq<QuackScanBindData>();
 	bind_data->client_connection = catalog.GetClientConnection();
 	auto client_wrapper = bind_data->client_connection->GetClient(context);
 	auto &client = client_wrapper->GetClient();
 	auto bind_response = client.Request<PrepareResponseMessage>(
-	    context, make_uniq<PrepareRequestMessage>(bind_data->client_connection->ConnectionId(), query));
+	    context,
+	    make_uniq<PrepareRequestMessage>(bind_data->client_connection->ConnectionId(), query, std::move(parameters)));
 
 	return_types = bind_response->Types();
 	names = bind_response->Names();
@@ -375,6 +384,7 @@ TableFunction QuackScanFunction::GetFunction() {
 	                         QuackScanInitGlobal, QuackScanInitLocal);
 	fun.named_parameters["disable_ssl"] = LogicalType::BOOLEAN;
 	fun.named_parameters["token"] = LogicalType::VARCHAR;
+	fun.varargs = LogicalType::ANY;
 
 	fun.projection_pushdown = true;
 	fun.get_partition_data = QuackScanGetPartitionData;
@@ -389,6 +399,7 @@ TableFunction QuackScanFunction::GetFunction() {
 TableFunction QuackScanByNameFunction::GetFunction() {
 	auto fun = TableFunction("quack_query_by_name", {LogicalType::VARCHAR, LogicalType::VARCHAR}, QuackScan,
 	                         QuackScanBindCatalogName, QuackScanInitGlobal, QuackScanInitLocal);
+	fun.varargs = LogicalType::ANY;
 	fun.projection_pushdown = true;
 	fun.get_partition_data = QuackScanGetPartitionData;
 	fun.to_string = QuackScanToString;
