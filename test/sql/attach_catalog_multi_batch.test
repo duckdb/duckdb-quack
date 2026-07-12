@@ -1,0 +1,52 @@
+# name: test/sql/attach_catalog_multi_batch.test
+# description: the catalog-load query must be drained across fetch batches.
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+# one chunk per fetch batch: the catalog listing no longer fits in the PREPARE response
+statement ok
+set global quack_fetch_batch_chunks=1;
+
+foreach server 'quack:localhost'
+
+statement ok con1
+call quack_serve({server}, token='asdf');
+
+# a table AND a view: >= 2 chunks out of the UNION ALL, so the listing spans batches
+statement ok
+create table t1 as select i, i * 2 as j from range(10) t(i);
+
+statement ok
+create view v1 as select i, i * 2 as j from range(10) t(i);
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+# before the fix: "Catalog Error: Table with name v1 does not exist!" - the view was dropped
+# from the catalog because its row arrived in the second chunk
+query II
+select count(*), sum(i) from rpc.v1
+----
+10	45
+
+query II
+select count(*), sum(i) from rpc.t1
+----
+10	45
+
+# binding rpc.v1 / rpc.t1 above IS the catalog lookup that used to fail: an entry dropped from
+# the load never becomes a CatalogEntry, so the scan cannot even be bound. (duckdb_tables() and
+# duckdb_views() do not list entries of an attached quack catalog, so they cannot check this.)
+
+statement ok con2
+detach rpc;
+
+statement ok con1
+call quack_stop({server});
+
+endloop
