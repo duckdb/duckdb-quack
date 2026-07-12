@@ -1,0 +1,62 @@
+# name: test/sql/attach_table_fetch_projection.test
+# description: projected scan of an attached TABLE whose result spans multiple fetch batches.
+#              This is the catalog path: the projection is applied server-side by
+#              BuildPushdownQuery, so every chunk arrives already narrowed and is tagged
+#              PUSHDOWN_ALREADY_APPLIED. Coverage, not a red/green regression guard - this path
+#              is correct before and after the pushdown-tag change. It exists because that tag
+#              holds only while BuildPushdownQuery actually emits a SELECT list, and nothing
+#              else in the suite scans a real table across more than one fetch batch.
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+# force tiny fetch batches so even a small table spans many FETCH responses
+statement ok
+set global quack_fetch_batch_chunks=1;
+
+foreach server 'quack:localhost'
+
+statement ok con1
+call quack_serve({server}, token='asdf');
+
+# NOTE: deliberately no view in this database. With a small fetch batch, a catalog holding both
+# a table and a view loses the view entirely (QuackCatalog::ExecuteCommandInternal reads only the
+# PREPARE batch of the catalog-load query and never FETCHes the rest - see its own FIXME). That
+# is a separate, pre-existing bug; keep it out of this test so a failure here means THIS bug.
+statement ok
+create table big_tbl as select i, i * 2 as j, 'payload_' || i as k from range(100_000) t(i);
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+# no columns needed by the query: the planner still binds one column, so the pushdown query
+# keeps a SELECT list and the chunks really are already projected
+query I
+select count(*) from rpc.big_tbl
+----
+100000
+
+# narrowing projection: output is narrower than the table
+query II
+select count(*), sum(i) from rpc.big_tbl
+----
+100000	4999950000
+
+# equal-width PERMUTATION: the silent failure mode. A mis-tagged chunk would not raise here -
+# DataChunk::Reference succeeds and the columns simply come back swapped.
+query IIII
+select min(j), max(j), min(i), max(i) from (select j, i from rpc.big_tbl)
+----
+0	199998	0	99999
+
+statement ok con2
+detach rpc;
+
+statement ok con1
+call quack_stop({server});
+
+endloop

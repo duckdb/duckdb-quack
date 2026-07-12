@@ -25,10 +25,6 @@ call quack_serve({server}, token='asdf');
 statement ok
 create view big_view as select i, i * 2 as j, 'payload_' || i as k from range(100_000) t(i);
 
-# same shape as a real table: exercises the catalog path (server-side pushdown), see below
-statement ok
-create table big_tbl as select i, i * 2 as j, 'payload_' || i as k from range(100_000) t(i);
-
 statement ok
 attach {server} as rpc (token 'asdf')
 
@@ -50,29 +46,6 @@ select count(*), sum(i) from quack_query({server}, 'from big_view', token='asdf'
 # columns swapped and the query returns plausible but WRONG numbers instead of raising.
 query IIII
 select min(j), max(j), min(i), max(i) from (select j, i from rpc.big_view)
-----
-0	199998	0	99999
-
-# The catalog path (ATTACH'd real TABLE) projects server-side via BuildPushdownQuery, so it is
-# tagged PUSHDOWN_ALREADY_APPLIED. Coverage, not a regression guard - this path is correct both
-# before and after. It exists because the tag is only true while BuildPushdownQuery emits a
-# SELECT list, and nothing else in the suite scans a real table across multiple fetch batches.
-
-# no columns needed: the planner still binds one column, so the pushdown query stays projected
-query I
-select count(*) from rpc.big_tbl
-----
-100000
-
-# narrowing projection
-query II
-select count(*), sum(i) from rpc.big_tbl
-----
-100000	4999950000
-
-# permuted projection over the catalog path
-query IIII
-select min(j), max(j), min(i), max(i) from (select j, i from rpc.big_tbl)
 ----
 0	199998	0	99999
 
