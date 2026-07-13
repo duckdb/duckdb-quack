@@ -316,12 +316,30 @@ static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChu
 				if (!chunk.RequiresPushdown()) {
 					output.Reference(response_chunk);
 				} else {
-					for (idx_t i = 0; i < global_state.column_ids.size(); i++) {
-						auto &index = global_state.column_ids[i];
+					// With filter_prune, projection_ids indexes into column_ids and lists only the
+					// columns that reach the output - filter-only columns stay in column_ids but are
+					// not emitted. Without it, projection_ids is empty and the output IS column_ids.
+					// filter_prune is currently disabled, so the projection_ids branch is not reachable
+					// yet; it is written now so that enabling it cannot silently reintroduce the
+					// full-width overrun this loop exists to prevent.
+					auto &projection_ids = global_state.projection_ids;
+					auto output_columns =
+					    projection_ids.empty() ? global_state.column_ids.size() : projection_ids.size();
+					for (idx_t i = 0; i < output_columns; i++) {
+						auto &index = projection_ids.empty() ? global_state.column_ids[i]
+						                                     : global_state.column_ids[projection_ids[i]];
 						if (index.IsVirtualColumn()) {
-							// TODO
+							// Materialize as NULL, exactly as BuildPushdownQuery does for the server-side
+							// path - keep the two in step. Note `continue`, not `return`: returning here
+							// skipped SetCardinality, and a cardinality of 0 reads to DuckDB as
+							// end-of-scan, i.e. a silently EMPTY result rather than an error.
+							auto virtual_column = index.GetPrimaryIndex();
+							if (virtual_column != COLUMN_IDENTIFIER_EMPTY &&
+							    virtual_column != COLUMN_IDENTIFIER_ROW_ID) {
+								throw InternalException("Unsupported virtual column index");
+							}
 							output.data[i].Reference(Value(output.data[i].GetType()));
-							return;
+							continue;
 						}
 						auto col_idx = index.GetPrimaryIndex();
 						output.data[i].Reference(response_chunk.data[col_idx]);
