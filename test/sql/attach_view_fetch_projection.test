@@ -1,11 +1,5 @@
 # name: test/sql/attach_view_fetch_projection.test
-# description: projected scan of an attached view whose result spans multiple fetch batches,
-#              reached the way a user reaches it: by sheer result size, at the default batch size.
-#              Regression test: continuation batches of a bind-time result were tagged
-#              PUSHDOWN_ALREADY_APPLIED and referenced full-width into the projected output
-#              chunk ("INTERNAL Error: Attempted to access index N within vector of size N").
-#              See attach_view_fetch_projection_batch_chunks.test for the same path forced
-#              directly via quack_fetch_batch_chunks, plus the permuted-projection case.
+# description: projected scan of an attached view spanning multiple fetch batches, by result size
 # group: [sql]
 
 require quack

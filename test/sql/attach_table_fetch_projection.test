@@ -1,11 +1,5 @@
 # name: test/sql/attach_table_fetch_projection.test
-# description: projected scan of an attached TABLE whose result spans multiple fetch batches.
-#              This is the catalog path: the projection is applied server-side by
-#              BuildPushdownQuery, so every chunk arrives already narrowed and is tagged
-#              PUSHDOWN_ALREADY_APPLIED. Coverage, not a red/green regression guard - this path
-#              is correct before and after the pushdown-tag change. It exists because that tag
-#              holds only while BuildPushdownQuery actually emits a SELECT list, and nothing
-#              else in the suite scans a real table across more than one fetch batch.
+# description: server-side projected scan of an attached TABLE across multiple fetch batches
 # group: [sql]
 
 require quack

@@ -1,12 +1,5 @@
 # name: test/sql/attach_view_fetch_projection_batch_chunks.test
-# description: projected scan of an attached view whose result spans multiple fetch batches,
-#              forced directly by shrinking the FETCH batch to a single chunk rather than by
-#              growing the result - same code path as attach_view_fetch_projection.test, but
-#              targeted at the mechanism instead of reaching it through data volume.
-#              Regression test: continuation batches of a bind-time result were tagged
-#              PUSHDOWN_ALREADY_APPLIED and referenced full-width into the projected output
-#              chunk ("INTERNAL Error: Attempted to access index N within vector of size N",
-#              or a Vector::Reference type mismatch depending on the view's schema).
+# description: projected scan of an attached view spanning multiple fetch batches, by batch size
 # group: [sql]
 
 require quack
