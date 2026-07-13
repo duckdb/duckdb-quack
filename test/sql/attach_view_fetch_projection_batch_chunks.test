@@ -52,6 +52,17 @@ select min(j), max(j), min(i), max(i) from (select j, i from rpc.big_view)
 ----
 0	199998	0	99999
 
+# A projection that is narrower AND mixes types raises a different error than the width-1 case
+# above: DataChunk::Reference iterates over the SOURCE width, so output slot 1 - the VARCHAR k -
+# is handed the source's j, a BIGINT. This is the shape users actually reported (#199):
+#   INTERNAL Error: Vector::Reference used on vector of different type
+#                   (source VARCHAR referenced BIGINT)
+# The width-1 projections above cannot produce it; they run off the end of the output instead.
+query II
+select count(*), max(k) from (select i, k from rpc.big_view)
+----
+100000	payload_99999
+
 statement ok con2
 detach rpc;
 
