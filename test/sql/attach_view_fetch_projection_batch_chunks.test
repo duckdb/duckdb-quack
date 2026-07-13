@@ -1,0 +1,61 @@
+# name: test/sql/attach_view_fetch_projection_batch_chunks.test
+# description: projected scan of an attached view whose result spans multiple fetch batches,
+#              forced directly by shrinking the FETCH batch to a single chunk rather than by
+#              growing the result - same code path as attach_view_fetch_projection.test, but
+#              targeted at the mechanism instead of reaching it through data volume.
+#              Regression test: continuation batches of a bind-time result were tagged
+#              PUSHDOWN_ALREADY_APPLIED and referenced full-width into the projected output
+#              chunk ("INTERNAL Error: Attempted to access index N within vector of size N",
+#              or a Vector::Reference type mismatch depending on the view's schema).
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+# force tiny fetch batches so even a small view spans many FETCH responses
+statement ok
+set global quack_fetch_batch_chunks=1;
+
+foreach server 'quack:localhost'
+
+statement ok con1
+call quack_serve({server}, token='asdf');
+
+# 3-column view so a projected scan is narrower than the wire chunks
+statement ok
+create view big_view as select i, i * 2 as j, 'payload_' || i as k from range(100_000) t(i);
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+# view scans go through quack_query_by_name (bind-time result, client-side pushdown);
+# before the fix, fetch batch 2+ crashed here
+query II
+select count(*), sum(i) from rpc.big_view
+----
+100000	4999950000
+
+# a projected multi-batch quack_query takes the same path
+query II
+select count(*), sum(i) from quack_query({server}, 'from big_view', token='asdf')
+----
+100000	4999950000
+
+# An equal-width PERMUTATION of the columns is the silent failure mode: DataChunk::Reference
+# succeeds (no bounds error, no type error), so continuation batches come back with their
+# columns swapped and the query returns plausible but WRONG numbers instead of raising.
+query IIII
+select min(j), max(j), min(i), max(i) from (select j, i from rpc.big_view)
+----
+0	199998	0	99999
+
+statement ok con2
+detach rpc;
+
+statement ok con1
+call quack_stop({server});
+
+endloop
