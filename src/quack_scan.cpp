@@ -158,12 +158,8 @@ struct QuackScanGlobalState : GlobalTableFunctionState {
 	vector<idx_t> projection_ids;
 	atomic<bool> needs_more_fetch;
 	hugeint_t result_uuid;
-	//! How EVERY chunk of this scan must be treated - the initial batch and all fetched
-	//! continuation batches alike. PUSHDOWN_ALREADY_APPLIED only when the server-side query
-	//! actually carried the projection, i.e. when BuildPushdownQuery emitted a SELECT list.
-	//! Bind-time results (quack_query / quack_query_by_name, incl. ATTACH'd views) arrive
-	//! full-width and are projected client-side, as does a catalog scan whose pushdown query
-	//! degraded to a full-width "FROM <table>".
+	//! How every chunk of this scan must be treated, initial batch and fetched continuations
+	//! alike. Derived in QuackScanInitGlobal.
 	ChunkResultPushdownType fetch_pushdown_type;
 
 	vector<ChunkResult> TryGetResults() {
@@ -255,10 +251,9 @@ unique_ptr<GlobalTableFunctionState> QuackScanInitGlobal(ClientContext &context,
 	vector<ChunkResult> results;
 	bool needs_more_fetch = bind_data.needs_more_fetch;
 	hugeint_t result_uuid;
-	// Derive the pushdown tag ONCE, from the only thing that decides it: whether the query we
-	// send to the server carries the projection. BuildPushdownQuery only emits a SELECT list
-	// when column_indexes is non-empty - with an empty one it degrades to a full-width
-	// "FROM <table>", which still needs client-side pushdown like any bind-time result.
+	// The chunks are already projected only if the query we send carries the projection, which is
+	// exactly when BuildPushdownQuery emits a SELECT list - it degrades to a full-width
+	// "FROM <table>" on an empty column_indexes.
 	auto fetch_pushdown_type = ChunkResultPushdownType::REQUIRES_PUSHDOWN;
 	if (!bind_data.table_name.empty()) {
 		// apply pushdown to the query
