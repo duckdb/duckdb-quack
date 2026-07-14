@@ -5,6 +5,7 @@ add_library(
   quack_active_connections.cpp
   quack_clear_cache.cpp
   quack_client.cpp
+  quack_compression.cpp
   quack_data_stream.cpp
   quack_extension.cpp
   quack_fetch_ahead.cpp
