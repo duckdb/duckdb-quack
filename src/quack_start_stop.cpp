@@ -1,4 +1,5 @@
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/client_context.hpp"
 
 #include "quack_startstop.hpp"
 #include "quack_storage.hpp"

@@ -1,6 +1,8 @@
 #include <thread>
 
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/attached_database.hpp"
+#include "duckdb/parser/parsed_data/attach_info.hpp"
 
 #include "quack_storage.hpp"
 #include "quack_server.hpp"

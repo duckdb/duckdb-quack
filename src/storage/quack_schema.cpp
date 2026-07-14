@@ -20,8 +20,8 @@ void QuackSchemaSet::Reload(ClientContext &context, QuackCatalog &catalog, const
 	Clear();
 	for (auto &row : load_data.schemas->Rows()) {
 		CreateSchemaInfo info;
-		info.catalog = Identifier(row.GetValue(0).GetValue<string>());
-		info.schema = Identifier(row.GetValue(1).GetValue<string>());
+		info.SetQualifiedName(QualifiedName(Identifier(row.GetValue(0).GetValue<string>()),
+		                                    Identifier(row.GetValue(1).GetValue<string>()), Identifier()));
 		// TODO this will fail if there are two schemas with the same name in different catalogs :/
 		auto schema = make_uniq<QuackSchemaCatalogEntry>(context, catalog, info, load_data);
 		CreateEntry(std::move(schema), OnCreateConflict::REPLACE_ON_CONFLICT);
@@ -86,8 +86,9 @@ optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateFunction(CatalogTransa
 optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateTable(CatalogTransaction transaction,
                                                                 BoundCreateTableInfo &info) {
 	auto create_table_info = info.Base().Copy();
-	create_table_info->catalog = GetInfo()->catalog;
-	create_table_info->schema = GetInfo()->schema;
+	auto schema_info = GetInfo();
+	create_table_info->SetCatalog(schema_info->GetQualifiedName().Catalog());
+	create_table_info->SetSchema(schema_info->GetQualifiedName().Schema());
 
 	auto &quack_transaction = QuackTransaction::Get(transaction);
 	quack_transaction.Query(create_table_info->ToString());
@@ -97,8 +98,9 @@ optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateTable(CatalogTransacti
 
 optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateView(CatalogTransaction transaction, CreateViewInfo &info) {
 	auto create_view_info = info.Copy();
-	create_view_info->catalog = GetInfo()->catalog;
-	create_view_info->schema = GetInfo()->schema;
+	auto schema_info = GetInfo();
+	create_view_info->SetCatalog(schema_info->GetQualifiedName().Catalog());
+	create_view_info->SetSchema(schema_info->GetQualifiedName().Schema());
 
 	// create the view verbatim in the serer
 	auto &quack_transaction = QuackTransaction::Get(transaction);
@@ -106,7 +108,7 @@ optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateView(CatalogTransactio
 
 	// locally, override the query with a remote procedure call to ensure the view is evaluated remotely
 	info.sql = QuackViewCatalogEntry::CreateViewSQL(ParentCatalog().GetName().GetIdentifierName(),
-	                                                name.GetIdentifierName(), info.view_name.GetIdentifierName());
+	                                                name.GetIdentifierName(), info.GetViewName().GetIdentifierName());
 	info.query = CreateViewInfo::ParseSelect(info.sql);
 
 	auto quack_entry = make_uniq<QuackViewCatalogEntry>(catalog, *this, info);
@@ -139,8 +141,8 @@ optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateType(CatalogTransactio
 
 void QuackSchemaCatalogEntry::DropEntry(ClientContext &context, DropInfo &info_p) {
 	auto drop_info = info_p.Copy();
-	drop_info->catalog = GetInfo()->catalog;
-	drop_info->schema = name;
+	drop_info->SetCatalog(GetInfo()->GetQualifiedName().Catalog());
+	drop_info->SetSchema(name);
 	switch (drop_info->type) {
 	case CatalogType::TABLE_ENTRY:
 	case CatalogType::VIEW_ENTRY:
@@ -150,7 +152,7 @@ void QuackSchemaCatalogEntry::DropEntry(ClientContext &context, DropInfo &info_p
 	}
 	auto &transaction = QuackTransaction::Get(context, ParentCatalog());
 	transaction.Query(drop_info->ToString());
-	tables->DropEntry(info_p.name.GetIdentifierName());
+	tables->DropEntry(info_p.GetQualifiedName().Name().GetIdentifierName());
 }
 void QuackSchemaCatalogEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 	throw NotImplementedException("Alter not implemented yet, Alter!");

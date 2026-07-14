@@ -4,6 +4,7 @@
 #include "duckdb/common/serializer/memory_stream.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/common/types/uuid.hpp"
+#include "duckdb/common/error_data.hpp"
 
 namespace duckdb {
 
