@@ -2,6 +2,9 @@ require quack
 
 require httpfs
 
+statement ok
+SET quack_default_client_id='';
+
 test-env QUACK_SERVER quack:localhost
 
 set ignore_error_messages

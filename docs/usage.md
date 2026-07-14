@@ -159,7 +159,7 @@ SET rpc_default_token = '<token-from-rpc_start>';
 |---------------|---------|------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `disable_ssl` | BOOLEAN | `false`                            | Use plain HTTP instead of HTTPS.                                                                                                                          |
 | `token`       | VARCHAR | quack secret / `rpc_default_token` | Auth token sent to the server; overrides any matching quack secret.                                                                                      |
-| `client_id`   | VARCHAR | *(none)*                           | Opaque client identifier; must be empty or at least 4 characters. The server derives a stable per-client hash `HMAC-SHA256(server_hmac_key, client_id)` (keyed with a private per-server key, so it is not reproducible by clients), exposed as `client_id_hash` in `quack_active_connections()`. |
+| `client_id`   | VARCHAR | `quack_default_client_id`          | Opaque client identifier; must be empty or at least 4 characters. Defaults to the `quack_default_client_id` setting when omitted — pass `''` to opt a single connection out. The server derives a stable per-client hash `HMAC-SHA256(server_hmac_key, client_id)` (keyed with a private per-server key, so it is not reproducible by clients), exposed as `client_id_hash` in `quack_active_connections()`. |
 
 ---
 

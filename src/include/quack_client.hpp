@@ -1,6 +1,8 @@
 #pragma once
 
 #include "duckdb/common/http_util.hpp"
+#include "duckdb/common/optional_ptr.hpp"
+#include "duckdb/common/types/value.hpp"
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/common/serializer/memory_stream.hpp"
 
@@ -58,6 +60,9 @@ public:
 
 	static shared_ptr<QuackClientConnection> ConnectToServer(ClientContext &context, const QuackUri &uri, string token,
 	                                                         string client_id = {});
+
+	//! Resolve the effective client_id for a new connection
+	static string ResolveClientId(ClientContext &context, optional_ptr<const Value> explicit_value);
 
 	//! Throw unless `client_id` is either empty ("no client_id") or >= 4 characters
 	static void ValidateClientId(const string &client_id);

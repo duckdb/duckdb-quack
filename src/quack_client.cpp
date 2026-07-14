@@ -1,3 +1,4 @@
+#include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
@@ -192,6 +193,22 @@ void QuackClient::ValidateClientId(const string &client_id) {
 	if (!client_id.empty() && client_id.size() < 4) {
 		throw InvalidInputException("client_id must be at least 4 characters long");
 	}
+}
+
+string QuackClient::ResolveClientId(ClientContext &context, optional_ptr<const Value> explicit_value) {
+	if (explicit_value) {
+		if (explicit_value->IsNull()) {
+			throw InvalidInputException("client_id cannot be null");
+		}
+		return explicit_value->GetValue<string>();
+	}
+	// No explicit value -> fall back to the precomputed default (set from $QUACK_CLIENT_ID or a random
+	// per-instance id at load time). An empty setting means the deployment opted out of a default.
+	Value setting_val;
+	if (context.TryGetCurrentSetting("quack_default_client_id", setting_val) && !setting_val.IsNull()) {
+		return setting_val.GetValue<string>();
+	}
+	return string();
 }
 
 shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &context, const QuackUri &uri,
