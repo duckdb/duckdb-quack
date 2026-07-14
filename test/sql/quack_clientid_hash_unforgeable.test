@@ -10,7 +10,12 @@ attach {server} as rc (token 'asdf', client_id 'victim_client');
 # SECURITY CONTRACT: knowing the shared token 'asdf' + the client_id must NOT let anyone recompute the hash
 # (else a co-tenant holding the same server token could forge victim_client's reconnect key)
 query I quack_db:quack_server_con
-SELECT client_id_hash <> md5('asdf' || 'victim_client')
+SELECT lower(client_id_hash) NOT IN (
+         sha256('asdf' || 'victim_client'),
+         sha256('victim_client' || 'asdf'),
+         sha256('victim_client'),
+         md5('asdf' || 'victim_client'))
+       AND length(client_id_hash) = 64
   FROM quack_active_connections() WHERE client_id_hash IS NOT NULL;
 ----
 true
