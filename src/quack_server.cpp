@@ -229,9 +229,8 @@ static Value EvaluateAuthQuery(DatabaseInstance &db, const string &sql, ARGS... 
 
 static constexpr idx_t kTokenBytes = 16; // 128 bits
 
-static string ComputeSessionHash(const string &session_id, const string &token, const string &client_id) {
+static string ComputeClientHash(const string &token, const string &client_id) {
 	MD5Context context;
-	context.Add(session_id);
 	context.Add(token);
 	context.Add(client_id);
 	return context.FinishHex();
@@ -412,7 +411,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		}
 		string client_id_hash;
 		if (!connection_request_message.ClientId().empty()) {
-			client_id_hash = ComputeSessionHash(session_id, Token(), connection_request_message.ClientId());
+			client_id_hash = ComputeClientHash(Token(), connection_request_message.ClientId());
 		}
 		return make_uniq<ConnectionResponseMessage>(CreateNewConnection(session_id, client_id_hash));
 	}

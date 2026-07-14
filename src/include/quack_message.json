@@ -182,6 +182,11 @@
         "id": 5,
         "name": "max_supported_quack_version",
         "type": "idx_t"
+      },
+      {
+        "id": 6,
+        "name": "client_id",
+        "type": "string"
       }
     ]
   },
