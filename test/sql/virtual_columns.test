@@ -1,0 +1,70 @@
+# name: test/sql/virtual_columns.test
+# description: count(*) binds the EMPTY virtual column, and rowid stays unsupported
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+# force multi-batch so count(*) also crosses a continuation FETCH
+statement ok
+set global quack_fetch_batch_chunks=1;
+
+foreach server 'quack:localhost'
+
+statement ok con1
+call quack_serve({server}, token='asdf');
+
+statement ok
+create table t as select i as x, i * 2 as y from range(100_000) t(i);
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+# count(*) needs no real column, so DuckDB asks the scan for "any column" - which resolves to
+# COLUMN_IDENTIFIER_EMPTY, answered with a NULL whose value is never read. The catalog path
+# serves it via BuildPushdownQuery (SELECT NULL::BOOLEAN FROM t).
+query I
+select count(*) from rpc.t
+----
+100000
+
+# The bind-time path (quack_query) serves the same virtual column through the CLIENT-SIDE pushdown
+# loop instead. That loop used to `return` on a virtual column, skipping SetCardinality - and a
+# cardinality of 0 reads to DuckDB as end-of-scan, so this silently answered 0 rather than erroring.
+query I
+select count(*) from quack_query({server}, 'from t', token='asdf')
+----
+100000
+
+# NOTE: no view in this database. Under a small fetch batch, a catalog holding both a table and a
+# view loses the view entirely (see attach_catalog_multi_batch.test) - keep them apart so a failure
+# here means THIS bug. quack_query above already covers the client-side pushdown loop.
+
+# count(*) must not disturb a normal projected scan of the same table
+query II
+select count(*), sum(x) from rpc.t
+----
+100000	4999950000
+
+# rowid is NOT supported: quack declares only the EMPTY virtual column, so the binder never
+# offers rowid. If a future change adds remote UPDATE/DELETE it must implement rowid for real -
+# inheriting the old NULL::BIGINT would have silently addressed no rows at all.
+statement error
+select rowid from rpc.t
+----
+not found
+
+statement error
+delete from rpc.t where x = 1
+----
+
+statement ok con2
+detach rpc;
+
+statement ok con1
+call quack_stop({server});
+
+endloop

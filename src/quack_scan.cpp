@@ -191,8 +191,12 @@ static string BuildPushdownQuery(const QuackScanBindData &bind_data, const Table
 			}
 			if (col_id.IsVirtualColumn()) {
 				auto virtual_column = col_id.GetPrimaryIndex();
-				if (virtual_column == COLUMN_IDENTIFIER_EMPTY || virtual_column == COLUMN_IDENTIFIER_ROW_ID) {
-					query += "NULL::BIGINT";
+				if (virtual_column == COLUMN_IDENTIFIER_EMPTY) {
+					// count(*) marker: the value is never read, so any NULL will do - but it must
+					// match the type we declared for it in QuackGetVirtualColumns.
+					query += "NULL::BOOLEAN";
+				} else if (virtual_column == COLUMN_IDENTIFIER_ROW_ID) {
+					throw NotImplementedException("quack does not support rowid on remote tables");
 				} else {
 					throw InternalException("Unsupported virtual column index");
 				}
@@ -322,12 +326,30 @@ static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChu
 				if (!chunk.RequiresPushdown()) {
 					output.Reference(response_chunk);
 				} else {
-					for (idx_t i = 0; i < global_state.column_ids.size(); i++) {
-						auto &index = global_state.column_ids[i];
+					// With filter_prune, projection_ids indexes into column_ids and lists only the
+					// columns that reach the output - filter-only columns stay in column_ids but are
+					// not emitted. Without it, projection_ids is empty and the output IS column_ids.
+					// filter_prune is currently disabled, so the projection_ids branch is not reachable
+					// yet; it is written now so that enabling it cannot silently reintroduce the
+					// full-width overrun this loop exists to prevent.
+					auto &projection_ids = global_state.projection_ids;
+					auto output_columns =
+					    projection_ids.empty() ? global_state.column_ids.size() : projection_ids.size();
+					for (idx_t i = 0; i < output_columns; i++) {
+						auto &index = projection_ids.empty() ? global_state.column_ids[i]
+						                                     : global_state.column_ids[projection_ids[i]];
 						if (index.IsVirtualColumn()) {
-							// TODO
+							// Materialize as NULL, exactly as BuildPushdownQuery does for the server-side
+							// path - keep the two in step. Note `continue`, not `return`: returning here
+							// skipped SetCardinality, and a cardinality of 0 reads to DuckDB as
+							// end-of-scan, i.e. a silently EMPTY result rather than an error.
+							auto virtual_column = index.GetPrimaryIndex();
+							if (virtual_column != COLUMN_IDENTIFIER_EMPTY &&
+							    virtual_column != COLUMN_IDENTIFIER_ROW_ID) {
+								throw InternalException("Unsupported virtual column index");
+							}
 							output.data[i].Reference(Value(output.data[i].GetType()));
-							return;
+							continue;
 						}
 						auto col_idx = index.GetPrimaryIndex();
 						output.data[i].Reference(response_chunk.data[col_idx]);
@@ -387,6 +409,16 @@ unique_ptr<FunctionData> QuackScanDeserialize(Deserializer &deserializer, TableF
 	throw NotImplementedException("Quack scans cannot be deserialized (yet?)");
 }
 
+//! Declare only the EMPTY virtual column - the "give me any column, I just need the row count"
+//! marker DuckDB uses for count(*). Declaring get_virtual_columns at all also OVERRIDES the
+//! TableCatalogEntry fallback (bind_basetableref.cpp:262), which would otherwise hand an ATTACH'd
+//! table a `rowid` we cannot honour. Same shape as MultiFileReader and the json extension.
+static virtual_column_map_t QuackGetVirtualColumns(ClientContext &, optional_ptr<FunctionData>) {
+	virtual_column_map_t result;
+	result.insert(make_pair(COLUMN_IDENTIFIER_EMPTY, TableColumn("", LogicalType::BOOLEAN)));
+	return result;
+}
+
 TableFunction QuackScanFunction::GetFunction() {
 	auto fun = TableFunction("quack_query", {LogicalType::VARCHAR, LogicalType::VARCHAR}, QuackScan, QuackScanBind,
 	                         QuackScanInitGlobal, QuackScanInitLocal);
@@ -394,6 +426,7 @@ TableFunction QuackScanFunction::GetFunction() {
 	fun.named_parameters["token"] = LogicalType::VARCHAR;
 
 	fun.projection_pushdown = true;
+	fun.get_virtual_columns = QuackGetVirtualColumns;
 	fun.get_partition_data = QuackScanGetPartitionData;
 	fun.to_string = QuackScanToString;
 	fun.serialize = QuackScanSerialize;
@@ -407,6 +440,7 @@ TableFunction QuackScanByNameFunction::GetFunction() {
 	auto fun = TableFunction("quack_query_by_name", {LogicalType::VARCHAR, LogicalType::VARCHAR}, QuackScan,
 	                         QuackScanBindCatalogName, QuackScanInitGlobal, QuackScanInitLocal);
 	fun.projection_pushdown = true;
+	fun.get_virtual_columns = QuackGetVirtualColumns;
 	fun.get_partition_data = QuackScanGetPartitionData;
 	fun.to_string = QuackScanToString;
 	fun.serialize = QuackScanSerialize;
