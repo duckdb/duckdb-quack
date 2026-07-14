@@ -1,5 +1,6 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/query_result.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/main/secret/secret.hpp"
 #include "duckdb/planner/filter/conjunction_filter.hpp"
@@ -51,6 +52,10 @@ static unique_ptr<FunctionData> QuackScanBind(ClientContext &context, TableFunct
 
 	return_types = bind_response->Types();
 	names = bind_response->Names();
+	// the remote query may produce duplicate column names (e.g. SELECT 1 AS x, 2 AS x) - a table
+	// function binding requires unique names, so rename the repeats (x, x_1, ...). Columns are
+	// referenced positionally everywhere below, so this is purely the name we expose to the binder.
+	QueryResult::DeduplicateColumns(names);
 
 	bind_data->results = std::move(bind_response->MutableResults());
 	bind_data->needs_more_fetch = bind_response->NeedsMoreFetch();
@@ -97,6 +102,7 @@ static unique_ptr<FunctionData> QuackScanBindCatalogName(ClientContext &context,
 
 	return_types = bind_response->Types();
 	names = bind_response->Names();
+	QueryResult::DeduplicateColumns(names);
 
 	// new stuff
 	bind_data->results = std::move(bind_response->MutableResults());
