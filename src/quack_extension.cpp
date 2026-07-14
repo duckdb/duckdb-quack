@@ -15,6 +15,7 @@
 #include "include/storage/quack_catalog.hpp"
 #include "quack_active_connections.hpp"
 #include "quack_clear_cache.hpp"
+#include "quack_compression.hpp"
 #include "quack_extension.hpp"
 #include "quack_log.hpp"
 #include "quack_scan.hpp"
@@ -119,6 +120,12 @@ static TableFunction GetQuackIdentifyFunction() {
 	return fun;
 }
 
+static void ValidateQuackCompression(ClientContext &, SetScope, Value &parameter) {
+	if (!parameter.IsNull()) {
+		QuackCompressionConfig().ParseSpec(StringValue::Get(parameter));
+	}
+}
+
 static void LoadInternal(ExtensionLoader &loader) {
 	loader.SetDescription("The DuckDB 'Quack' Client/Server Protocol");
 
@@ -182,6 +189,16 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("quack_send_data_flush_rows",
 	                          "Rows a thread buffers before flushing one SEND_DATA_REQUEST (0 = default 204800)",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
+
+	config.AddExtensionOption("quack_compression",
+	                          "Codec for bulk RPC payloads this node sends: 'none', 'zstd' or 'zstd-<level>' with "
+	                          "level 1-22 (bare 'zstd' = level 3); receivers auto-detect. On a server, responses "
+	                          "honor each connection's session value (settable by the client via the query "
+	                          "passthrough), falling back to the server's global",
+	                          LogicalType::VARCHAR, Value("none"), ValidateQuackCompression);
+	config.AddExtensionOption("quack_compression_min_size",
+	                          "Minimum encoded payload size in bytes before compression is attempted",
+	                          LogicalType::UBIGINT, Value::UBIGINT(4096));
 
 	config.AddExtensionOption("quack_server_max_connections",
 	                          "Maximum concurrent connections the RPC server accepts; beyond this new "
