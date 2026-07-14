@@ -1,0 +1,74 @@
+# name: test/sql/server_connection_limits.test
+# description: quack_server_max_connections sheds excess connections cleanly; idle sockets closed by quack_server_keep_alive_timeout self-heal on the client.
+# group: [sql]
+
+require quack
+
+require httpfs
+
+test-env QUACK_SERVER quack:localhost
+
+set ignore_error_messages
+
+# Server with a hard cap of 1 concurrent connection and a 1-second keep-alive, so both
+# limits are exercised quickly. Settings must be in place before quack_serve reads them.
+statement ok quack_db:quack_server_con
+SET quack_server_max_connections=1;
+
+statement ok quack_db:quack_server_con
+SET quack_server_keep_alive_timeout=1;
+
+statement ok quack_db:quack_server_con
+set variable actual_listen_uri = (select listen_uri from quack_serve('{QUACK_SERVER}:0', token='asdf'));
+
+query I quack_db:quack_server_con
+set variable listen_uri = concat('''', getvariable('actual_listen_uri'), '''');
+
+set variable server <variable:quack_server_con:listen_uri>
+
+# Keep the client single-threaded so one cached connection carries the whole session.
+statement ok
+SET threads=1;
+
+# A single client fits in the 1-connection budget: attach, write, read.
+statement ok
+ATTACH {server} AS rpc1 (TYPE quack, TOKEN 'asdf');
+
+statement ok
+CREATE TABLE rpc1.t1 AS SELECT range AS i FROM range(100);
+
+query I
+SELECT count(*) FROM rpc1.t1;
+----
+100
+
+# The cap is taken by rpc1's cached connection: a second attach is shed (socket closed by
+# the server), surfacing as a request error after client retries — not a hang.
+statement error
+ATTACH {server} AS rpc2 (TYPE quack, TOKEN 'asdf');
+----
+Failed to send message
+
+# Detaching releases rpc1's sockets, freeing the connection slot for a new client.
+statement ok
+DETACH rpc1;
+
+statement ok
+ATTACH {server} AS rpc2 (TYPE quack, TOKEN 'asdf');
+
+query I
+SELECT count(*) FROM rpc2.t1;
+----
+100
+
+# Idle past the server keep-alive: the server closes the socket. The client's cached
+# connection is now stale and must self-heal (retry on a fresh socket) transparently.
+sleep 2 seconds
+
+query I
+SELECT count(*) FROM rpc2.t1;
+----
+100
+
+statement ok
+DETACH rpc2;

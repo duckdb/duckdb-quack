@@ -157,6 +157,90 @@ select count(*) > 0 from duckdb_logs_parsed('HTTP') where request.url like '%/qu
 ----
 true
 
+# --- HTTP logging (async insert path) ---
+# The async bulk-INSERT SEND_DATA POSTs must show up in the HTTP transport log, not just the Quack log.
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+CALL enable_logging(['HTTP','Quack']);
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+statement ok
+create table rpc.log_t(i bigint);
+
+# UNORDERED (no small dead-range sends) + a small flush so one INSERT makes several async POSTs
+statement ok
+SET preserve_insertion_order=false;
+
+statement ok
+SET quack_send_data_flush_rows=50000;
+
+statement ok
+insert into rpc.log_t select * from range(200000) t(i);
+
+# sanity: the insert actually produced multiple async sends
+query I
+select count(*) > 1 from duckdb_logs_parsed('Quack') where message_type = 'SEND_DATA_REQUEST'
+----
+true
+
+# every SEND_DATA_REQUEST is now visible as a large-body HTTP POST (was ~1-2 of N before the fix)
+query I
+select
+  (select count(*) from duckdb_logs_parsed('Quack') where message_type = 'SEND_DATA_REQUEST')
+  = (select count(*) from duckdb_logs_parsed('HTTP')
+       where request.type = 'POST' and request.request_body_length > 100000)
+----
+true
+
+statement ok
+detach rpc
+
+statement ok
+SET preserve_insertion_order=true;
+
+# --- HTTP logging (context-less teardown scope) ---
+# A pooled client's DISCONNECT POST is context-less and must not be logged under the
+# connection scope of a query that already ran on that pooled connection.
+
+statement ok
+CALL disable_logging();
+
+statement ok
+CALL enable_logging('HTTP');
+
+statement ok
+attach {server} as rpc_td (token 'asdf')
+
+statement ok
+create table rpc_td.teardown_t(i bigint);
+
+statement ok
+insert into rpc_td.teardown_t values (1);
+
+# sanity: the query's own POSTs are connection-scoped (non-null connection id)
+query I
+select count(*) > 0 from duckdb_logs_parsed('HTTP') where request.type = 'POST' and connection_id is not null
+----
+true
+
+# clear the query's logs so only the detach's DISCONNECT traffic follows
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+detach rpc_td
+
+# the DISCONNECT POST must not carry the finished query's connection id
+query I
+select count(*) = 0 from duckdb_logs_parsed('HTTP') where request.type = 'POST' and connection_id is not null
+----
+true
+
 # clean up
 statement ok
 CALL disable_logging();

@@ -340,9 +340,13 @@ static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChu
 				bind_data.completed = true;
 				return;
 			}
-			// set up buffer for scan in next iteration
+			// tag fetched chunks like the initial batch (see QuackScanInitGlobal): direct queries
+			// return full-width chunks that still need projection, the catalog path already projected
+			auto fetched_pushdown_type = bind_data.table_name.empty()
+			                                 ? ChunkResultPushdownType::REQUIRES_PUSHDOWN
+			                                 : ChunkResultPushdownType::PUSHDOWN_ALREADY_APPLIED;
 			for (auto &chunk : fetch_response->MutableResults()) {
-				local_state.results.emplace(chunk->Chunk(), ChunkResultPushdownType::PUSHDOWN_ALREADY_APPLIED);
+				local_state.results.emplace(chunk->Chunk(), fetched_pushdown_type);
 			}
 			local_state.current_batch_index = fetch_response->BatchIndex();
 			continue;

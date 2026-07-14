@@ -1,0 +1,26 @@
+# name: test/sql/fetch_projection.test
+# description: projection over quack_query results that span multiple FETCH batches
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+# 30000 rows x 2 cols => ~15 DataChunks of 2048 => exceeds quack_fetch_batch_chunks (12),
+# forcing at least one FETCH round-trip after the initial PREPARE batch.
+statement ok quack_db:quack_server_con
+create table big as select range as a, range * 2 as b from range(30000);
+
+# Inner query returns 2 columns; the outer aggregate only needs column a, so DuckDB
+# prunes the scan output to width 1. Fetched chunks are still full-width and must be
+# projected locally — previously this raised an INTERNAL error (vector index overrun).
+query III
+select count(*), min(a), max(a) from quack_query({server}, 'SELECT * FROM big', token='asdf')
+----
+30000	0	29999
+
+# Projecting the second column verifies the local projection picks the right column index.
+query III
+select count(*), min(b), max(b) from quack_query({server}, 'SELECT * FROM big', token='asdf')
+----
+30000	0	59998
+
+include test/template/quack_teardown.test_template

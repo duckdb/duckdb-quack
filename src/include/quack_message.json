@@ -43,6 +43,11 @@
         "id": 1,
         "name": "sql_query",
         "type": "string"
+      },
+      {
+        "id": 2,
+        "name": "query_uuid",
+        "type": "hugeint_t"
       }
     ]
   },
@@ -89,11 +94,11 @@
       },
       {
         "id": 5,
-        "name": "result_uuid",
+        "name": "query_uuid",
         "type": "hugeint_t"
       }
     ],
-    "constructor": ["result_types", "result_names",  "results", "needs_more_fetch", "result_uuid"]
+    "constructor": ["result_types", "result_names",  "results", "needs_more_fetch", "query_uuid"]
   },
   {
     "class": "SendDataRequestMessage",
@@ -110,13 +115,40 @@
       },
       {
         "id": 3,
-        "name": "append_chunk",
-        "type": "unique_ptr<DataChunkWrapper>"
+        "name": "chunks",
+        "type": "vector<unique_ptr<DataChunkWrapper>>"
       },
       {
         "id": 4,
         "name": "query_uuid",
         "type": "hugeint_t"
+      },
+      {
+        "id": 5,
+        "name": "batch_index",
+        "type": "optional_idx"
+      },
+      {
+        "id": 6,
+        "name": "sequence_index",
+        "type": "idx_t"
+      },
+      {
+        "id": 7,
+        "name": "is_last_in_batch",
+        "type": "bool"
+      },
+      {
+        "id": 8,
+        "name": "batch_watermark",
+        "type": "optional_idx",
+        "default": "optional_idx()"
+      },
+      {
+        "id": 9,
+        "name": "dead_range_end",
+        "type": "optional_idx",
+        "default": "optional_idx()"
       }
     ]
   },
@@ -137,6 +169,12 @@
         "id": 1,
         "name": "query_uuid",
         "type": "hugeint_t"
+      },
+      {
+        "id": 2,
+        "name": "min_batch_watermark",
+        "type": "optional_idx",
+        "default": "optional_idx()"
       }
     ]
   },
@@ -152,6 +190,16 @@
         "id": 2,
         "name": "batch_index",
         "type": "optional_idx"
+      }
+    ]
+  },
+  {
+    "class": "CancelRequestMessage",
+    "members": [
+      {
+        "id": 1,
+        "name": "query_uuid",
+        "type": "hugeint_t"
       }
     ]
   },
@@ -211,4 +259,3 @@
     ]
   }
 ]
-

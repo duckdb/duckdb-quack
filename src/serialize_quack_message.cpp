@@ -9,38 +9,12 @@
 
 namespace duckdb {
 
-void SendDataRequestMessage::Serialize(Serializer &serializer) const {
-	serializer.WritePropertyWithDefault<string>(1, "schema_name", schema_name);
-	serializer.WritePropertyWithDefault<string>(2, "table_name", table_name);
-	serializer.WritePropertyWithDefault<unique_ptr<DataChunkWrapper>>(3, "append_chunk", append_chunk);
-	serializer.WriteProperty<hugeint_t>(4, "query_uuid", query_uuid);
-}
-
-unique_ptr<SendDataRequestMessage> SendDataRequestMessage::Deserialize(Deserializer &deserializer) {
-	auto result = duckdb::unique_ptr<SendDataRequestMessage>(new SendDataRequestMessage());
-	deserializer.ReadPropertyWithDefault<string>(1, "schema_name", result->schema_name);
-	deserializer.ReadPropertyWithDefault<string>(2, "table_name", result->table_name);
-	deserializer.ReadPropertyWithDefault<unique_ptr<DataChunkWrapper>>(3, "append_chunk", result->append_chunk);
-	deserializer.ReadProperty<hugeint_t>(4, "query_uuid", result->query_uuid);
-	return result;
-}
-
-void SendDataResponseMessage::Serialize(Serializer &serializer) const {
-	serializer.WriteProperty<optional_idx>(1, "accept_budget", accept_budget);
-}
-
-unique_ptr<SendDataResponseMessage> SendDataResponseMessage::Deserialize(Deserializer &deserializer) {
-	auto result = duckdb::unique_ptr<SendDataResponseMessage>(new SendDataResponseMessage());
-	deserializer.ReadProperty<optional_idx>(1, "accept_budget", result->accept_budget);
-	return result;
-}
-
-void FinalizeMessage::Serialize(Serializer &serializer) const {
+void CancelRequestMessage::Serialize(Serializer &serializer) const {
 	serializer.WriteProperty<hugeint_t>(1, "query_uuid", query_uuid);
 }
 
-unique_ptr<FinalizeMessage> FinalizeMessage::Deserialize(Deserializer &deserializer) {
-	auto result = duckdb::unique_ptr<FinalizeMessage>(new FinalizeMessage());
+unique_ptr<CancelRequestMessage> CancelRequestMessage::Deserialize(Deserializer &deserializer) {
+	auto result = duckdb::unique_ptr<CancelRequestMessage>(new CancelRequestMessage());
 	deserializer.ReadProperty<hugeint_t>(1, "query_uuid", result->query_uuid);
 	return result;
 }
@@ -119,6 +93,19 @@ unique_ptr<FetchResponseMessage> FetchResponseMessage::Deserialize(Deserializer 
 	return result;
 }
 
+void FinalizeMessage::Serialize(Serializer &serializer) const {
+	serializer.WriteProperty<hugeint_t>(1, "query_uuid", query_uuid);
+	serializer.WritePropertyWithDefault<optional_idx>(2, "min_batch_watermark", min_batch_watermark, optional_idx());
+}
+
+unique_ptr<FinalizeMessage> FinalizeMessage::Deserialize(Deserializer &deserializer) {
+	auto result = duckdb::unique_ptr<FinalizeMessage>(new FinalizeMessage());
+	deserializer.ReadProperty<hugeint_t>(1, "query_uuid", result->query_uuid);
+	deserializer.ReadPropertyWithExplicitDefault<optional_idx>(2, "min_batch_watermark", result->min_batch_watermark,
+	                                                           optional_idx());
+	return result;
+}
+
 void MessageHeader::Serialize(Serializer &serializer) const {
 	serializer.WriteProperty<MessageType>(1, "type", type);
 	serializer.WritePropertyWithDefault<string>(2, "connection_id", connection_id);
@@ -164,21 +151,49 @@ unique_ptr<PrepareResponseMessage> PrepareResponseMessage::Deserialize(Deseriali
 	return result;
 }
 
+void SendDataRequestMessage::Serialize(Serializer &serializer) const {
+	serializer.WritePropertyWithDefault<string>(1, "schema_name", schema_name);
+	serializer.WritePropertyWithDefault<string>(2, "table_name", table_name);
+	serializer.WritePropertyWithDefault<vector<unique_ptr<DataChunkWrapper>>>(3, "chunks", chunks);
+	serializer.WriteProperty<hugeint_t>(4, "query_uuid", query_uuid);
+	serializer.WriteProperty<optional_idx>(5, "batch_index", batch_index);
+	serializer.WritePropertyWithDefault<idx_t>(6, "sequence_index", sequence_index);
+	serializer.WritePropertyWithDefault<bool>(7, "is_last_in_batch", is_last_in_batch);
+	serializer.WritePropertyWithDefault<optional_idx>(8, "batch_watermark", batch_watermark, optional_idx());
+	serializer.WritePropertyWithDefault<optional_idx>(9, "dead_range_end", dead_range_end, optional_idx());
+}
+
+unique_ptr<SendDataRequestMessage> SendDataRequestMessage::Deserialize(Deserializer &deserializer) {
+	auto result = duckdb::unique_ptr<SendDataRequestMessage>(new SendDataRequestMessage());
+	deserializer.ReadPropertyWithDefault<string>(1, "schema_name", result->schema_name);
+	deserializer.ReadPropertyWithDefault<string>(2, "table_name", result->table_name);
+	deserializer.ReadPropertyWithDefault<vector<unique_ptr<DataChunkWrapper>>>(3, "chunks", result->chunks);
+	deserializer.ReadProperty<hugeint_t>(4, "query_uuid", result->query_uuid);
+	deserializer.ReadProperty<optional_idx>(5, "batch_index", result->batch_index);
+	deserializer.ReadPropertyWithDefault<idx_t>(6, "sequence_index", result->sequence_index);
+	deserializer.ReadPropertyWithDefault<bool>(7, "is_last_in_batch", result->is_last_in_batch);
+	deserializer.ReadPropertyWithExplicitDefault<optional_idx>(8, "batch_watermark", result->batch_watermark,
+	                                                           optional_idx());
+	deserializer.ReadPropertyWithExplicitDefault<optional_idx>(9, "dead_range_end", result->dead_range_end,
+	                                                           optional_idx());
+	return result;
+}
+
+void SendDataResponseMessage::Serialize(Serializer &serializer) const {
+	serializer.WriteProperty<optional_idx>(1, "accept_budget", accept_budget);
+}
+
+unique_ptr<SendDataResponseMessage> SendDataResponseMessage::Deserialize(Deserializer &deserializer) {
+	auto result = duckdb::unique_ptr<SendDataResponseMessage>(new SendDataResponseMessage());
+	deserializer.ReadProperty<optional_idx>(1, "accept_budget", result->accept_budget);
+	return result;
+}
+
 void SuccessResponse::Serialize(Serializer &serializer) const {
 }
 
 unique_ptr<SuccessResponse> SuccessResponse::Deserialize(Deserializer &deserializer) {
 	auto result = duckdb::unique_ptr<SuccessResponse>(new SuccessResponse());
-	return result;
-}
-
-void CancelRequestMessage::Serialize(Serializer &serializer) const {
-	serializer.WriteProperty<hugeint_t>(1, "query_uuid", query_uuid);
-}
-
-unique_ptr<CancelRequestMessage> CancelRequestMessage::Deserialize(Deserializer &deserializer) {
-	auto result = duckdb::unique_ptr<CancelRequestMessage>(new CancelRequestMessage());
-	deserializer.ReadProperty<hugeint_t>(1, "query_uuid", result->query_uuid);
 	return result;
 }
 

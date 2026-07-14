@@ -9,73 +9,90 @@
 
 #include <condition_variable>
 #include <deque>
+#include <map>
 
 namespace duckdb {
 
-struct QuackStreamChunk {
-	unique_ptr<DataChunk> chunk;
-	//! Wire batch index (set by the future async/ordered client). Invalid for the current client,
-	//! in which case the scan assigns a constant batch index.
-	optional_idx batch_index;
-};
-
-//! Bounded, thread-safe queue feeding one server-side scan_data_from_quack_client INSERT. SEND_DATA
-//! handlers push chunks; the table function pops them; the bound backpressures the client.
+//! Thread-safe delivery queue for scan_data_from_quack_client. Producers push complete batches into
+//! ready_batches_; scan tasks claim one batch at a time via TryPopBatch for exclusive ownership.
 class QuackDataStream {
 public:
-	enum class PopStatus : uint8_t {
-		CHUNK,    //! a chunk was dequeued into `out`
-		EMPTY,    //! queue empty, more chunks may still arrive
-		FINISHED, //! queue empty and the stream is finished
-		ERRORED   //! the stream recorded a fatal error
+	enum class PopBatchStatus : uint8_t {
+		BATCH,
+		EMPTY,
+		FINISHED,
+		ERRORED,
 	};
 
-	explicit QuackDataStream(vector<LogicalType> types_p, idx_t capacity_p = 64)
-	    : types(std::move(types_p)), capacity(capacity_p) {
+	explicit QuackDataStream(vector<LogicalType> types_p, bool ordered_p = false)
+	    : types(std::move(types_p)), ordered(ordered_p) {
 	}
 
 	const vector<LogicalType> &Types() const {
 		return types;
 	}
 
-	//! Producer: enqueue a chunk, blocking while the queue is full (until the consumer drains or the
-	//! stream is finished/errored).
-	void Push(unique_ptr<DataChunk> chunk, optional_idx batch_index);
-	//! Producer: signal that no more chunks will arrive.
+	bool IsOrdered() const {
+		return ordered;
+	}
+
+	//! Publish all chunks from one unordered wire message as a single ready batch.
+	void PushUnordered(vector<unique_ptr<DataChunk>> chunks);
+
+	//! Buffer chunks for (batch, seq); drain complete batches to ready_batches_ in order.
+	//! `watermark` seeds the delivery cursor; once started the cursor only advances.
+	void PushOrdered(vector<unique_ptr<DataChunk>> chunks, idx_t batch, idx_t seq, bool is_last,
+	                 optional_idx watermark);
+
+	//! Record that batches [dead_start, dead_end) are dead (never produced), so the cursor can skip the gap.
+	//! Safe under reordering: recorded, then applied when the cursor reaches it.
+	void PushDeadRange(idx_t dead_start, idx_t dead_end);
+
+	//! Seed the delivery cursor from FINALIZE if no per-message watermark arrived first.
+	void SetWatermarkAndDrain(optional_idx watermark);
+
 	void Finish();
-	//! Record a fatal error (also unblocks producer and consumer).
 	void SetError(ErrorData error_p);
 	bool HasError();
 	ErrorData GetError();
 
-	//! Consumer: non-blocking dequeue. Fills `out` and returns CHUNK if one is ready; otherwise returns
-	//! EMPTY / FINISHED / ERRORED. Never blocks.
-	PopStatus TryPop(QuackStreamChunk &out);
-	//! Consumer: bounded wait used by the async wait-task. Blocks until a chunk is available, the
-	//! stream is finished/errored, or a short timeout elapses (so the caller can re-check cancellation).
+	//! Atomically claim the next ready batch; moves chunks into chunks_out.
+	PopBatchStatus TryPopBatch(idx_t &batch_idx_out, vector<unique_ptr<DataChunk>> &chunks_out);
+	//! Block until a batch is ready, the stream ends, or a short timeout elapses.
 	void WaitForData();
 
 private:
+	void DrainOrderedBatches() DUCKDB_REQUIRES(lock);
+
 	annotated_mutex lock;
 	std::condition_variable cv_nonempty;
-	std::condition_variable cv_nonfull;
-	std::deque<QuackStreamChunk> queue DUCKDB_GUARDED_BY(lock);
+	std::deque<std::pair<idx_t, vector<unique_ptr<DataChunk>>>> ready_batches_ DUCKDB_GUARDED_BY(lock);
+	//! Monotonic counter for unordered batch indices (ignored by PhysicalInsert, kept for uniformity).
+	idx_t unordered_batch_seq_ DUCKDB_GUARDED_BY(lock) = 0;
 	vector<LogicalType> types;
-	idx_t capacity;
+	bool ordered;
 	bool finished DUCKDB_GUARDED_BY(lock) = false;
 	bool errored DUCKDB_GUARDED_BY(lock) = false;
 	ErrorData error DUCKDB_GUARDED_BY(lock);
+
+	// Ordered assembly state — all guarded by lock.
+	std::map<std::pair<idx_t, idx_t>, vector<unique_ptr<DataChunk>>> ordered_pending DUCKDB_GUARDED_BY(lock);
+	std::map<idx_t, idx_t> last_seq_for_batch DUCKDB_GUARDED_BY(lock);
+	optional_idx next_expected_batch_ DUCKDB_GUARDED_BY(lock);
+	bool any_batch_delivered_ DUCKDB_GUARDED_BY(lock) = false;
+	//! Dead batch ranges [lo, hi) reported by the client for filtered/pruned gaps the sink never crossed.
+	//! The drain skips the cursor over a covering range instead of waiting for data that never comes.
+	std::map<idx_t, idx_t> dead_ranges DUCKDB_GUARDED_BY(lock);
 };
 
-//! Process-global registry mapping a stream id to its QuackDataStream, letting the
-//! scan_data_from_quack_client table function find the stream the request handlers created.
+//! Process-global registry: maps stream id → QuackDataStream so the scan function can find it.
 class QuackStreamRegistry {
 public:
 	static QuackStreamRegistry &Get();
 
 	static string MakeId(const string &connection_id, hugeint_t query_uuid);
 
-	shared_ptr<QuackDataStream> Create(const string &id, vector<LogicalType> types);
+	shared_ptr<QuackDataStream> Create(const string &id, vector<LogicalType> types, bool ordered);
 	shared_ptr<QuackDataStream> Find(const string &id);
 	void Erase(const string &id);
 

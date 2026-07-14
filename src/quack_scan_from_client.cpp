@@ -1,19 +1,17 @@
 #include "quack_scan_from_client.hpp"
 
+#include "duckdb/common/enums/order_preservation_type.hpp"
 #include "duckdb/common/enums/task_scheduler_type.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/execution/partition_info.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parallel/async_result.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
 
 #include "quack_data_stream.hpp"
 
 namespace duckdb {
 
-//! Async wait used when the stream has no chunk yet but is not finished: the scan returns BLOCKED
-//! with this task, the executor parks the pipeline thread and runs the task on the ASYNC pool, and
-//! reschedules the scan once the task completes (a chunk arrived, the stream finished, or the bounded
-//! wait timed out).
 class QuackWaitForChunkTask : public AsyncTask {
 public:
 	explicit QuackWaitForChunkTask(shared_ptr<QuackDataStream> stream_p) : stream(std::move(stream_p)) {
@@ -45,18 +43,17 @@ struct QuackScanFromClientBindData : public FunctionData {
 };
 
 struct QuackScanFromClientGlobalState : public GlobalTableFunctionState {
-	//! Single consumer: this matches the synchronous client and avoids multi-consumer coordination.
-	//! PhysicalBatchInsert is still selected because use_batch_index only needs the global scheduler
-	//! to have >1 thread plus a source that advertises batch-index partitioning (get_partition_data).
+	idx_t num_threads = 1;
 	idx_t MaxThreads() const override {
-		return 1;
+		return num_threads;
 	}
 };
 
 struct QuackScanFromClientLocalState : public LocalTableFunctionState {
 	idx_t current_batch_index = 0;
-	//! Holds the chunk currently referenced by the scan output, keeping it alive until the next call.
-	QuackStreamChunk current;
+	vector<unique_ptr<DataChunk>> batch_buffer;
+	size_t batch_pos = 0;
+	unique_ptr<DataChunk> current_chunk; // keeps the referenced chunk alive between scan calls
 };
 
 static unique_ptr<FunctionData> QuackScanFromClientBind(ClientContext &context, TableFunctionBindInput &input,
@@ -67,6 +64,12 @@ static unique_ptr<FunctionData> QuackScanFromClientBind(ClientContext &context, 
 		throw InvalidInputException("scan_data_from_quack_client: no active stream '%s' (this is an internal "
 		                            "function driven by the quack server)",
 		                            stream_id);
+	}
+
+	// Unordered streams signal NO_ORDER so the planner picks PhysicalInsert(parallel=true) instead of
+	// PhysicalBatchInsert. Mutates a query-scoped by-value copy — never touches the global catalog entry.
+	if (!stream->IsOrdered()) {
+		input.table_function.order_preservation_type = OrderPreservationType::NO_ORDER;
 	}
 
 	auto bind_data = make_uniq<QuackScanFromClientBindData>();
@@ -83,7 +86,9 @@ static unique_ptr<FunctionData> QuackScanFromClientBind(ClientContext &context, 
 
 static unique_ptr<GlobalTableFunctionState> QuackScanFromClientInitGlobal(ClientContext &context,
                                                                           TableFunctionInitInput &input) {
-	return make_uniq<QuackScanFromClientGlobalState>();
+	auto state = make_uniq<QuackScanFromClientGlobalState>();
+	state->num_threads = NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads());
+	return std::move(state);
 }
 
 static unique_ptr<LocalTableFunctionState>
@@ -96,44 +101,43 @@ static void QuackScanFromClient(ClientContext &context, TableFunctionInput &inpu
 	auto &local_state = input.local_state->Cast<QuackScanFromClientLocalState>();
 	auto &stream = *bind_data.stream;
 
-	// Re-entry point after a BLOCKED reschedule (or each synchronous retry): observe cancellation.
 	if (context.IsInterrupted()) {
 		throw InterruptException();
 	}
 
 	while (true) {
-		QuackStreamChunk entry;
-		switch (stream.TryPop(entry)) {
-		case QuackDataStream::PopStatus::CHUNK:
-			// Use the wire batch index if the (future async) client supplied one; otherwise a constant
-			// index keeps all chunks in one PhysicalBatchInsert collection.
-			local_state.current_batch_index = entry.batch_index.IsValid() ? entry.batch_index.GetIndex() : 0;
-			// Keep the chunk alive while `output` references it (until the next scan call).
-			local_state.current = std::move(entry);
-			output.Reference(*local_state.current.chunk);
+		if (local_state.batch_pos < local_state.batch_buffer.size()) {
+			local_state.current_chunk = std::move(local_state.batch_buffer[local_state.batch_pos++]);
+			output.Reference(*local_state.current_chunk);
 			return;
-		case QuackDataStream::PopStatus::FINISHED:
+		}
+		local_state.batch_buffer.clear();
+		local_state.batch_pos = 0;
+		idx_t batch_idx;
+		switch (stream.TryPopBatch(batch_idx, local_state.batch_buffer)) {
+		case QuackDataStream::PopBatchStatus::BATCH:
+			local_state.current_batch_index = batch_idx;
+			continue;
+		case QuackDataStream::PopBatchStatus::FINISHED:
 			output.SetCardinality(0);
 			return;
-		case QuackDataStream::PopStatus::ERRORED:
+		case QuackDataStream::PopBatchStatus::ERRORED:
 			stream.GetError().Throw();
-			return; // unreachable
-		case QuackDataStream::PopStatus::EMPTY: {
-			// No data yet but the stream isn't finished: hand off a wait task on the ASYNC pool.
+			return;
+		case QuackDataStream::PopBatchStatus::EMPTY: {
 			vector<unique_ptr<AsyncTask>> tasks;
 			tasks.push_back(make_uniq<QuackWaitForChunkTask>(bind_data.stream));
 			AsyncResult res(std::move(tasks), TaskSchedulerType::ASYNC);
 			if (input.results_execution_mode == AsyncResultsExecutionMode::TASK_EXECUTOR) {
-				// Park the pipeline thread; the executor reschedules this scan when the task completes.
 				input.async_result = std::move(res);
 				return;
 			}
-			// SYNCHRONOUS mode (e.g. async_threads=0): run the wait inline, then retry.
+			// Synchronous fallback (async_threads=0): run the wait inline, then retry.
 			res.ExecuteTasksSynchronously();
 			if (context.IsInterrupted()) {
 				throw InterruptException();
 			}
-			break; // retry TryPop
+			break;
 		}
 		}
 	}
@@ -148,7 +152,6 @@ static OperatorPartitionData QuackScanFromClientGetPartitionData(ClientContext &
 TableFunction QuackScanFromClientFunction::GetFunction() {
 	TableFunction fun("scan_data_from_quack_client", {LogicalType::VARCHAR}, QuackScanFromClient,
 	                  QuackScanFromClientBind, QuackScanFromClientInitGlobal, QuackScanFromClientInitLocal);
-	// Advertise batch-index partitioning so the planner selects PhysicalBatchInsert.
 	fun.get_partition_data = QuackScanFromClientGetPartitionData;
 	return fun;
 }

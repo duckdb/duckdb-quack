@@ -173,6 +173,18 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("quack_fetch_batch_chunks", "Maximum number of DataChunks returned per FETCH response",
 	                          LogicalType::UBIGINT, Value::UBIGINT(12));
 
+	config.AddExtensionOption("quack_send_data_flush_rows",
+	                          "Rows a thread buffers before flushing one SEND_DATA_REQUEST (0 = default 204800)",
+	                          LogicalType::UBIGINT, Value::UBIGINT(0));
+
+	config.AddExtensionOption("quack_server_max_connections",
+	                          "Maximum concurrent connections the RPC server accepts; beyond this new "
+	                          "connections are refused",
+	                          LogicalType::UBIGINT, Value::UBIGINT(1024), nullptr, SetScope::GLOBAL);
+	config.AddExtensionOption("quack_server_keep_alive_timeout",
+	                          "Seconds an idle keep-alive connection is kept open by the RPC server",
+	                          LogicalType::UBIGINT, Value::UBIGINT(300), nullptr, SetScope::GLOBAL);
+
 	// Process-wide fallback anchor for whoami().uptime when whoami_started_at isn't set.
 	// Stored as BIGINT epoch-microseconds to stay TZ-invariant regardless of ICU state.
 	config.AddExtensionOption("quack_loaded_at_us", "Epoch microseconds at extension load", LogicalType::BIGINT,
