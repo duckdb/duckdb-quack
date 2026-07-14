@@ -179,6 +179,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "FETCH requests kept in flight ahead of the scan (0 = number of async threads)",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
 
+	config.AddExtensionOption("quack_debug_fetch_delay_ms",
+	                          "DEBUG SETTING: max random delay in ms before a FETCH response is published, "
+	                          "stressing out-of-order batch arrival",
+	                          LogicalType::UBIGINT, Value::UBIGINT(0));
+
 	config.AddExtensionOption("quack_send_data_flush_rows",
 	                          "Rows a thread buffers before flushing one SEND_DATA_REQUEST (0 = default 204800)",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
