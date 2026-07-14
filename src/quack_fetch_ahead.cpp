@@ -1,6 +1,11 @@
 #include "quack_fetch_ahead.hpp"
 
+#include "duckdb/common/enums/task_scheduler_type.hpp"
+#include "duckdb/common/random_engine.hpp"
+#include "duckdb/common/thread.hpp"
+#include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/parallel/async_result.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 
 namespace duckdb {
@@ -14,8 +19,8 @@ namespace duckdb {
 // could be nice.
 class QuackFetchDataTask : public AsyncTask {
 public:
-	QuackFetchDataTask(QuackFetchAhead &fetch_ahead_p, unique_ptr<QuackClientWrapper> client_wrapper_p)
-	    : fetch_ahead(fetch_ahead_p), client_wrapper(std::move(client_wrapper_p)) {
+	QuackFetchDataTask(QuackFetcher &fetcher_p, unique_ptr<QuackClientWrapper> client_wrapper_p)
+	    : fetcher(fetcher_p), client_wrapper(std::move(client_wrapper_p)) {
 	}
 
 	void Execute() override {
@@ -24,12 +29,12 @@ public:
 		try {
 			ExecuteInternal();
 		} catch (std::exception &ex) {
-			fetch_ahead.buffer->SetError(ErrorData(ex));
-			fetch_ahead.FinishTask(std::move(client_wrapper), false);
+			fetcher.buffer->SetError(ErrorData(ex));
+			fetcher.FinishTask(std::move(client_wrapper), false);
 			throw;
 		} catch (...) {
-			fetch_ahead.buffer->SetError(ErrorData("Unknown error in quack fetch task"));
-			fetch_ahead.FinishTask(std::move(client_wrapper), false);
+			fetcher.buffer->SetError(ErrorData("Unknown error in quack fetch task"));
+			fetcher.FinishTask(std::move(client_wrapper), false);
 			throw;
 		}
 	}
@@ -39,7 +44,7 @@ private:
 		auto &client = client_wrapper->GetClient();
 		auto start_time = QuackNowMillis();
 		// context=nullptr: called off the execution thread, must not touch ClientContext.
-		auto response_body = client.PostRaw(nullptr, fetch_ahead.payload->GetData(), fetch_ahead.payload_size);
+		auto response_body = client.PostRaw(nullptr, fetcher.payload->GetData(), fetcher.payload_size);
 		auto duration_ms = QuackNowMillis() - start_time;
 
 		auto response = QuackClient::DecodeResponse(response_body);
@@ -48,8 +53,8 @@ private:
 		if (response->Type() == MessageType::ERROR_RESPONSE) {
 			error = response->Cast<ErrorResponse>().ErrorMessage();
 		}
-		client.LogRequest(Logger::Get(fetch_ahead.logger), MessageType::FETCH_REQUEST, fetch_ahead.connection_id,
-		                  fetch_ahead.client_query_id, string(), duration_ms, response->Type(), error);
+		client.LogRequest(Logger::Get(fetcher.logger), MessageType::FETCH_REQUEST, fetcher.connection_id,
+		                  fetcher.client_query_id, string(), duration_ms, response->Type(), error);
 
 		if (response->Type() == MessageType::ERROR_RESPONSE) {
 			response->Cast<ErrorResponse>().Error().Throw();
@@ -62,10 +67,15 @@ private:
 		auto &wrappers = fetch_response.MutableResults();
 		// Recycle the client before publishing: a consumer TopUp triggered by this batch must
 		// find an idle client.
-		fetch_ahead.ReturnClient(std::move(client_wrapper));
+		fetcher.ReturnClient(std::move(client_wrapper));
+		if (fetcher.debug_delay_ms > 0) {
+			// DEBUG SETTING: randomize publish order to stress ordered batch delivery
+			RandomEngine random;
+			ThreadUtil::SleepMs(random.NextRandomInteger(0, NumericCast<uint32_t>(fetcher.debug_delay_ms)));
+		}
 		bool pushed = false;
 		if (wrappers.empty()) {
-			fetch_ahead.no_more_fetches = true;
+			fetcher.no_more_fetches = true;
 		} else {
 			auto batch_index = fetch_response.BatchIndex();
 			if (!batch_index.IsValid()) {
@@ -81,21 +91,21 @@ private:
 				chunks.push_back(std::move(owned));
 			}
 			// deliver in index order: scan threads must observe monotonically increasing batch indices
-			fetch_ahead.buffer->PushOrdered(std::move(chunks), batch_index.GetIndex(), 0, true, optional_idx());
+			fetcher.buffer->PushOrdered(std::move(chunks), batch_index.GetIndex(), 0, true, optional_idx());
 			pushed = true;
 		}
-		fetch_ahead.FinishTask(nullptr, pushed);
+		fetcher.FinishTask(nullptr, pushed);
 	}
 
 private:
-	QuackFetchAhead &fetch_ahead;
+	QuackFetcher &fetcher;
 	unique_ptr<QuackClientWrapper> client_wrapper;
 };
 
 //===--------------------------------------------------------------------===//
-// QuackFetchAhead
+// QuackFetcher
 //===--------------------------------------------------------------------===//
-idx_t QuackFetchAhead::GetReadAheadDepth(ClientContext &context) {
+idx_t QuackFetcher::GetReadAheadDepth(ClientContext &context) {
 	Value val;
 	idx_t depth = 0;
 	if (context.TryGetCurrentSetting("quack_fetch_read_ahead", val) && !val.IsNull()) {
@@ -107,13 +117,17 @@ idx_t QuackFetchAhead::GetReadAheadDepth(ClientContext &context) {
 	return depth;
 }
 
-QuackFetchAhead::QuackFetchAhead(ClientContext &context, QuackClientConnection &connection, hugeint_t query_uuid,
-                                 idx_t depth_p)
+QuackFetcher::QuackFetcher(ClientContext &context, QuackClientConnection &connection, hugeint_t query_uuid,
+                           idx_t depth_p)
     : depth(MaxValue<idx_t>(depth_p, 1)) {
 	queue = make_uniq<ManagedAsyncTaskQueue>(context, depth);
 	if (!queue->IsAsync()) {
 		// Register runs the POST inline on the scan thread; deeper pipelining is impossible.
 		depth = 1;
+	}
+	Value delay_val;
+	if (context.TryGetCurrentSetting("quack_debug_fetch_delay_ms", delay_val) && !delay_val.IsNull()) {
+		debug_delay_ms = delay_val.GetValue<uint64_t>();
 	}
 	// Ordered stream: server-assigned FETCH batch indices are dense starting at 1 (the PREPARE
 	// batch is 0), so seed the delivery cursor there and release batches in index order.
@@ -134,11 +148,46 @@ QuackFetchAhead::QuackFetchAhead(ClientContext &context, QuackClientConnection &
 	TopUp();
 }
 
-QuackFetchAhead::~QuackFetchAhead() {
+QuackFetcher::~QuackFetcher() {
 	StopAndDrain();
 }
 
-void QuackFetchAhead::TopUp() {
+QuackFetchResult QuackFetcher::GetBatch(ClientContext &context, TableFunctionInput &input, idx_t &batch_index,
+                                        vector<unique_ptr<DataChunk>> &chunks) {
+	while (true) {
+		switch (buffer->TryPopBatch(batch_index, chunks)) {
+		case QuackDataStream::PopBatchStatus::BATCH:
+			BatchConsumed();
+			return QuackFetchResult::BATCH;
+		case QuackDataStream::PopBatchStatus::FINISHED:
+			exhausted = true;
+			return QuackFetchResult::FINISHED;
+		case QuackDataStream::PopBatchStatus::ERRORED:
+			buffer->GetError().Throw();
+			return QuackFetchResult::FINISHED;
+		case QuackDataStream::PopBatchStatus::EMPTY: {
+			// refill any free pipeline slots before parking
+			TopUp();
+			vector<unique_ptr<AsyncTask>> tasks;
+			tasks.push_back(make_uniq<QuackWaitForChunkTask>(buffer));
+			AsyncResult async_result(std::move(tasks), TaskSchedulerType::ASYNC);
+			if (input.results_execution_mode == AsyncResultsExecutionMode::TASK_EXECUTOR) {
+				// yield BLOCKED; the wait task reschedules this scan once a batch is ready
+				input.async_result = std::move(async_result);
+				return QuackFetchResult::BLOCKED;
+			}
+			// Synchronous fallback (async_threads=0): run the wait inline, then retry.
+			async_result.ExecuteTasksSynchronously();
+			if (context.IsInterrupted()) {
+				throw InterruptException();
+			}
+			continue;
+		}
+		}
+	}
+}
+
+void QuackFetcher::TopUp() {
 	while (!stop && !no_more_fetches) {
 		auto current = outstanding.load();
 		if (current >= depth) {
@@ -162,17 +211,17 @@ void QuackFetchAhead::TopUp() {
 	}
 }
 
-void QuackFetchAhead::BatchConsumed() {
+void QuackFetcher::BatchConsumed() {
 	--outstanding;
 	TopUp();
 }
 
-void QuackFetchAhead::ReturnClient(unique_ptr<QuackClientWrapper> client) {
+void QuackFetcher::ReturnClient(unique_ptr<QuackClientWrapper> client) {
 	lock_guard<mutex> guard(client_lock);
 	idle_clients.push_back(std::move(client));
 }
 
-void QuackFetchAhead::FinishTask(unique_ptr<QuackClientWrapper> client, bool pushed_batch) {
+void QuackFetcher::FinishTask(unique_ptr<QuackClientWrapper> client, bool pushed_batch) {
 	if (client) {
 		ReturnClient(std::move(client));
 	}
@@ -185,7 +234,7 @@ void QuackFetchAhead::FinishTask(unique_ptr<QuackClientWrapper> client, bool pus
 	}
 }
 
-void QuackFetchAhead::StopAndDrain() {
+void QuackFetcher::StopAndDrain() {
 	stop = true;
 	if (queue) {
 		try {

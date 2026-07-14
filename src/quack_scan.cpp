@@ -1,4 +1,3 @@
-#include "duckdb/common/enums/task_scheduler_type.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension_helper.hpp"
@@ -145,8 +144,7 @@ struct QuackScanGlobalState : GlobalTableFunctionState {
 	explicit QuackScanGlobalState(vector<ColumnIndex> column_ids_p, vector<idx_t> projection_id_p,
 	                              vector<ChunkResult> results_p, bool needs_more_fetch_p, hugeint_t query_uuid_p)
 	    : max_threads(needs_more_fetch_p ? MAX_THREADS : 1), column_ids(std::move(column_ids_p)),
-	      projection_ids(std::move(projection_id_p)), needs_more_fetch(needs_more_fetch_p), query_uuid(query_uuid_p),
-	      results(std::move(results_p)) {
+	      projection_ids(std::move(projection_id_p)), query_uuid(query_uuid_p), results(std::move(results_p)) {
 	}
 	idx_t MaxThreads() const override {
 		return max_threads;
@@ -154,10 +152,9 @@ struct QuackScanGlobalState : GlobalTableFunctionState {
 	idx_t max_threads;
 	vector<ColumnIndex> column_ids;
 	vector<idx_t> projection_ids;
-	atomic<bool> needs_more_fetch;
 	hugeint_t query_uuid;
-	//! FETCH read-ahead pipeline; set when needs_more_fetch (see QuackScanInitGlobal).
-	shared_ptr<QuackFetchAhead> fetch_ahead;
+	//! FETCH read-ahead pipeline; set when the PREPARE response signals more batches to fetch.
+	shared_ptr<QuackFetcher> fetcher;
 
 	vector<ChunkResult> TryGetResults() {
 		lock_guard<mutex> guard(lock);
@@ -275,8 +272,8 @@ unique_ptr<GlobalTableFunctionState> QuackScanInitGlobal(ClientContext &context,
 	                                                    needs_more_fetch, query_uuid);
 	if (needs_more_fetch) {
 		// start pipelining FETCH requests on the ASYNC pool before the first scan call
-		global_state->fetch_ahead = make_shared_ptr<QuackFetchAhead>(context, *bind_data.client_connection, query_uuid,
-		                                                             QuackFetchAhead::GetReadAheadDepth(context));
+		global_state->fetcher = make_shared_ptr<QuackFetcher>(context, *bind_data.client_connection, query_uuid,
+		                                                      QuackFetcher::GetReadAheadDepth(context));
 	}
 	return std::move(global_state);
 }
@@ -326,14 +323,12 @@ static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChu
 			}
 		}
 
-		// if that did not work, we consume the next prefetched batch from the read-ahead buffer
-		if (local_state.results.empty() && global_state.needs_more_fetch && global_state.fetch_ahead) {
-			auto &fetch_ahead = *global_state.fetch_ahead;
+		// if that did not work, we consume the next prefetched batch from the fetcher
+		if (local_state.results.empty() && global_state.fetcher && global_state.fetcher->HasMore()) {
 			idx_t batch_index;
 			vector<unique_ptr<DataChunk>> chunks;
-			switch (fetch_ahead.Buffer().TryPopBatch(batch_index, chunks)) {
-			case QuackDataStream::PopBatchStatus::BATCH: {
-				fetch_ahead.BatchConsumed();
+			switch (global_state.fetcher->GetBatch(context, input, batch_index, chunks)) {
+			case QuackFetchResult::BATCH: {
 				// tag fetched chunks like the initial batch (see QuackScanInitGlobal): direct queries
 				// return full-width chunks that still need projection, the catalog path already projected
 				auto fetched_pushdown_type = bind_data.table_name.empty()
@@ -345,32 +340,12 @@ static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChu
 				local_state.current_batch_index = batch_index;
 				continue;
 			}
-			case QuackDataStream::PopBatchStatus::FINISHED:
+			case QuackFetchResult::FINISHED:
 				// server is done, we are done
-				global_state.needs_more_fetch = false;
 				bind_data.completed = true;
 				return;
-			case QuackDataStream::PopBatchStatus::ERRORED:
-				fetch_ahead.Buffer().GetError().Throw();
+			case QuackFetchResult::BLOCKED:
 				return;
-			case QuackDataStream::PopBatchStatus::EMPTY: {
-				// refill any free pipeline slots before parking
-				fetch_ahead.TopUp();
-				vector<unique_ptr<AsyncTask>> tasks;
-				tasks.push_back(make_uniq<QuackWaitForChunkTask>(fetch_ahead.BufferPtr()));
-				AsyncResult async_result(std::move(tasks), TaskSchedulerType::ASYNC);
-				if (input.results_execution_mode == AsyncResultsExecutionMode::TASK_EXECUTOR) {
-					// yield BLOCKED; the wait task reschedules this scan once a batch is ready
-					input.async_result = std::move(async_result);
-					return;
-				}
-				// Synchronous fallback (async_threads=0): run the wait inline, then retry.
-				async_result.ExecuteTasksSynchronously();
-				if (context.IsInterrupted()) {
-					throw InterruptException();
-				}
-				continue;
-			}
 			}
 		}
 		// we did not have anything cached and then request to the server did not yield anything - we are done
