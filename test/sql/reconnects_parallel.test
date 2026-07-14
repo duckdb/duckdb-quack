@@ -1,0 +1,70 @@
+# name: test/sql/reconnects_parallel.test
+# description: exactly-once ACK across a parallel, multi-batch scan (exercises active_fetches / "last ACK last")
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+# One chunk per FETCH batch forces ack_sent machinery is engaged.
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_fetch_batch_chunks = 1;
+
+statement ok quack_db:quack_server_con
+CREATE TABLE big AS SELECT range AS i FROM range(300000);
+
+statement ok
+CREATE SECRET (TYPE quack, TOKEN 'asdf');
+
+statement ok
+ATTACH {server} AS remote;
+
+statement ok
+SET threads = 4;
+
+statement ok
+CALL enable_logging('Quack');
+
+# --- reconnects disabled: full parallel consumption completes and NO ACK is sent ---
+query I
+SELECT count(*) FROM remote.big;
+----
+300000
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('Quack') WHERE message_type = 'ACKNOWLEDGEMENT';
+----
+0
+
+statement ok
+SET quack_enable_reconnects = true;
+
+# --- reconnects enabled: full parallel consumption sends EXACTLY ONE ACK ---
+query I
+SELECT count(*) FROM remote.big;
+----
+300000
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('Quack')
+WHERE message_type = 'ACKNOWLEDGEMENT' AND response_type = 'SUCCESS_RESPONSE';
+----
+1
+
+# A second query sends its own single ACK: exactly one per completed query, never zero, never two.
+query I
+SELECT sum(i) FROM remote.big;
+----
+44999850000
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('Quack')
+WHERE message_type = 'ACKNOWLEDGEMENT' AND response_type = 'SUCCESS_RESPONSE';
+----
+2
+
+statement ok quack_db:quack_server_con
+RESET GLOBAL quack_fetch_batch_chunks;
+
+statement ok
+DETACH remote;
+
+include test/template/quack_teardown.test_template
