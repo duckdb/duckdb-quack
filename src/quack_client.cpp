@@ -4,6 +4,7 @@
 #include "duckdb/parallel/task_scheduler.hpp"
 
 #include "quack_client.hpp"
+#include "quack_compression.hpp"
 #include "quack_uri.hpp"
 
 namespace duckdb {
@@ -46,7 +47,16 @@ void QuackClient::EncodeRequest(optional_ptr<ClientContext> context, QuackMessag
 }
 
 unique_ptr<QuackMessage> QuackClient::DecodeResponse(const string &response_body) {
-	MemoryStream read_stream((data_ptr_t)response_body.data(), response_body.size());
+	auto data = const_data_ptr_cast(response_body.data());
+	idx_t size = response_body.size();
+	if (QuackCompression::IsCompressedFrame(data, size)) {
+		// DataChunk::Deserialize copies the data, so the scratch buffer may die on return
+		idx_t raw_size;
+		auto raw = QuackCompression::Decompress(data, size, raw_size);
+		MemoryStream read_stream(raw.get(), raw_size);
+		return QuackMessage::FromMemoryStream(read_stream);
+	}
+	MemoryStream read_stream((data_ptr_t)response_body.data(), size);
 	return QuackMessage::FromMemoryStream(read_stream);
 }
 
