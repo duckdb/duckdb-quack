@@ -66,7 +66,6 @@ const QuackUri &QuackCatalog::GetServerUri() {
 }
 
 unique_ptr<ColumnDataCollection> QuackCatalog::ExecuteCommandInternal(ClientContext &context, const string &query) {
-	// FIXME this will break with many results!
 	auto chunk_collection = make_uniq<ColumnDataCollection>(Allocator::DefaultAllocator());
 	// get a client to query
 	auto client_wrapper = client_connection->GetClient(context);
@@ -76,6 +75,23 @@ unique_ptr<ColumnDataCollection> QuackCatalog::ExecuteCommandInternal(ClientCont
 	chunk_collection->Initialize(response->Types());
 	for (auto &chunk : response->MutableResults()) {
 		chunk_collection->Append(chunk->Chunk());
+	}
+	// The PREPARE response only carries the first batch (at most quack_fetch_batch_chunks chunks).
+	// These commands load the catalog, so anything left behind is not a truncated result set - it
+	// is a schema, table or view that silently ceases to exist. Drain the rest.
+	auto result_uuid = response->ResultUUID();
+	auto needs_more_fetch = response->NeedsMoreFetch();
+	while (needs_more_fetch) {
+		auto fetch_response = client.Request<FetchResponseMessage>(
+		    context, make_uniq<FetchRequestMessage>(GetConnectionId(), result_uuid));
+		if (fetch_response->MutableResults().empty()) {
+			// an empty FETCH is how the server says the result is exhausted (cf. QuackScan)
+			needs_more_fetch = false;
+			break;
+		}
+		for (auto &chunk : fetch_response->MutableResults()) {
+			chunk_collection->Append(chunk->Chunk());
+		}
 	}
 	return chunk_collection;
 }
