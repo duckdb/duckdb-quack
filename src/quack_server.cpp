@@ -299,7 +299,8 @@ bool MessageRequiresConnection(MessageType type) {
 }
 
 // main switcheroo happens here
-unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
+unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream,
+                                                    QuackCompressionConfig &send_compression) {
 	auto db = db_ptr.lock();
 	if (!db) {
 		return make_uniq<ErrorResponse>("Database was closed");
@@ -338,7 +339,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
 	auto received_message = QuackMessage::DeserializeMessage(deserializer, header);
 
 	// process the message
-	auto response = HandleMessageInternal(*db, *received_message, connection);
+	auto response = HandleMessageInternal(*db, *received_message, connection, send_compression);
 
 	if (should_log) {
 		auto duration_ms = QuackNowMillis() - start_time;
@@ -381,7 +382,8 @@ static vector<unique_ptr<DataChunkWrapper>> CreateBatch(Allocator &allocator, un
 }
 
 unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db, QuackMessage &received_message,
-                                                            optional_ptr<QuackConnection> connection_p) {
+                                                            optional_ptr<QuackConnection> connection_p,
+                                                            QuackCompressionConfig &send_compression) {
 	if (connection_p) {
 		// A message unrelated to the active insert stream means it was abandoned (client source failed, no
 		// FINALIZE) — abort it so it rolls back and releases the connection lock.
@@ -480,6 +482,8 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		if (!needs_more_fetch && connection.query_state == QuackQueryState::ACTIVE) {
 			connection.query_state = QuackQueryState::FINISHED;
 		}
+		// Connection-scoped: a SET through the query passthrough lands in this session.
+		send_compression = QuackCompressionConfig::FromContext(*connection.duckdb_connection->context);
 		return make_uniq<PrepareResponseMessage>(types, names, std::move(results), needs_more_fetch,
 		                                         connection.query_uuid);
 	}
@@ -517,6 +521,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		if (!connection.duckdb_query_result && connection.query_state == QuackQueryState::ACTIVE) {
 			connection.query_state = QuackQueryState::FINISHED;
 		}
+		send_compression = QuackCompressionConfig::FromContext(*connection.duckdb_connection->context);
 		return make_uniq<FetchResponseMessage>(std::move(results), optional_idx(assigned_batch_index));
 	}
 

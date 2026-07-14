@@ -9,6 +9,7 @@
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/unordered_map.hpp"
 
+#include "quack_compression.hpp"
 #include "quack_uri.hpp"
 
 #include "httplib.hpp" // TODO forward declare
@@ -25,6 +26,7 @@ class PreparedStatement;
 class EncryptionState;
 class QuackDataStream;
 class ErrorData;
+enum class MessageType : uint8_t;
 
 enum class QuackQueryState : uint8_t { IDLE, ACTIVE, FINISHED, CANCELLED, QUACK_ERROR };
 
@@ -136,9 +138,11 @@ public:
 	}
 
 protected:
-	unique_ptr<QuackMessage> HandleMessage(MemoryStream &read_stream);
+	//! `send_compression` is filled from the connection's session: response compression is per-connection.
+	unique_ptr<QuackMessage> HandleMessage(MemoryStream &read_stream, QuackCompressionConfig &send_compression);
 	unique_ptr<QuackMessage> HandleMessageInternal(DatabaseInstance &db, QuackMessage &received_message,
-	                                               optional_ptr<QuackConnection> connection);
+	                                               optional_ptr<QuackConnection> connection,
+	                                               QuackCompressionConfig &send_compression);
 
 protected:
 	std::vector<std::thread> listen_threads;
