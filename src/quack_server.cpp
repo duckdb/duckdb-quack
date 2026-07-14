@@ -36,7 +36,9 @@ QuackServer::QuackServer(ClientContext &context_p, const QuackUri &uri_p, const 
 string QuackServer::TokenFromSecret(ClientContext &context, const QuackUri &uri) {
 	auto &secret_manager = SecretManager::Get(context);
 	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
-	auto match = secret_manager.LookupSecret(transaction, uri.Uri(), "quack");
+	// Look up by the canonical form: secret scopes are matched as plain string prefixes, so
+	// `uri.Uri()` would make the match depend on how the endpoint was spelled.
+	auto match = secret_manager.LookupSecret(transaction, uri.CanonicalUri(), "quack");
 	if (match.HasMatch()) {
 		const auto &kv = dynamic_cast<const KeyValueSecret &>(*match.secret_entry->secret);
 		return kv.TryGetValue("token", true).ToString();

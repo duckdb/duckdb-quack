@@ -17,9 +17,11 @@ public:
 	string Uri() const {
 		return uri;
 	}
-	//! Fully-qualified canonical form, always `quack:<host>:<port>`
+	//! Fully-qualified canonical form, always `quack:<host>:<port>`. An IPv6 host is
+	//! bracketed (`quack:[::1]:9494`), as it is in `Http()` — without the brackets the
+	//! form is ambiguous and does not parse back into a QuackUri.
 	string CanonicalUri() const {
-		return "quack:" + host + ":" + std::to_string(port);
+		return "quack:" + (ipv6 ? "[" + host + "]" : host) + ":" + std::to_string(port);
 	}
 	string Host() const {
 		return host;
