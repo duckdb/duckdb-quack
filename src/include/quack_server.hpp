@@ -74,7 +74,7 @@ struct QuackConnection {
 	hugeint_t query_uuid;
 	string session_id;
 
-	//! Stable per-client reconnect key: HMAC-SHA256(server_secret, client_id). Intentionally excludes
+	//! Stable per-client reconnect key: HMAC-SHA256(server_hmac_key, client_id). Intentionally excludes
 	//! session_id so it stays identical across (re)connections for the same client_id. Empty if no client_id.
 	string client_id_hash;
 	string sql_query;
@@ -159,8 +159,8 @@ protected:
 
 private:
 	string token;
-	//! Server-private secret that keys client_id_hash.
-	string server_secret;
+	//! Per-server random key that seeds the HMAC for client_id_hash.
+	string server_hmac_key;
 };
 
 class HttpQuackServer : public QuackServer {

@@ -186,8 +186,19 @@ QuackClientConnection::~QuackClientConnection() {
 	}
 }
 
+void QuackClient::ValidateClientId(const string &client_id) {
+	// An empty client_id means "no client_id" (opt-out); anything non-empty must carry a little entropy,
+	// mirroring the >= 4 minimum QuackServer::ValidateToken enforces on the token.
+	if (!client_id.empty() && client_id.size() < 4) {
+		throw InvalidInputException("client_id must be at least 4 characters long");
+	}
+}
+
 shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &context, const QuackUri &uri,
                                                                string token, string client_id) {
+	// Single choke point for every connection path (ATTACH + quack_query), so a malformed client_id is
+	// rejected here regardless of where it came from.
+	ValidateClientId(client_id);
 	// if no token is provided fetch it from the secret manager
 	if (token.empty()) {
 		auto &secret_manager = SecretManager::Get(context);
@@ -206,8 +217,8 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 	auto client = QuackClient::GetClient(context, uri);
 
 	// submit the connection request
-	auto connection_request_response =
-	    client->Request<ConnectionResponseMessage>(context, make_uniq<ConnectionRequestMessage>(token, std::move(client_id)));
+	auto connection_request_response = client->Request<ConnectionResponseMessage>(
+	    context, make_uniq<ConnectionRequestMessage>(token, std::move(client_id)));
 	// Validate the server's selected protocol version before trusting the connection (client speaks QUACK_VERSION).
 	if (connection_request_response->QuackVersion() != QUACK_VERSION) {
 		throw IOException("Incompatible Quack protocol version: server uses %llu, client supports %llu",

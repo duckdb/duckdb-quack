@@ -59,6 +59,9 @@ public:
 	static shared_ptr<QuackClientConnection> ConnectToServer(ClientContext &context, const QuackUri &uri, string token,
 	                                                         string client_id = {});
 
+	//! Throw unless `client_id` is either empty ("no client_id") or >= 4 characters
+	static void ValidateClientId(const string &client_id);
+
 protected:
 	//! Resolve the logger for a request: the context (per-query) logger when available, else the db logger.
 	Logger &GetRequestLogger(optional_ptr<ClientContext> context);

@@ -62,6 +62,7 @@ SELECT count(*) FILTER (WHERE client_id_hash IS NOT NULL) from quack_active_conn
 1
 
 # the hash must not be reproducible from public inputs
+query I quack_db:quack_server_con
 SELECT lower(client_id_hash) NOT IN (
          sha256('asdf' || 'random_client_id'),
          sha256('random_client_id' || 'asdf'),
