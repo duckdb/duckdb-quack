@@ -109,6 +109,33 @@ endloop
 statement ok
 reset async_threads;
 
+# reorder stress: quack_debug_fetch_delay_ms randomly delays each fetch task's publish, scrambling
+# completion order far more aggressively than the network does; ordered delivery must still hold
+statement ok
+SET async_threads=8;
+
+statement ok
+SET quack_debug_fetch_delay_ms=15;
+
+statement ok
+create or replace table delayed_ctas as select i from rpc.big500;
+
+query I
+select count(*) from (select i, row_number() over () - 1 rn from delayed_ctas) where i != rn
+----
+0
+
+query II
+select count(*), sum(i) from quack_query({server}, 'from big', token='asdf')
+----
+100000	4999950000
+
+statement ok
+reset quack_debug_fetch_delay_ms;
+
+statement ok
+reset async_threads;
+
 # mid-stream error: the cast fails long after the PREPARE batch, so the error surfaces on a FETCH
 statement error
 select * from quack_query({server}, 'select (case when range < 90000 then range::varchar else ''oops'' end)::int from range(100000)', token='asdf')
