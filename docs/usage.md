@@ -159,7 +159,7 @@ SET rpc_default_token = '<token-from-rpc_start>';
 |---------------|---------|------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `disable_ssl` | BOOLEAN | `false`                            | Use plain HTTP instead of HTTPS.                                                                                                                          |
 | `token`       | VARCHAR | quack secret / `rpc_default_token` | Auth token sent to the server; overrides any matching quack secret.                                                                                      |
-| `client_id`   | VARCHAR | *(none)*                           | Opaque client identifier. The server derives a stable per-client hash `md5(token + client_id)`, exposed as `client_id_hash` in `quack_active_connections()`. |
+| `client_id`   | VARCHAR | *(none)*                           | Opaque client identifier. The server derives a stable per-client hash `HMAC-SHA256(server_secret, client_id)` (keyed with a private per-server secret, so it is not reproducible by clients), exposed as `client_id_hash` in `quack_active_connections()`. |
 
 ---
 
@@ -186,7 +186,7 @@ Fields on each entry:
 |--------------------|--------------------------------------------------------------------|
 | `message_type`      | Request type: `PREPARE_REQUEST`, `FETCH_REQUEST`, etc.             |
 | `rpc_connection_id` | Server-issued connection id (stable across requests in one ATTACH).|
-| `client_id_hash`    | Per-client reconnect hash `md5(token + client_id)`; NULL if no `client_id`.|
+| `client_id_hash`    | Per-client reconnect hash `HMAC-SHA256(server_secret, client_id)`; NULL if no `client_id`.|
 | `client_query_id`   | Monotonic id assigned by the client; correlates client/server logs.|
 | `query`             | SQL payload for `PREPARE_REQUEST`s.                                |
 | `server`            | HTTP(S) URL on client-side logs; NULL on server-side logs.         |

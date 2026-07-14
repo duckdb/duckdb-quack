@@ -1,4 +1,3 @@
-#include "duckdb/common/crypto/md5.hpp"
 #include "duckdb/common/encryption_state.hpp"
 #include "duckdb/common/render_tree.hpp"
 #include "duckdb/common/types/blob.hpp"
@@ -15,6 +14,8 @@
 #include "quack_log.hpp"
 #include "quack_storage.hpp"
 #include "quack_data_stream.hpp"
+
+#include "mbedtls_wrapper.hpp"
 
 namespace duckdb {
 QuackConnection::QuackConnection(string session_id_p) : session_id(std::move(session_id_p)) {
@@ -142,6 +143,7 @@ void QuackServer::ValidateToken(const string &token) {
 QuackServer::QuackServer(ClientContext &context_p, const QuackUri &uri_p, const string &token_p)
     : db_ptr(context_p.db), uri(uri_p), token(token_p) {
 	ValidateToken(token);
+	server_secret = GenerateRandomToken(*context_p.db);
 }
 
 QuackServer::~QuackServer() {
@@ -229,13 +231,6 @@ static Value EvaluateAuthQuery(DatabaseInstance &db, const string &sql, ARGS... 
 
 static constexpr idx_t kTokenBytes = 16; // 128 bits
 
-static string ComputeClientHash(const string &token, const string &client_id) {
-	MD5Context context;
-	context.Add(token);
-	context.Add(client_id);
-	return context.FinishHex();
-}
-
 static string HexEncode(const data_t *bytes, idx_t n) {
 	string result(n * 2, '\0');
 	for (idx_t i = 0; i < n; i++) {
@@ -243,6 +238,14 @@ static string HexEncode(const data_t *bytes, idx_t n) {
 		result[2 * i + 1] = Blob::HEX_TABLE[bytes[i] & 0x0F];
 	}
 	return result;
+}
+
+// Derive a stable, per-client reconnect identifier as HMAC-SHA256(server_secret, client_id)
+static string ComputeClientHash(const string &server_secret, const string &client_id) {
+	unsigned char digest[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES];
+	duckdb_mbedtls::MbedTlsWrapper::Hmac256(server_secret.data(), server_secret.size(), client_id.data(),
+	                                        client_id.size(), reinterpret_cast<char *>(digest));
+	return HexEncode(digest, duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES);
 }
 
 string QuackServer::GenerateRandomToken(DatabaseInstance &db) {
@@ -416,7 +419,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		}
 		string client_id_hash;
 		if (!connection_request_message.ClientId().empty()) {
-			client_id_hash = ComputeClientHash(Token(), connection_request_message.ClientId());
+			client_id_hash = ComputeClientHash(server_secret, connection_request_message.ClientId());
 		}
 		return make_uniq<ConnectionResponseMessage>(CreateNewConnection(session_id, client_id_hash));
 	}

@@ -61,9 +61,8 @@ SELECT count(*) FILTER (WHERE client_id_hash IS NOT NULL) from quack_active_conn
 ----
 1
 
-# check the actual md5 formula: hash(token + client_id), NOT including session_id/connection_id
 query I quack_db:quack_server_con
-SELECT client_id_hash = md5('asdf' || 'random_client_id')
+SELECT client_id_hash <> md5('asdf' || 'random_client_id') AND length(client_id_hash) = 64
   from quack_active_connections() WHERE client_id_hash IS NOT NULL;
 ----
 true

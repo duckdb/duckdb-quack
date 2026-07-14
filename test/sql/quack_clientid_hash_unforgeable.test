@@ -1,0 +1,21 @@
+# name: test/sql/quack_clientid_hash_unforgeable.test
+# description: client_id_hash must be keyed with a server-private secret so a token holder cannot reproduce it
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok
+attach {server} as rc (token 'asdf', client_id 'victim_client');
+
+# SECURITY CONTRACT: knowing the shared token 'asdf' + the client_id must NOT let anyone recompute the hash
+# (else a co-tenant holding the same server token could forge victim_client's reconnect key)
+query I quack_db:quack_server_con
+SELECT client_id_hash <> md5('asdf' || 'victim_client')
+  FROM quack_active_connections() WHERE client_id_hash IS NOT NULL;
+----
+true
+
+statement ok
+detach rc;
+
+include test/template/quack_teardown.test_template

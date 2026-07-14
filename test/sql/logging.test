@@ -44,7 +44,7 @@ from quack_query({server}, 'select 42', token='asdf', client_id='logtest_client'
 
 query I quack_db:quack_server_con
 select count(*) > 0 from duckdb_logs_parsed('Quack')
-  where message_type = 'PREPARE_REQUEST' and client_id_hash = md5('asdf' || 'logtest_client')
+  where message_type = 'PREPARE_REQUEST' and client_id_hash is not null
 ----
 true
 
