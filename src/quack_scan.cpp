@@ -131,10 +131,14 @@ struct QuackScanLocalState : public LocalTableFunctionState {
 	~QuackScanLocalState() override {
 	}
 
-	//! batch_index of the batch that `fetched_results` currently holds chunks from (server-assigned).
-	//! Surfaced to DuckDB via get_partition_data so downstream order-preserving operators
-	//! (CTAS, COPY TO, INSERT SELECT) can run the scan in parallel without losing order.
+	//! Server-assigned index of the batch currently being drained; surfaced via get_partition_data
+	//! so order-preserving operators (CTAS, COPY TO) can run the scan in parallel without losing order.
 	optional_idx current_batch_index;
+
+	//! This thread's outstanding batch claim; persists across BLOCKED yields until the batch arrives.
+	optional_idx fetch_claim;
+	//! The stream ended below this thread's claim; no more batches for this thread.
+	bool fetch_exhausted = false;
 
 	queue<ChunkResult> results;
 	ColumnDataScanState scan_state;
@@ -323,11 +327,11 @@ static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChu
 			}
 		}
 
-		// if that did not work, we consume the next prefetched batch from the fetcher
-		if (local_state.results.empty() && global_state.fetcher && global_state.fetcher->HasMore()) {
+		// if that did not work, we consume this thread's claimed batch from the fetcher
+		if (local_state.results.empty() && global_state.fetcher && !local_state.fetch_exhausted) {
 			idx_t batch_index;
 			vector<unique_ptr<DataChunk>> chunks;
-			switch (global_state.fetcher->GetBatch(context, input, batch_index, chunks)) {
+			switch (global_state.fetcher->GetBatch(context, input, local_state.fetch_claim, batch_index, chunks)) {
 			case QuackFetchResult::BATCH: {
 				// tag fetched chunks like the initial batch (see QuackScanInitGlobal): direct queries
 				// return full-width chunks that still need projection, the catalog path already projected
@@ -341,7 +345,8 @@ static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChu
 				continue;
 			}
 			case QuackFetchResult::FINISHED:
-				// server is done, we are done
+				// server is done, this thread is done
+				local_state.fetch_exhausted = true;
 				bind_data.completed = true;
 				return;
 			case QuackFetchResult::BLOCKED:

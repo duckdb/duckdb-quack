@@ -8,15 +8,86 @@
 #include "duckdb/parallel/async_result.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 
+#include <chrono>
+
 namespace duckdb {
+
+//===--------------------------------------------------------------------===//
+// QuackFetchBuffer
+//===--------------------------------------------------------------------===//
+idx_t QuackFetchBuffer::ClaimBatch() {
+	annotated_lock_guard<annotated_mutex> guard(lock);
+	return next_claim++;
+}
+
+void QuackFetchBuffer::PushBatch(idx_t batch_index, vector<unique_ptr<DataChunk>> chunks) {
+	{
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		if (finished || errored) {
+			return;
+		}
+		batches[batch_index] = std::move(chunks);
+	}
+	cv.notify_all();
+}
+
+QuackFetchBuffer::PopStatus QuackFetchBuffer::TryPopClaimed(idx_t claim, vector<unique_ptr<DataChunk>> &chunks_out) {
+	annotated_lock_guard<annotated_mutex> guard(lock);
+	if (errored) {
+		return PopStatus::ERRORED;
+	}
+	auto entry = batches.find(claim);
+	if (entry != batches.end()) {
+		chunks_out = std::move(entry->second);
+		batches.erase(entry);
+		return PopStatus::BATCH;
+	}
+	// Indices are dense and Finish() runs after the last push, so an absent claim can never arrive.
+	if (finished) {
+		return PopStatus::FINISHED;
+	}
+	return PopStatus::EMPTY;
+}
+
+void QuackFetchBuffer::WaitForBatch(idx_t claim) {
+	annotated_unique_lock<annotated_mutex> guard(lock);
+	if (batches.find(claim) != batches.end() || finished || errored) {
+		return;
+	}
+	// Bounded wait so the scan can re-check cancellation even if the batch never arrives.
+	cv.wait_for(guard, std::chrono::milliseconds(200));
+}
+
+void QuackFetchBuffer::Finish() {
+	{
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		finished = true;
+	}
+	cv.notify_all();
+}
+
+void QuackFetchBuffer::SetError(ErrorData error_p) {
+	{
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		if (!errored) {
+			errored = true;
+			error = std::move(error_p);
+		}
+		finished = true;
+	}
+	cv.notify_all();
+}
+
+ErrorData QuackFetchBuffer::GetError() {
+	annotated_lock_guard<annotated_mutex> guard(lock);
+	return error;
+}
 
 //===--------------------------------------------------------------------===//
 // Async fetch task
 //===--------------------------------------------------------------------===//
-// Performs the blocking FETCH POST + response decode on an ASYNC-pool thread and publishes the
-// decoded batch into the read-ahead buffer under the server-assigned batch index.
-// TODO: there's read ahead logic implemented in core for multi file reader, a common abstraction
-// could be nice.
+// Runs the FETCH POST + response decode on an ASYNC-pool thread, publishing the decoded batch.
+// TODO: possibly converge with core's multi-file read-ahead abstraction.
 class QuackFetchDataTask : public AsyncTask {
 public:
 	QuackFetchDataTask(QuackFetcher &fetcher_p, unique_ptr<QuackClientWrapper> client_wrapper_p)
@@ -24,8 +95,7 @@ public:
 	}
 
 	void Execute() override {
-		// Surface errors through the buffer first so blocked scan threads wake and rethrow them,
-		// then let the queue capture them as well.
+		// Surface errors through the buffer first so blocked scan threads wake and rethrow them.
 		try {
 			ExecuteInternal();
 		} catch (std::exception &ex) {
@@ -65,8 +135,7 @@ private:
 
 		auto &fetch_response = response->Cast<FetchResponseMessage>();
 		auto &wrappers = fetch_response.MutableResults();
-		// Recycle the client before publishing: a consumer TopUp triggered by this batch must
-		// find an idle client.
+		// Recycle the client before publishing: a TopUp triggered by this batch needs an idle client.
 		fetcher.ReturnClient(std::move(client_wrapper));
 		if (fetcher.debug_delay_ms > 0) {
 			// DEBUG SETTING: randomize publish order to stress ordered batch delivery
@@ -90,8 +159,8 @@ private:
 				owned->Reference(wrapper->Chunk());
 				chunks.push_back(std::move(owned));
 			}
-			// deliver in index order: scan threads must observe monotonically increasing batch indices
-			fetcher.buffer->PushOrdered(std::move(chunks), batch_index.GetIndex(), 0, true, optional_idx());
+			// the thread that claimed this index pops exactly this batch
+			fetcher.buffer->PushBatch(batch_index.GetIndex(), std::move(chunks));
 			pushed = true;
 		}
 		fetcher.FinishTask(nullptr, pushed);
@@ -129,10 +198,8 @@ QuackFetcher::QuackFetcher(ClientContext &context, QuackClientConnection &connec
 	if (context.TryGetCurrentSetting("quack_debug_fetch_delay_ms", delay_val) && !delay_val.IsNull()) {
 		debug_delay_ms = delay_val.GetValue<uint64_t>();
 	}
-	// Ordered stream: server-assigned FETCH batch indices are dense starting at 1 (the PREPARE
-	// batch is 0), so seed the delivery cursor there and release batches in index order.
-	buffer = make_shared_ptr<QuackDataStream>(vector<LogicalType>(), true);
-	buffer->SetWatermarkAndDrain(optional_idx(1));
+	// Claims start at 1: server-assigned FETCH batch indices are dense from 1 (the PREPARE batch is 0).
+	buffer = make_shared_ptr<QuackFetchBuffer>();
 
 	FetchRequestMessage fetch_msg(connection.ConnectionId(), query_uuid);
 	payload = make_uniq<MemoryStream>();
@@ -152,24 +219,28 @@ QuackFetcher::~QuackFetcher() {
 	StopAndDrain();
 }
 
-QuackFetchResult QuackFetcher::GetBatch(ClientContext &context, TableFunctionInput &input, idx_t &batch_index,
-                                        vector<unique_ptr<DataChunk>> &chunks) {
+QuackFetchResult QuackFetcher::GetBatch(ClientContext &context, TableFunctionInput &input, optional_idx &claim,
+                                        idx_t &batch_index, vector<unique_ptr<DataChunk>> &chunks) {
+	if (!claim.IsValid()) {
+		claim = optional_idx(buffer->ClaimBatch());
+	}
 	while (true) {
-		switch (buffer->TryPopBatch(batch_index, chunks)) {
-		case QuackDataStream::PopBatchStatus::BATCH:
+		switch (buffer->TryPopClaimed(claim.GetIndex(), chunks)) {
+		case QuackFetchBuffer::PopStatus::BATCH:
+			batch_index = claim.GetIndex();
+			claim = optional_idx();
 			BatchConsumed();
 			return QuackFetchResult::BATCH;
-		case QuackDataStream::PopBatchStatus::FINISHED:
-			exhausted = true;
+		case QuackFetchBuffer::PopStatus::FINISHED:
 			return QuackFetchResult::FINISHED;
-		case QuackDataStream::PopBatchStatus::ERRORED:
+		case QuackFetchBuffer::PopStatus::ERRORED:
 			buffer->GetError().Throw();
 			return QuackFetchResult::FINISHED;
-		case QuackDataStream::PopBatchStatus::EMPTY: {
+		case QuackFetchBuffer::PopStatus::EMPTY: {
 			// refill any free pipeline slots before parking
 			TopUp();
 			vector<unique_ptr<AsyncTask>> tasks;
-			tasks.push_back(make_uniq<QuackWaitForChunkTask>(buffer));
+			tasks.push_back(make_uniq<QuackWaitForBatchTask>(buffer, claim.GetIndex()));
 			AsyncResult async_result(std::move(tasks), TaskSchedulerType::ASYNC);
 			if (input.results_execution_mode == AsyncResultsExecutionMode::TASK_EXECUTOR) {
 				// yield BLOCKED; the wait task reschedules this scan once a batch is ready

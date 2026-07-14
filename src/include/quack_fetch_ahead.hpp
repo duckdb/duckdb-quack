@@ -1,11 +1,18 @@
 #pragma once
 
 #include "duckdb/common/atomic.hpp"
+#include "duckdb/common/error_data.hpp"
+#include "duckdb/common/mutex.hpp"
+#include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/serializer/async_task_queue.hpp"
 #include "duckdb/common/serializer/memory_stream.hpp"
+#include "duckdb/common/types/data_chunk.hpp"
+#include "duckdb/parallel/async_result.hpp"
+
+#include <condition_variable>
+#include <map>
 
 #include "quack_client.hpp"
-#include "quack_data_stream.hpp"
 
 namespace duckdb {
 
@@ -13,17 +20,66 @@ struct TableFunctionInput;
 
 //! Result of QuackFetcher::GetBatch, from the consuming scan thread's perspective.
 enum class QuackFetchResult : uint8_t {
-	//! A batch was popped; its chunks and batch index are set.
+	//! The claimed batch was popped.
 	BATCH,
-	//! The server cursor is exhausted and the buffer fully drained.
+	//! The stream ended below this thread's claim; this thread is done.
 	FINISHED,
-	//! No batch ready; the scan yielded via input.async_result and will be rescheduled.
+	//! Batch not ready; the scan yielded via input.async_result and will be rescheduled.
 	BLOCKED
 };
 
-//! Client-side FETCH read-ahead: keeps up to `depth` FETCH requests in flight on the ASYNC pool so
-//! scan threads consume decoded batches from a buffer instead of blocking on the wire. Mirrors the
-//! async SEND_DATA path. Top-up is consumer-driven only: tasks never register new tasks.
+//! Claim-based delivery: FETCH batch indices are dense, so each scan thread claims the next index and
+//! waits for exactly that batch — per-thread order is monotone; downstream sinks reassemble global order.
+class QuackFetchBuffer {
+public:
+	enum class PopStatus : uint8_t {
+		BATCH,
+		EMPTY,
+		FINISHED,
+		ERRORED,
+	};
+
+	//! Claim the next batch index to consume; each index gets exactly one claimant.
+	idx_t ClaimBatch();
+	//! Publish a decoded batch under its server-assigned index.
+	void PushBatch(idx_t batch_index, vector<unique_ptr<DataChunk>> chunks);
+	//! Pop the claimed batch if present. FINISHED means the stream ended and the claim can never arrive.
+	PopStatus TryPopClaimed(idx_t claim, vector<unique_ptr<DataChunk>> &chunks_out);
+	//! Block until the claimed batch arrives, the stream ends, or a short timeout elapses.
+	void WaitForBatch(idx_t claim);
+
+	void Finish();
+	void SetError(ErrorData error_p);
+	ErrorData GetError();
+
+private:
+	annotated_mutex lock;
+	std::condition_variable cv;
+	idx_t next_claim DUCKDB_GUARDED_BY(lock) = 1;
+	//! batch_index -> decoded chunks, awaiting its claimant.
+	std::map<idx_t, vector<unique_ptr<DataChunk>>> batches DUCKDB_GUARDED_BY(lock);
+	bool finished DUCKDB_GUARDED_BY(lock) = false;
+	bool errored DUCKDB_GUARDED_BY(lock) = false;
+	ErrorData error DUCKDB_GUARDED_BY(lock);
+};
+
+//! Async task that parks a blocked scan thread until its claimed batch is available (or the stream ends).
+class QuackWaitForBatchTask : public AsyncTask {
+public:
+	QuackWaitForBatchTask(shared_ptr<QuackFetchBuffer> buffer_p, idx_t claim_p)
+	    : buffer(std::move(buffer_p)), claim(claim_p) {
+	}
+	void Execute() override {
+		buffer->WaitForBatch(claim);
+	}
+
+private:
+	shared_ptr<QuackFetchBuffer> buffer;
+	idx_t claim;
+};
+
+//! Client-side FETCH read-ahead: keeps up to `depth` fetches in flight on the ASYNC pool so scan
+//! threads never block on the wire. Top-up is consumer-driven only: tasks never register new tasks.
 class QuackFetcher {
 	friend class QuackFetchDataTask;
 
@@ -35,15 +91,10 @@ public:
 	//! Resolve the read-ahead depth from the quack_fetch_read_ahead setting (0 = async thread count).
 	static idx_t GetReadAheadDepth(ClientContext &context);
 
-	//! Whether more batches may still arrive; false once GetBatch has returned FINISHED.
-	bool HasMore() const {
-		return !exhausted;
-	}
-
-	//! Pop the next batch, refilling the fetch pipeline as slots free up. When no batch is ready:
-	//! yields BLOCKED through input.async_result if the executor supports it, otherwise waits inline.
-	QuackFetchResult GetBatch(ClientContext &context, TableFunctionInput &input, idx_t &batch_index,
-	                          vector<unique_ptr<DataChunk>> &chunks);
+	//! Pop this thread's claimed batch, claiming a fresh index when `claim` is empty; the claim
+	//! survives BLOCKED yields. Yields via input.async_result when supported, else waits inline.
+	QuackFetchResult GetBatch(ClientContext &context, TableFunctionInput &input, optional_idx &claim,
+	                          idx_t &batch_index, vector<unique_ptr<DataChunk>> &chunks);
 
 	//! Stop topping up and drain all in-flight fetches; errors were already surfaced through the buffer.
 	void StopAndDrain();
@@ -60,7 +111,7 @@ private:
 
 private:
 	unique_ptr<ManagedAsyncTaskQueue> queue;
-	shared_ptr<QuackDataStream> buffer;
+	shared_ptr<QuackFetchBuffer> buffer;
 	//! The FETCH request bytes, encoded once; identical for every fetch of the query.
 	unique_ptr<MemoryStream> payload;
 	idx_t payload_size = 0;
@@ -81,8 +132,6 @@ private:
 	atomic<bool> stop {false};
 	//! Set on the first empty FETCH response; no further fetches are issued.
 	atomic<bool> no_more_fetches {false};
-	//! Consumer-side end-of-stream: the buffer reported FINISHED to GetBatch.
-	atomic<bool> exhausted {false};
 };
 
 } // namespace duckdb
