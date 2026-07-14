@@ -1,0 +1,65 @@
+# name: test/sql/attach_view_fetch_projection_batch_chunks.test
+# description: projected scan of an attached view spanning multiple fetch batches, by batch size
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+# force tiny fetch batches so even a small view spans many FETCH responses
+statement ok
+set global quack_fetch_batch_chunks=1;
+
+foreach server 'quack:localhost'
+
+statement ok con1
+call quack_serve({server}, token='asdf');
+
+# 3-column view so a projected scan is narrower than the wire chunks
+statement ok
+create view big_view as select i, i * 2 as j, 'payload_' || i as k from range(100_000) t(i);
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+# view scans go through quack_query_by_name (bind-time result, client-side pushdown);
+# before the fix, fetch batch 2+ crashed here
+query II
+select count(*), sum(i) from rpc.big_view
+----
+100000	4999950000
+
+# a projected multi-batch quack_query takes the same path
+query II
+select count(*), sum(i) from quack_query({server}, 'from big_view', token='asdf')
+----
+100000	4999950000
+
+# An equal-width PERMUTATION of the columns is the silent failure mode: DataChunk::Reference
+# succeeds (no bounds error, no type error), so continuation batches come back with their
+# columns swapped and the query returns plausible but WRONG numbers instead of raising.
+query IIII
+select min(j), max(j), min(i), max(i) from (select j, i from rpc.big_view)
+----
+0	199998	0	99999
+
+# A projection that is narrower AND mixes types raises a different error than the width-1 case
+# above: DataChunk::Reference iterates over the SOURCE width, so output slot 1 - the VARCHAR k -
+# is handed the source's j, a BIGINT. This is the shape users actually reported (#199):
+#   INTERNAL Error: Vector::Reference used on vector of different type
+#                   (source VARCHAR referenced BIGINT)
+# The width-1 projections above cannot produce it; they run off the end of the output instead.
+query II
+select count(*), max(k) from (select i, k from rpc.big_view)
+----
+100000	payload_99999
+
+statement ok con2
+detach rpc;
+
+statement ok con1
+call quack_stop({server});
+
+endloop
