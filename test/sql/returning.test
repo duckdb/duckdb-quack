@@ -1,0 +1,83 @@
+# name: test/sql/returning.test
+# description: RETURNING is not supported over quack — it must be a clean error, never silently-wrong data
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+foreach server 'quack:localhost'
+
+statement ok con1
+call quack_serve({server}, token='asdf');
+
+statement ok con2
+attach {server} as d (token 'asdf');
+
+statement ok con2
+create table d.items(id integer, name varchar);
+
+# INSERT ... RETURNING used to plan fine and hand back the insert COUNT coerced into
+# column 0, with the remaining columns uninitialized (duckdb-quack#114). A single-row
+# insert disguises it: (1, 'apple') RETURNING * came back as (1, <empty>), and that 1 is
+# the count, not the id. It must throw instead.
+statement error con2
+insert into d.items values (1, 'apple') returning *;
+----
+RETURNING not yet supported for QUACK_INSERT
+
+statement error con2
+insert into d.items values (2, 'pear') returning id;
+----
+RETURNING not yet supported for QUACK_INSERT
+
+statement error con2
+insert into d.items select 3, 'plum' returning id, name;
+----
+RETURNING not yet supported for QUACK_INSERT
+
+# the rejected inserts must not have written anything
+query I con2
+select count(*) from d.items;
+----
+0
+
+# plain INSERT (no RETURNING) keeps working
+statement ok con2
+insert into d.items values (70, 'apple'), (80, 'pear'), (90, 'plum');
+
+query II con2
+select id, name from d.items order by id;
+----
+70	apple
+80	pear
+90	plum
+
+# The other DML paths that can carry RETURNING (UPDATE / DELETE / MERGE INTO) are rejected by
+# the binder before planning even reaches QuackCatalog, because a quack table is not a base
+# table. Pin that here: if any of them is ever implemented, it inherits the RETURNING question,
+# and this test should start failing rather than silently returning the wrong data.
+statement error con2
+update d.items set name = 'x' where id = 70 returning *;
+----
+Can only update base table
+
+statement error con2
+delete from d.items where id = 70 returning *;
+----
+Can only delete from base table
+
+statement error con2
+merge into d.items using (select 70 as id) s on d.items.id = s.id when matched then delete returning *;
+----
+Can only merge into base tables
+
+statement ok con2
+detach d;
+
+statement ok con1
+call quack_stop({server});
+
+endloop

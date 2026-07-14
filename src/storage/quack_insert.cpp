@@ -103,6 +103,9 @@ InsertionOrderPreservingMap<string> QuackInsert::ParamsToString() const {
 
 PhysicalOperator &QuackCatalog::PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner, LogicalInsert &op,
                                            optional_ptr<PhysicalOperator> plan) {
+	if (op.return_chunk) {
+		throw NotImplementedException("RETURNING not yet supported for QUACK_INSERT");
+	}
 	D_ASSERT(plan);
 	if (!op.column_index_map.empty()) {
 		plan = planner.ResolveDefaultsProjection(op, *plan);
