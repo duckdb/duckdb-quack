@@ -186,6 +186,7 @@ Fields on each entry:
 |--------------------|--------------------------------------------------------------------|
 | `message_type`      | Request type: `PREPARE_REQUEST`, `FETCH_REQUEST`, etc.             |
 | `rpc_connection_id` | Server-issued connection id (stable across requests in one ATTACH).|
+| `client_id_hash`    | Per-client reconnect hash `md5(token + client_id)`; NULL if no `client_id`.|
 | `client_query_id`   | Monotonic id assigned by the client; correlates client/server logs.|
 | `query`             | SQL payload for `PREPARE_REQUEST`s.                                |
 | `server`            | HTTP(S) URL on client-side logs; NULL on server-side logs.         |

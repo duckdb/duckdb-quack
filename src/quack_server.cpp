@@ -359,9 +359,10 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
 		if (response->Type() == MessageType::ERROR_RESPONSE) {
 			error = response->Cast<ErrorResponse>().ErrorMessage();
 		}
-		auto msg = QuackLogType::ConstructLogMessage(header.type, header.connection_id, header.client_query_id,
-		                                             ExtractQuery(*received_message), "", end_time - start_time,
-		                                             response->Type(), error);
+		auto client_id_hash = connection ? connection->client_id_hash : string();
+		auto msg = QuackLogType::ConstructLogMessage(header.type, header.connection_id, client_id_hash,
+		                                             header.client_query_id, ExtractQuery(*received_message), "",
+		                                             end_time - start_time, response->Type(), error);
 		logger.WriteLog(QuackLogType::NAME, QuackLogType::LEVEL, msg);
 	}
 
@@ -397,8 +398,12 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 	switch (received_message.Type()) {
 	case MessageType::CONNECTION_REQUEST: {
 		auto &connection_request_message = received_message.Cast<ConnectionRequestMessage>();
-		if (connection_request_message.MinimumSupportedQuackVersion() > 2ULL) {
-			return make_uniq<ErrorResponse>("Unsupported Quack version - server only supports version 2 of quack");
+		if (connection_request_message.MinimumSupportedQuackVersion() > QUACK_VERSION) {
+			return make_uniq<ErrorResponse>(StringUtil::Format(
+			    "Unsupported Quack version - client requires at least version %s, but this server only "
+			    "supports up to version %s",
+			    std::to_string(connection_request_message.MinimumSupportedQuackVersion()),
+			    std::to_string(static_cast<idx_t>(QUACK_VERSION))));
 		}
 		string session_id = GenerateSessionId();
 		auto auth_result = EvaluateAuthQuery(

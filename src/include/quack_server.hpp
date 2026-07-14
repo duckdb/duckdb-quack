@@ -67,7 +67,7 @@ enum class QuackServerState { UNINITIALIZED, WAITING_TO_START, RUNNING, CLOSED }
 
 class QuackServer {
 public:
-	static constexpr const idx_t QUACK_VERSION = 2;
+	static constexpr const idx_t QUACK_VERSION = 3;
 
 public:
 	explicit QuackServer(ClientContext &context_p, const QuackUri &uri_p, const string &token_p);

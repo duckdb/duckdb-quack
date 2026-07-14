@@ -36,6 +36,25 @@ select count(*) > 0 from duckdb_logs_parsed('Quack') where message_type = 'PREPA
 ----
 true
 
+# a query carrying a client_id is logged with its client_id_hash on the server side
+query I
+from quack_query({server}, 'select 42', token='asdf', client_id='logtest_client')
+----
+42
+
+query I quack_db:quack_server_con
+select count(*) > 0 from duckdb_logs_parsed('Quack')
+  where message_type = 'PREPARE_REQUEST' and client_id_hash = md5('asdf' || 'logtest_client')
+----
+true
+
+# the earlier client_id-less query is logged with a NULL client_id_hash
+query I quack_db:quack_server_con
+select count(*) > 0 from duckdb_logs_parsed('Quack')
+  where message_type = 'PREPARE_REQUEST' and client_id_hash is null
+----
+true
+
 # we no longer need a fetch
 query I
 select count(*) > 0 from duckdb_logs_parsed('Quack') where message_type = 'FETCH_REQUEST'
