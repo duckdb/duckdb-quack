@@ -1,0 +1,333 @@
+# name: test/sql/compression.test
+# description: payload compression on the FETCH and SEND_DATA paths
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok quack_db:quack_server_con
+create table big as select range i from range(100000);
+
+statement ok quack_db:quack_server_con
+create table small as select range i from range(5000);
+
+statement ok quack_db:quack_server_con
+create table wide as select range i, repeat('x', 50) s from range(200000);
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+#===--------------------------------------------------------------------===#
+# setting validation
+#===--------------------------------------------------------------------===#
+
+statement error
+set quack_compression='lz4';
+----
+Unknown quack_compression
+
+statement error
+set quack_compression='gzip';
+----
+Unknown quack_compression
+
+statement error
+set quack_compression='zstd-0';
+----
+Unknown quack_compression
+
+statement error
+set quack_compression='zstd-23';
+----
+Unknown quack_compression
+
+statement error
+set quack_compression='zstd-x';
+----
+Unknown quack_compression
+
+#===--------------------------------------------------------------------===#
+# round-trips per codec, on the async-pool and sync-inline decode paths
+#===--------------------------------------------------------------------===#
+
+# force compression of every bulk payload, however small
+statement ok quack_db:quack_server_con
+set global quack_compression_min_size=0;
+
+statement ok
+set quack_compression_min_size=0;
+
+foreach codec none zstd
+
+statement ok quack_db:quack_server_con
+set global quack_compression='{codec}';
+
+statement ok
+set quack_compression='{codec}';
+
+foreach at 0 8
+
+statement ok
+SET async_threads={at};
+
+query II
+select count(*), sum(i) from quack_query({server}, 'from big', token='asdf')
+----
+100000	4999950000
+
+query II
+select count(*), sum(i) from rpc.big
+----
+100000	4999950000
+
+# order preservation is unaffected by compression
+statement ok
+create or replace table ordered_ctas as select i from rpc.big;
+
+query I
+select count(*) from (select i, row_number() over () - 1 rn from ordered_ctas) where i != rn
+----
+0
+
+# append path: CTAS + INSERT over SEND_DATA
+statement ok
+create or replace table rpc.appended as select range i from range(100000);
+
+statement ok
+insert into rpc.appended select range i from range(50000);
+
+query II quack_db:quack_server_con
+select count(*), sum(i) from appended
+----
+150000	6249925000
+
+endloop
+
+endloop
+
+#===--------------------------------------------------------------------===#
+# explicit zstd levels
+#===--------------------------------------------------------------------===#
+
+foreach codec zstd-1 zstd-19
+
+statement ok
+set quack_compression='{codec}';
+
+statement ok quack_db:quack_server_con
+set global quack_compression='{codec}';
+
+query II
+select count(*), sum(i) from quack_query({server}, 'from big', token='asdf')
+----
+100000	4999950000
+
+endloop
+
+#===--------------------------------------------------------------------===#
+# mismatched client/server codecs: receivers auto-detect
+#===--------------------------------------------------------------------===#
+
+foreach client_codec zstd none
+
+foreach server_codec none zstd
+
+statement ok
+set quack_compression='{client_codec}';
+
+statement ok quack_db:quack_server_con
+set global quack_compression='{server_codec}';
+
+query II
+select count(*), sum(i) from rpc.big
+----
+100000	4999950000
+
+statement ok
+create or replace table rpc.t as select range i from range(10000);
+
+query II quack_db:quack_server_con
+select count(*), sum(i) from t
+----
+10000	49995000
+
+endloop
+
+endloop
+
+#===--------------------------------------------------------------------===#
+# many small compressed FETCH responses: one chunk per round-trip
+#===--------------------------------------------------------------------===#
+
+statement ok quack_db:quack_server_con
+set global quack_compression='zstd';
+
+statement ok quack_db:quack_server_con
+set global quack_fetch_batch_rows=1;
+
+query II
+select count(*), sum(i) from quack_query({server}, 'from small', token='asdf')
+----
+5000	12497500
+
+statement ok quack_db:quack_server_con
+reset global quack_fetch_batch_rows;
+
+# default min_size: tiny payloads skip compression and still round-trip
+statement ok
+reset quack_compression_min_size;
+
+query I
+select count(*) from quack_query({server}, 'select 1', token='asdf')
+----
+1
+
+# back to raw defaults for the connection-scoped sections below
+statement ok quack_db:quack_server_con
+set global quack_compression='none';
+
+statement ok quack_db:quack_server_con
+reset global quack_compression_min_size;
+
+statement ok
+set quack_compression='none';
+
+#===--------------------------------------------------------------------===#
+# connection-scoped server responses: opt in via the query passthrough
+#===--------------------------------------------------------------------===#
+
+# observe wire size via the client HTTP log (response Content-Length); pull real data
+# (aggregations get pushed down to the server and would transfer almost nothing)
+statement ok
+call enable_logging(['HTTP']);
+
+statement ok
+set logging_storage='memory';
+
+# server global stays 'none'; this connection opts in through its server-side session
+statement ok
+select * from quack_query_by_name('rpc', 'SET quack_compression=''zstd-1''');
+
+statement ok
+create table copy_compressed as from rpc.wide;
+
+query II
+select count(*), sum(i) from copy_compressed
+----
+200000	19999900000
+
+statement ok
+set variable compressed_bytes = (select sum(try_cast(response.headers['Content-Length'] as ubigint))
+                                 from duckdb_logs_parsed('HTTP'));
+
+# opt back out on the same connection and read again
+statement ok
+select * from quack_query_by_name('rpc', 'SET quack_compression=''none''');
+
+statement ok
+call truncate_duckdb_logs();
+
+statement ok
+create table copy_raw as from rpc.wide;
+
+query II
+select count(*), sum(i) from copy_raw
+----
+200000	19999900000
+
+statement ok
+set variable raw_bytes = (select sum(try_cast(response.headers['Content-Length'] as ubigint))
+                          from duckdb_logs_parsed('HTTP'));
+
+# the opted-in read must have moved far fewer bytes than the opted-out one
+query I
+select getvariable('raw_bytes') > 2 * getvariable('compressed_bytes')
+----
+true
+
+#===--------------------------------------------------------------------===#
+# compression as an ATTACH option and a quack_query named parameter
+#===--------------------------------------------------------------------===#
+
+# a bad spec fails the ATTACH locally, before connecting
+statement error
+attach {server} as bad_rpc (token 'asdf', compression 'lz77')
+----
+Unknown quack_compression
+
+statement ok
+attach {server} as rpc_z (token 'asdf', compression 'zstd-1')
+
+# reads through this attach come back compressed (server session was set at attach time)
+statement ok
+call truncate_duckdb_logs();
+
+statement ok
+create table copy_attach as from rpc_z.wide;
+
+query II
+select count(*), sum(i) from copy_attach
+----
+200000	19999900000
+
+statement ok
+set variable attach_response_bytes = (select sum(try_cast(response.headers['Content-Length'] as ubigint))
+                                      from duckdb_logs_parsed('HTTP'));
+
+# uploads through this attach are compressed too: the attach option overrides the (unset) session setting
+statement ok
+call truncate_duckdb_logs();
+
+statement ok
+create table rpc_z.copy_up as from copy_attach;
+
+query II quack_db:quack_server_con
+select count(*), sum(i) from copy_up
+----
+200000	19999900000
+
+statement ok
+set variable attach_request_bytes = (select sum(request.request_body_length)
+                                     from duckdb_logs_parsed('HTTP'));
+
+# quack_query with the compression parameter: scoped to that call's private connection
+statement ok
+call truncate_duckdb_logs();
+
+statement ok
+create table copy_param as select * from quack_query({server}, 'from wide', token='asdf', compression='zstd-1');
+
+query II
+select count(*), sum(i) from copy_param
+----
+200000	19999900000
+
+statement ok
+set variable param_response_bytes = (select sum(try_cast(response.headers['Content-Length'] as ubigint))
+                                     from duckdb_logs_parsed('HTTP'));
+
+# baseline uncompressed upload through a plain attach
+statement ok
+call truncate_duckdb_logs();
+
+statement ok
+create table rpc.copy_up_raw as from copy_attach;
+
+statement ok
+set variable plain_request_bytes = (select sum(request.request_body_length)
+                                    from duckdb_logs_parsed('HTTP'));
+
+# compressed paths must move far fewer bytes than their raw counterparts
+query III
+select getvariable('raw_bytes') > 2 * getvariable('attach_response_bytes'),
+       getvariable('raw_bytes') > 2 * getvariable('param_response_bytes'),
+       getvariable('plain_request_bytes') > 2 * getvariable('attach_request_bytes')
+----
+true	true	true
+
+# a bad spec on quack_query errors locally
+statement error
+select * from quack_query({server}, 'from wide', token='asdf', compression='zstd-99')
+----
+Unknown quack_compression
+
+include test/template/quack_teardown.test_template

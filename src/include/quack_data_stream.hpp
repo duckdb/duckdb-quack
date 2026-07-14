@@ -6,6 +6,7 @@
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/unordered_map.hpp"
+#include "duckdb/parallel/async_result.hpp"
 
 #include <condition_variable>
 #include <deque>
@@ -83,6 +84,20 @@ private:
 	//! Dead batch ranges [lo, hi) reported by the client for filtered/pruned gaps the sink never crossed.
 	//! The drain skips the cursor over a covering range instead of waiting for data that never comes.
 	std::map<idx_t, idx_t> dead_ranges DUCKDB_GUARDED_BY(lock);
+};
+
+//! Async task that parks a blocked scan until the stream has data (or ends); shared by
+//! scan_data_from_quack_client and the client-side fetch read-ahead.
+class QuackWaitForChunkTask : public AsyncTask {
+public:
+	explicit QuackWaitForChunkTask(shared_ptr<QuackDataStream> stream_p) : stream(std::move(stream_p)) {
+	}
+	void Execute() override {
+		stream->WaitForData();
+	}
+
+private:
+	shared_ptr<QuackDataStream> stream;
 };
 
 //! Process-global registry: maps stream id → QuackDataStream so the scan function can find it.

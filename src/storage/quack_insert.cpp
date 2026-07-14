@@ -11,6 +11,7 @@
 #include "storage/quack_insert.hpp"
 #include "storage/quack_table.hpp"
 #include "quack_client.hpp"
+#include "quack_compression.hpp"
 
 #include <chrono>
 #include <set>
@@ -113,12 +114,6 @@ unique_ptr<LocalSinkState> QuackInsert::GetLocalSinkState(ExecutionContext &cont
 //===--------------------------------------------------------------------===//
 // Async send task
 //===--------------------------------------------------------------------===//
-static int64_t NowMillis() {
-	return std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now())
-	    .time_since_epoch()
-	    .count();
-}
-
 // Performs the blocking SEND_DATA POST on an ASYNC-pool thread. The payload was serialized on
 // the producing (regular) execution thread; this task only does the network send and checks the ack.
 class QuackSendDataTask : public AsyncTask {
@@ -132,10 +127,10 @@ public:
 
 	void Execute() override {
 		auto &client = client_wrapper->GetClient();
-		auto start_time = NowMillis();
+		auto start_time = QuackNowMillis();
 		// context=nullptr: called off the execution thread, must not touch ClientContext.
 		auto response_body = client.PostRaw(nullptr, payload->GetData(), payload_size);
-		auto duration_ms = NowMillis() - start_time;
+		auto duration_ms = QuackNowMillis() - start_time;
 
 		auto response = QuackClient::DecodeResponse(response_body);
 
@@ -168,6 +163,7 @@ private:
 //===--------------------------------------------------------------------===//
 // Send helpers
 //===--------------------------------------------------------------------===//
+
 // Serialize `chunks` into one SEND_DATA_REQUEST and register it with the async queue. The payload is
 // serialized on this (regular) execution thread; an ASYNC-pool thread does the blocking POST.
 // For PARALLEL_ORDERED: lstate.current_batch and lstate.sequence_counter must already be set.
@@ -212,6 +208,18 @@ static void SendChunks(ClientContext &context, const QuackInsert &insert, QuackI
 	// Encode on the producer thread: the async task runs off-thread and must not touch ClientContext.
 	auto payload = make_uniq<MemoryStream>();
 	QuackClient::EncodeRequest(context, *send_msg, *payload);
+	// Compress here too: keeps the async task pure network IO.
+	auto compression = QuackCompressionConfig::FromContext(context);
+	// the ATTACH option overrides the session setting
+	if (!quack_catalog.AttachCompression().empty()) {
+		compression.ParseSpec(quack_catalog.AttachCompression());
+	}
+	if (compression.codec != QuackCodec::NONE) {
+		auto compressed = make_uniq<MemoryStream>();
+		if (QuackCompression::Compress(compression, payload->GetData(), payload->GetPosition(), *compressed)) {
+			payload = std::move(compressed);
+		}
+	}
 	auto payload_size = payload->GetPosition();
 
 	auto connection_id = send_msg->ConnectionId();

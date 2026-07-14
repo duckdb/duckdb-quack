@@ -230,8 +230,29 @@ HttpQuackServer::HttpQuackServer(ClientContext &context_p, const QuackUri &uri_p
 			stream.WriteData((data_ptr_t)data, data_length);
 			return true;
 		});
-		auto response = HandleMessage(stream);
+		unique_ptr<QuackMessage> response;
+		QuackCompressionConfig send_compression;
+		if (QuackCompression::IsCompressedFrame(stream.GetData(), stream.GetPosition())) {
+			try {
+				idx_t raw_size;
+				auto raw = QuackCompression::Decompress(stream.GetData(), stream.GetPosition(), raw_size);
+				MemoryStream raw_stream(raw.get(), raw_size);
+				response = HandleMessage(raw_stream, send_compression);
+			} catch (std::exception &ex) {
+				response = make_uniq<ErrorResponse>(ErrorData(ex));
+			}
+		} else {
+			response = HandleMessage(stream, send_compression);
+		}
 		response->ToMemoryStream(stream);
+		auto response_type = response->Type();
+		if (response_type == MessageType::FETCH_RESPONSE || response_type == MessageType::PREPARE_RESPONSE) {
+			MemoryStream compressed;
+			if (QuackCompression::Compress(send_compression, stream.GetData(), stream.GetPosition(), compressed)) {
+				res.set_content((const char *)compressed.GetData(), compressed.GetPosition(), "application/vnd.duckdb");
+				return;
+			}
+		}
 		res.set_content((const char *)stream.GetData(), stream.GetPosition(), "application/vnd.duckdb");
 	});
 

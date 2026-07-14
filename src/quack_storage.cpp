@@ -97,7 +97,11 @@ static unique_ptr<Catalog> QuackAttach(optional_ptr<StorageExtensionInfo> storag
 	if (attach_options.options.find("token") != attach_options.options.end()) {
 		token = attach_options.options["token"].GetValue<string>();
 	}
-	return make_uniq<QuackCatalog>(db, QuackUri(uri, enable_ssl), context, token);
+	string compression;
+	if (attach_options.options.find("compression") != attach_options.options.end()) {
+		compression = attach_options.options["compression"].GetValue<string>();
+	}
+	return make_uniq<QuackCatalog>(db, QuackUri(uri, enable_ssl), context, token, compression);
 }
 
 static unique_ptr<TransactionManager> QuackCreateTransactionManager(optional_ptr<StorageExtensionInfo> storage_info,

@@ -1,9 +1,16 @@
 #pragma once
 
+#include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/logging/log_type.hpp"
 #include "quack_message.hpp"
 
 namespace duckdb {
+
+//! Wall-clock epoch millis, same clock domain as core's HTTP request logs (HTTPLogType), so Quack
+//! and HTTP durations for the same request stay comparable.
+inline int64_t QuackNowMillis() {
+	return Timestamp::GetEpochMs(Timestamp::GetCurrentTimestamp());
+}
 
 class QuackLogType : public LogType {
 public:

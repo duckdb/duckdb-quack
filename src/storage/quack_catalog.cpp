@@ -13,6 +13,7 @@
 
 #include "storage/quack_catalog.hpp"
 #include "storage/quack_table.hpp"
+#include "quack_compression.hpp"
 #include "quack_scan.hpp"
 #include "storage/quack_insert.hpp"
 #include "quack_message.hpp"
@@ -24,10 +25,20 @@
 namespace duckdb {
 
 QuackCatalog::QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri, ClientContext &context,
-                           const string &token)
-    : Catalog(db_p) {
+                           const string &token, const string &compression_spec)
+    : Catalog(db_p), attach_compression(compression_spec) {
+	// validate before connecting so a bad spec fails the ATTACH locally
+	if (!attach_compression.empty()) {
+		QuackCompressionConfig().ParseSpec(attach_compression);
+	}
+
 	// connect to the server
 	client_connection = QuackClient::ConnectToServer(context, server_uri, token);
+
+	// scope response compression to this attach via its server-side session
+	if (!attach_compression.empty()) {
+		ExecuteCommandInternal(context, StringUtil::Format("SET quack_compression='%s'", attach_compression));
+	}
 
 	// load the entire catalog up-front
 	auto load_info = LoadCatalog(context);

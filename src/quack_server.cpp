@@ -299,7 +299,8 @@ bool MessageRequiresConnection(MessageType type) {
 }
 
 // main switcheroo happens here
-unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
+unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream,
+                                                    QuackCompressionConfig &send_compression) {
 	auto db = db_ptr.lock();
 	if (!db) {
 		return make_uniq<ErrorResponse>("Database was closed");
@@ -309,9 +310,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
 
 	int64_t start_time = 0;
 	if (should_log) {
-		start_time = std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now())
-		                 .time_since_epoch()
-		                 .count();
+		start_time = QuackNowMillis();
 	}
 
 	// start deserializing the message
@@ -340,30 +339,31 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
 	auto received_message = QuackMessage::DeserializeMessage(deserializer, header);
 
 	// process the message
-	auto response = HandleMessageInternal(*db, *received_message, connection);
+	auto response = HandleMessageInternal(*db, *received_message, connection, send_compression);
 
 	if (should_log) {
-		int64_t end_time = std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now())
-		                       .time_since_epoch()
-		                       .count();
+		auto duration_ms = QuackNowMillis() - start_time;
 		string error;
 		if (response->Type() == MessageType::ERROR_RESPONSE) {
 			error = response->Cast<ErrorResponse>().ErrorMessage();
 		}
 		auto msg = QuackLogType::ConstructLogMessage(header.type, header.connection_id, header.client_query_id,
-		                                             ExtractQuery(*received_message), "", end_time - start_time,
-		                                             response->Type(), error);
+		                                             ExtractQuery(*received_message), "", duration_ms, response->Type(),
+		                                             error);
 		logger.WriteLog(QuackLogType::NAME, QuackLogType::LEVEL, msg);
 	}
 
 	return response;
 }
 
+// Accumulate whole chunks until `max_rows` is reached (row-based like the send path, so sparse
+// filtered chunks don't shrink the batch). Resets query_result once the cursor is exhausted.
 static vector<unique_ptr<DataChunkWrapper>> CreateBatch(Allocator &allocator, unique_ptr<QueryResult> &query_result,
-                                                        idx_t max_chunks) {
+                                                        idx_t max_rows) {
 	vector<unique_ptr<DataChunkWrapper>> results;
 
-	while (results.size() < max_chunks) {
+	idx_t rows = 0;
+	while (rows < max_rows) {
 		auto result_chunk = query_result->Fetch();
 		// error case
 		if (!result_chunk && query_result->HasError()) {
@@ -375,13 +375,15 @@ static vector<unique_ptr<DataChunkWrapper>> CreateBatch(Allocator &allocator, un
 			query_result.reset();
 			break;
 		}
+		rows += result_chunk->size();
 		results.push_back(make_uniq<DataChunkWrapper>(*result_chunk));
 	}
 	return results;
 }
 
 unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db, QuackMessage &received_message,
-                                                            optional_ptr<QuackConnection> connection_p) {
+                                                            optional_ptr<QuackConnection> connection_p,
+                                                            QuackCompressionConfig &send_compression) {
 	if (connection_p) {
 		// A message unrelated to the active insert stream means it was abandoned (client source failed, no
 		// FINALIZE) — abort it so it rolls back and releases the connection lock.
@@ -460,14 +462,14 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		connection.next_batch_index = 1;
 		connection.query_uuid = prepare_request_message.QueryUUID();
 
-		Value max_chunks_val;
-		DBConfig::GetConfig(db).TryGetCurrentSetting("quack_fetch_batch_chunks", max_chunks_val);
-		auto max_chunks_per_batch = max_chunks_val.GetValue<uint64_t>();
+		Value max_rows_val;
+		DBConfig::GetConfig(db).TryGetCurrentSetting("quack_fetch_batch_rows", max_rows_val);
+		auto max_rows_per_batch = max_rows_val.GetValue<uint64_t>();
 
 		auto names = connection.duckdb_query_result->names;
 		auto types = connection.duckdb_query_result->types;
 
-		auto results = CreateBatch(Allocator::Get(db), connection.duckdb_query_result, max_chunks_per_batch);
+		auto results = CreateBatch(Allocator::Get(db), connection.duckdb_query_result, max_rows_per_batch);
 		if (connection.duckdb_query_result && connection.duckdb_query_result->HasError()) {
 			D_ASSERT(results.empty());
 
@@ -475,10 +477,13 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			connection.duckdb_query_result.reset();
 			return make_uniq<ErrorResponse>(std::move(error_message));
 		}
-		auto needs_more_fetch = results.size() == max_chunks_per_batch;
+		// CreateBatch resets the cursor on exhaustion; a live cursor means more batches remain.
+		auto needs_more_fetch = connection.duckdb_query_result != nullptr;
 		if (!needs_more_fetch && connection.query_state == QuackQueryState::ACTIVE) {
 			connection.query_state = QuackQueryState::FINISHED;
 		}
+		// Connection-scoped: a SET through the query passthrough lands in this session.
+		send_compression = QuackCompressionConfig::FromContext(*connection.duckdb_connection->context);
 		return make_uniq<PrepareResponseMessage>(types, names, std::move(results), needs_more_fetch,
 		                                         connection.query_uuid);
 	}
@@ -501,11 +506,11 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			return make_uniq<ErrorResponse>(connection.duckdb_query_result->GetErrorObject());
 		}
 
-		Value max_chunks_val;
-		DBConfig::GetConfig(db).TryGetCurrentSetting("quack_fetch_batch_chunks", max_chunks_val);
-		auto max_chunks_per_batch = max_chunks_val.GetValue<uint64_t>();
+		Value max_rows_val;
+		DBConfig::GetConfig(db).TryGetCurrentSetting("quack_fetch_batch_rows", max_rows_val);
+		auto max_rows_per_batch = max_rows_val.GetValue<uint64_t>();
 
-		auto results = CreateBatch(Allocator::Get(db), connection.duckdb_query_result, max_chunks_per_batch);
+		auto results = CreateBatch(Allocator::Get(db), connection.duckdb_query_result, max_rows_per_batch);
 		if (connection.duckdb_query_result && connection.duckdb_query_result->HasError()) { // TODO this is duplicated
 			D_ASSERT(results.empty());
 			auto error_message = connection.duckdb_query_result->GetErrorObject();
@@ -513,9 +518,10 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			return make_uniq<ErrorResponse>(std::move(error_message));
 		}
 		auto assigned_batch_index = connection.next_batch_index++;
-		if (results.size() < max_chunks_per_batch && connection.query_state == QuackQueryState::ACTIVE) {
+		if (!connection.duckdb_query_result && connection.query_state == QuackQueryState::ACTIVE) {
 			connection.query_state = QuackQueryState::FINISHED;
 		}
+		send_compression = QuackCompressionConfig::FromContext(*connection.duckdb_connection->context);
 		return make_uniq<FetchResponseMessage>(std::move(results), optional_idx(assigned_batch_index));
 	}
 
