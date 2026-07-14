@@ -83,6 +83,8 @@ the client.
 ATTACH 'quack:localhost' AS rpc;
 -- or without TLS:
 ATTACH 'quack:localhost' AS rpc (disable_ssl true);
+-- with an explicit token and a client id (identifies the client across (re)connections):
+ATTACH 'quack:localhost' AS rpc (token 'super_secret', client_id 'my_client');
 ```
 
 Once attached, remote tables look local:
@@ -153,9 +155,11 @@ SET rpc_default_token = '<token-from-rpc_start>';
 
 ### `ATTACH` options
 
-| Option         | Type    | Default | Description                      |
-|---------------|---------|---------|----------------------------------|
-| `disable_ssl` | BOOLEAN | `false` | Use plain HTTP instead of HTTPS. |
+| Option        | Type    | Default                            | Description                                                                                                                                              |
+|---------------|---------|------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `disable_ssl` | BOOLEAN | `false`                            | Use plain HTTP instead of HTTPS.                                                                                                                          |
+| `token`       | VARCHAR | quack secret / `rpc_default_token` | Auth token sent to the server; overrides any matching quack secret.                                                                                      |
+| `client_id`   | VARCHAR | *(none)*                           | Opaque client identifier. The server derives a stable per-client hash `md5(token + client_id)`, exposed as `client_id_hash` in `quack_active_connections()`. |
 
 ---
 

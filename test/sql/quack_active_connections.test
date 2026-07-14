@@ -84,6 +84,19 @@ detach rpc4;
 statement ok
 detach rpc3;
 
+# an empty-string client_id is treated as "no client_id" -> NULL hash
+statement ok
+attach {server} as rpc5 (token 'asdf', client_id '');
+
+# rpc2 (no client_id) + rpc5 (empty client_id) -> both NULL -> zero non-NULL hashes
+query I quack_db:quack_server_con
+SELECT count(*) FILTER (WHERE client_id_hash IS NOT NULL) from quack_active_connections();
+----
+0
+
+statement ok
+detach rpc5;
+
 query I quack_db:quack_server_con
 select count(*) from quack_active_connections();
 ----

@@ -42,8 +42,12 @@ static unique_ptr<FunctionData> QuackScanBind(ClientContext &context, TableFunct
 		token = input.named_parameters["token"].GetValue<string>();
 	}
 	string client_id;
-	if (input.named_parameters.find("client_id") != input.named_parameters.end()) {
-		client_id = input.named_parameters["client_id"].GetValue<string>();
+	auto client_id_entry = input.named_parameters.find("client_id");
+	if (client_id_entry != input.named_parameters.end()) {
+		if (client_id_entry->second.IsNull()) {
+			throw InvalidInputException("client_id cannot be null");
+		}
+		client_id = client_id_entry->second.GetValue<string>();
 	}
 	bind_data->client_connection = QuackClient::ConnectToServer(context, server_uri, token, std::move(client_id));
 	auto &client_connection = *bind_data->client_connection;
