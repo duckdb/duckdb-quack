@@ -8,6 +8,7 @@
 
 #include "quack_scan.hpp"
 #include "quack_client.hpp"
+#include "quack_compression.hpp"
 #include "quack_fetch_ahead.hpp"
 #include "include/storage/quack_catalog.hpp"
 #include "storage/quack_transaction.hpp"
@@ -48,6 +49,19 @@ static unique_ptr<FunctionData> QuackScanBind(ClientContext &context, TableFunct
 
 	auto client_wrapper = client_connection.GetClient(context);
 	auto &client = client_wrapper->GetClient();
+
+	// quack_query has its own server connection, so the compression parameter can be scoped to it.
+	auto compression_entry = input.named_parameters.find("compression");
+	if (compression_entry != input.named_parameters.end()) {
+		if (compression_entry->second.IsNull()) {
+			throw InvalidInputException("compression cannot be null");
+		}
+		auto spec = compression_entry->second.GetValue<string>();
+		QuackCompressionConfig().ParseSpec(spec);
+		client.Request<PrepareResponseMessage>(
+		    context, make_uniq<PrepareRequestMessage>(client_connection.ConnectionId(),
+		                                              StringUtil::Format("SET quack_compression='%s'", spec), 0));
+	}
 
 	bind_data->query_uuid = UUID::GenerateRandomUUID();
 	auto bind_response = client.Request<PrepareResponseMessage>(
@@ -417,6 +431,8 @@ TableFunction QuackScanFunction::GetFunction() {
 	                         QuackScanInitGlobal, QuackScanInitLocal);
 	fun.named_parameters["disable_ssl"] = LogicalType::BOOLEAN;
 	fun.named_parameters["token"] = LogicalType::VARCHAR;
+	// no compression parameter: it rides the attach's shared connection, where the ATTACH option governs
+	fun.named_parameters["compression"] = LogicalType::VARCHAR;
 
 	fun.projection_pushdown = true;
 	fun.get_partition_data = QuackScanGetPartitionData;
