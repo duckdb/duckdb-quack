@@ -21,7 +21,7 @@ class QuackClientConnection;
 class QuackCatalog : public Catalog {
 public:
 	explicit QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri_p, ClientContext &context,
-	                      const string &token);
+	                      const string &token, const string &compression_spec);
 	~QuackCatalog() override;
 
 public:
@@ -78,6 +78,11 @@ public:
 
 	shared_ptr<QuackClientConnection> GetClientConnection();
 
+	//! ATTACH `compression` option; empty when not given (settings apply).
+	const string &AttachCompression() const {
+		return attach_compression;
+	}
+
 	void Refresh(ClientContext &context);
 
 private:
@@ -88,6 +93,7 @@ private:
 private:
 	shared_ptr<QuackClientConnection> client_connection;
 	unique_ptr<QuackSchemaSet> schemas;
+	string attach_compression;
 };
 
 } // namespace duckdb
