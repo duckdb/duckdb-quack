@@ -25,7 +25,7 @@ attach {server} as rpc (token 'asdf')
 query II
 explain select i from rpc.t1 union all select i from rpc.t1 order by rpc.t1.i
 ----
-physical_plan	<!REGEX>:.*UNION.*
+physical_plan	<!REGEX>:.*Union.*
 
 query I
 select i from rpc.t1 union all select i from rpc.t1 order by rpc.t1.i limit 4

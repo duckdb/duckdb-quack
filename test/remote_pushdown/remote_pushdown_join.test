@@ -25,7 +25,7 @@ attach {server} as rpc (token 'asdf')
 query II
 explain select count(*) from rpc.t1 join rpc.t1 t2 on rpc.t1.i = t2.i
 ----
-physical_plan	<!REGEX>:.*JOIN.*
+physical_plan	<!REGEX>:.*Join.*
 
 query I
 select count(*) from rpc.t1 join rpc.t1 t2 on rpc.t1.i = t2.i
@@ -37,7 +37,7 @@ select count(*) from rpc.t1 join rpc.t1 t2 on rpc.t1.i = t2.i
 query II
 explain select count(*) from rpc.t1 join rpc.t2 on rpc.t1.i = rpc.t2.i
 ----
-physical_plan	<!REGEX>:.*JOIN.*
+physical_plan	<!REGEX>:.*Join.*
 
 query I
 select count(*) from rpc.t1 join rpc.t2 on rpc.t1.i = rpc.t2.i

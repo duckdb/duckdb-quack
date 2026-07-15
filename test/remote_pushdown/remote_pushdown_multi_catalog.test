@@ -49,7 +49,7 @@ attach {server2} as rpc2 (token 'asdf2')
 query II
 explain select * from rpc1.t1
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 query I
 select count(*) from rpc1.t1
@@ -65,7 +65,7 @@ select sum(i) from rpc1.t1
 query II
 explain select * from rpc2.t3
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 query I
 select count(*) from rpc2.t3
@@ -81,7 +81,7 @@ select sum(k) from rpc2.t3
 query II
 explain select * from rpc1.t1 join rpc1.t2 on i = j
 ----
-physical_plan	<!REGEX>:.*JOIN.*
+physical_plan	<!REGEX>:.*Join.*
 
 query I
 select count(*) from rpc1.t1 join rpc1.t2 on i = j
@@ -92,7 +92,7 @@ select count(*) from rpc1.t1 join rpc1.t2 on i = j
 query II
 explain select * from rpc2.t3 join rpc2.t4 on k = m
 ----
-physical_plan	<!REGEX>:.*JOIN.*
+physical_plan	<!REGEX>:.*Join.*
 
 # t3={0..4}, t4={10..14}: no overlap
 query I
@@ -106,13 +106,13 @@ select count(*) from rpc2.t3 join rpc2.t4 on k = m
 query II
 explain select * from rpc1.t1 join rpc2.t3 on i = k
 ----
-physical_plan	<REGEX>:.*JOIN.*
+physical_plan	<REGEX>:.*Join.*
 
 # Tables are still fetched via quack transport (per-table QUACK_QUERY, not a pushed single call)
 query II
 explain select * from rpc1.t1 join rpc2.t3 on i = k
 ----
-physical_plan	<REGEX>:.*QUACK_QUERY.*
+physical_plan	<REGEX>:.*Quack Query.*
 
 # t1={0..9}, t3={0..4}: overlap={0,1,2,3,4} -> 5 rows
 query I
@@ -139,7 +139,7 @@ use rpc1
 query II
 explain select * from t1
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 query I
 select count(*) from t1
@@ -150,7 +150,7 @@ select count(*) from t1
 query II
 explain select * from rpc2.t3
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 query I
 select count(*) from rpc2.t3
@@ -161,7 +161,7 @@ select count(*) from rpc2.t3
 query II
 explain select * from t1 join rpc2.t3 on i = k
 ----
-physical_plan	<REGEX>:.*JOIN.*
+physical_plan	<REGEX>:.*Join.*
 
 query I
 select count(*) from t1 join rpc2.t3 on i = k
@@ -180,7 +180,7 @@ SET search_path='rpc1,rpc2'
 query II
 explain select * from rpc1.t1
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 query I
 select count(*) from rpc1.t1
@@ -190,7 +190,7 @@ select count(*) from rpc1.t1
 query II
 explain select * from rpc2.t3
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 query I
 select count(*) from rpc2.t3
@@ -201,7 +201,7 @@ select count(*) from rpc2.t3
 query II
 explain select * from t1
 ----
-physical_plan	<REGEX>:.*QUACK_QUERY.*
+physical_plan	<REGEX>:.*Quack Query.*
 
 query I
 select count(*) from t1
@@ -212,7 +212,7 @@ select count(*) from t1
 query II
 explain select * from rpc1.t1 join rpc2.t3 on i = k
 ----
-physical_plan	<REGEX>:.*JOIN.*
+physical_plan	<REGEX>:.*Join.*
 
 query I
 select count(*) from rpc1.t1 join rpc2.t3 on i = k

@@ -39,7 +39,7 @@ insert into local_t from range(10);
 query II
 explain select i, sum(i) over (order by i) from rpc.t1 where i < 5
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 # running sum: 0, 1, 3, 6, 10
 query II
@@ -66,7 +66,7 @@ order by i
 query II
 explain select rpc.t1.i, rank() over (order by rpc.t1.i) from rpc.t1 where rpc.t1.i < 5
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 query II
 select rpc.t1.i, rank() over (order by rpc.t1.i) as rnk
@@ -101,7 +101,7 @@ explain select i, row_number() over (partition by i % 2 order by i desc) as rn
 from rpc.t1
 qualify rn = 1
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 # even parity max=8, odd parity max=9
 query I
@@ -127,7 +127,7 @@ order by rpc.t1.i
 query II
 explain select i % 3 as bucket, count(*) from rpc.t1 group by bucket having count(*) > 3
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 # bucket 0→4 rows, buckets 1,2→3 rows each; only bucket 0 passes count>3
 query II
@@ -155,7 +155,7 @@ order by parity
 query II
 explain select distinct on (rpc.t1.i) rpc.t1.i from rpc.t1 order by rpc.t1.i
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 # t1={0..9}: 10 distinct values
 query I
@@ -212,7 +212,7 @@ limit 3 offset (select min(rpc.t1.i) from rpc.t1 where rpc.t1.i > 2)
 query II
 explain select i from rpc.t1 intersect all select i from rpc.t2
 ----
-physical_plan	<!REGEX>:.*INTERSECT.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 # t1∩t2 = {5,6,7,8,9} → 5 rows
 query I
@@ -224,7 +224,7 @@ select count(*) from (select i from rpc.t1 intersect all select i from rpc.t2)
 query II
 explain select i from rpc.t1 except all select i from rpc.t2
 ----
-physical_plan	<!REGEX>:.*EXCEPT.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 # t1-t2 = {0,1,2,3,4} → 5 rows
 query I
@@ -276,7 +276,7 @@ delete from rpc.t3 where i = 4
 query II
 explain select i, (select count(*) from rpc.t2 where rpc.t2.i > rpc.t1.i) as cnt from rpc.t1 where i >= 8
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 # i=8: 6 rows in t2 where j>8; i=9: 5 rows
 query II
@@ -304,7 +304,7 @@ select count(*) from (
 query II
 explain select * from rpc.t1 where i in (values (3), (7), (9))
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 query I
 select i from rpc.t1 where i in (values (3), (7), (9)) order by i
@@ -337,7 +337,7 @@ select count(*) from (select i * 2 as doubled from rpc.t1) sub where doubled > 1
 query II
 explain select count(*) from rpc.t1 a join rpc.t1 b on a.i + 1 = b.i where a.i < 5
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 # a.i∈{0..4}, b.i=a.i+1: 5 pairs
 query I
@@ -360,7 +360,7 @@ select count(*) from rpc.t1 a
 join rpc.t1 b on a.i = b.i
 join rpc.t2 c on b.i = c.i
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 # a=b always; b∈t2∩t1={5..9} → 5 rows
 query I
@@ -383,7 +383,7 @@ select count(*) from rpc.t1 cross join (select 1 as x) v
 query II
 explain select count(*) from rpc.t1 natural join rpc.t2
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 query I
 select count(*) from rpc.t1 natural join rpc.t2
@@ -394,7 +394,7 @@ select count(*) from rpc.t1 natural join rpc.t2
 query II
 explain select count(*) from rpc.t1 natural join local_t
 ----
-physical_plan	<REGEX>:.*SEQ_SCAN.*
+physical_plan	<REGEX>:.*Seq Scan.*
 
 query I
 select count(*) from rpc.t1 natural join local_t

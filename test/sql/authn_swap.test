@@ -186,6 +186,11 @@ FROM quack_query({server}, 'select 42', token='asdf');
 statement ok quack_db:quack_server_con
 CALL quack_stop({server});
 
+# The server tears down asynchronously; wait for the listening socket to close before
+# re-serving on the same address below, so the fresh server (not the draining old one,
+# which still carries the previous token) answers the requests that follow.
+sleep 2 seconds
+
 ####################
 # Combined: custom authn + custom authz, server starts with a long token.
 # Regression: previously the token= parameter was silently dropped when

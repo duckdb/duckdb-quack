@@ -33,7 +33,7 @@ insert into local_t values (5), (6), (7), (8), (9), (10), (11), (12), (13), (14)
 query II
 explain select * from rpc.t1 where i in (select j from rpc.t2)
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 # t1={0..9} IN t2={5..14} -> i in {5,6,7,8,9} -> 5 rows
 query I
@@ -54,7 +54,7 @@ select count(*) from local_t where i in (select i from rpc.t1)
 query II
 explain select * from rpc.t1 where i not in (select j from rpc.t2)
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 # t1={0..9} NOT IN t2={5..14} -> i not in {5..14} -> {0,1,2,3,4} -> 5 rows
 query I
@@ -75,7 +75,7 @@ select count(*) from local_t where i not in (select i from rpc.t1)
 query II
 explain select * from rpc.t1 where exists (select 1 from rpc.t2 where j = rpc.t1.i)
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 # t1={0..9}: rows with matching j in t2={5..14} -> {5,6,7,8,9} -> 5 rows
 query I
@@ -96,7 +96,7 @@ select count(*) from local_t where exists (select 1 from rpc.t1 where i < 1)
 query II
 explain select * from rpc.t1 where not exists (select 1 from rpc.t2 where j = rpc.t1.i)
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 # t1={0..9}: rows with NO match in t2={5..14} -> {0,1,2,3,4} -> 5 rows
 query I
@@ -127,7 +127,7 @@ select count(*) from local_t where i in (select local_t.i from rpc.t1)
 query II
 explain select (select count(*) from rpc.t1)
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 query I
 select (select count(*) from rpc.t1)
@@ -138,7 +138,7 @@ select (select count(*) from rpc.t1)
 query II
 explain select * from rpc.t1 where i = (select min(i) from rpc.t1)
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 # Only the row with min(i)=0 matches
 query I

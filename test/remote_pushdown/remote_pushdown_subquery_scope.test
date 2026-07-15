@@ -162,7 +162,7 @@ select t1.i from rpc.t1 t1, (select 5 as v) sub
 where t1.i < sub.v
 order by t1.i
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 # rpc.t1.i in {0..4} (i < 5), joined with constant sub.v=5
 query I
