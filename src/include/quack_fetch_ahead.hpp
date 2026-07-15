@@ -17,6 +17,7 @@
 namespace duckdb {
 
 struct TableFunctionInput;
+class ReadAheadJobCompletion;
 
 //! Result of QuackFetcher::GetBatch, from the consuming scan thread's perspective.
 enum class QuackFetchResult : uint8_t {
@@ -45,6 +46,8 @@ public:
 	void PushBatch(idx_t batch_index, vector<unique_ptr<DataChunk>> chunks);
 	//! Pop the claimed batch if present. FINISHED means the stream ended and the claim can never arrive.
 	PopStatus TryPopClaimed(idx_t claim, vector<unique_ptr<DataChunk>> &chunks_out);
+	//! Register a per-claim wake event; nullptr when the claim is already poppable (caller retries).
+	shared_ptr<ReadAheadJobCompletion> RegisterWaiter(idx_t claim);
 	//! Block until the claimed batch arrives, the stream ends, or a short timeout elapses.
 	void WaitForBatch(idx_t claim);
 
@@ -58,24 +61,11 @@ private:
 	idx_t next_claim DUCKDB_GUARDED_BY(lock) = 1;
 	//! batch_index -> decoded chunks, awaiting its claimant.
 	std::map<idx_t, vector<unique_ptr<DataChunk>>> batches DUCKDB_GUARDED_BY(lock);
+	//! batch_index -> wake event for the parked claimant; publishing that index fires exactly this one.
+	std::map<idx_t, shared_ptr<ReadAheadJobCompletion>> waiters DUCKDB_GUARDED_BY(lock);
 	bool finished DUCKDB_GUARDED_BY(lock) = false;
 	bool errored DUCKDB_GUARDED_BY(lock) = false;
 	ErrorData error DUCKDB_GUARDED_BY(lock);
-};
-
-//! Async task that parks a blocked scan thread until its claimed batch is available (or the stream ends).
-class QuackWaitForBatchTask : public AsyncTask {
-public:
-	QuackWaitForBatchTask(shared_ptr<QuackFetchBuffer> buffer_p, idx_t claim_p)
-	    : buffer(std::move(buffer_p)), claim(claim_p) {
-	}
-	void Execute() override {
-		buffer->WaitForBatch(claim);
-	}
-
-private:
-	shared_ptr<QuackFetchBuffer> buffer;
-	idx_t claim;
 };
 
 //! Client-side FETCH read-ahead: keeps up to `depth` fetches in flight on the ASYNC pool so scan

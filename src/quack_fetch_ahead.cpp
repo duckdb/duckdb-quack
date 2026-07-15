@@ -1,6 +1,7 @@
 #include "quack_fetch_ahead.hpp"
 
 #include "duckdb/common/enums/task_scheduler_type.hpp"
+#include "duckdb/common/multi_file/multi_file_read_ahead.hpp"
 #include "duckdb/common/random_engine.hpp"
 #include "duckdb/common/thread.hpp"
 #include "duckdb/function/table_function.hpp"
@@ -21,14 +22,40 @@ idx_t QuackFetchBuffer::ClaimBatch() {
 }
 
 void QuackFetchBuffer::PushBatch(idx_t batch_index, vector<unique_ptr<DataChunk>> chunks) {
+	shared_ptr<ReadAheadJobCompletion> waiter;
 	{
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		if (finished || errored) {
 			return;
 		}
 		batches[batch_index] = std::move(chunks);
+		auto entry = waiters.find(batch_index);
+		if (entry != waiters.end()) {
+			waiter = std::move(entry->second);
+			waiters.erase(entry);
+		}
 	}
 	cv.notify_all();
+	if (waiter) {
+		// wakes exactly the scan task parked on this batch index
+		waiter->FinishIOTask();
+	}
+}
+
+shared_ptr<ReadAheadJobCompletion> QuackFetchBuffer::RegisterWaiter(idx_t claim) {
+	annotated_lock_guard<annotated_mutex> guard(lock);
+	// Checked under the same lock PushBatch inserts with, so a concurrent publish either
+	// makes us retry the pop here or finds the registered waiter — no lost wakeup.
+	if (batches.find(claim) != batches.end() || finished || errored) {
+		return nullptr;
+	}
+	auto entry = waiters.find(claim);
+	if (entry != waiters.end()) {
+		return entry->second;
+	}
+	auto completion = make_shared_ptr<ReadAheadJobCompletion>(1);
+	waiters.emplace(claim, completion);
+	return completion;
 }
 
 QuackFetchBuffer::PopStatus QuackFetchBuffer::TryPopClaimed(idx_t claim, vector<unique_ptr<DataChunk>> &chunks_out) {
@@ -59,14 +86,22 @@ void QuackFetchBuffer::WaitForBatch(idx_t claim) {
 }
 
 void QuackFetchBuffer::Finish() {
+	std::map<idx_t, shared_ptr<ReadAheadJobCompletion>> drained;
 	{
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		finished = true;
+		drained = std::move(waiters);
+		waiters.clear();
 	}
 	cv.notify_all();
+	// wake every parked claimant so it observes FINISHED
+	for (auto &entry : drained) {
+		entry.second->FinishIOTask();
+	}
 }
 
 void QuackFetchBuffer::SetError(ErrorData error_p) {
+	std::map<idx_t, shared_ptr<ReadAheadJobCompletion>> drained;
 	{
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		if (!errored) {
@@ -74,8 +109,14 @@ void QuackFetchBuffer::SetError(ErrorData error_p) {
 			error = std::move(error_p);
 		}
 		finished = true;
+		drained = std::move(waiters);
+		waiters.clear();
 	}
 	cv.notify_all();
+	// wake every parked claimant so it observes ERRORED
+	for (auto &entry : drained) {
+		entry.second->FinishIOTask();
+	}
 }
 
 ErrorData QuackFetchBuffer::GetError() {
@@ -239,16 +280,18 @@ QuackFetchResult QuackFetcher::GetBatch(ClientContext &context, TableFunctionInp
 		case QuackFetchBuffer::PopStatus::EMPTY: {
 			// refill any free pipeline slots before parking
 			TopUp();
-			vector<unique_ptr<AsyncTask>> tasks;
-			tasks.push_back(make_uniq<QuackWaitForBatchTask>(buffer, claim.GetIndex()));
-			AsyncResult async_result(std::move(tasks), TaskSchedulerType::ASYNC);
-			if (input.results_execution_mode == AsyncResultsExecutionMode::TASK_EXECUTOR) {
-				// yield BLOCKED; the wait task reschedules this scan once a batch is ready
-				input.async_result = std::move(async_result);
+			if (input.results_execution_mode == AsyncResultsExecutionMode::TASK_EXECUTOR && input.interrupt_state) {
+				auto completion = buffer->RegisterWaiter(claim.GetIndex());
+				if (!completion || !completion->TryPark(*input.interrupt_state)) {
+					// the batch arrived (or the stream ended) meanwhile: retry the pop
+					continue;
+				}
+				// parked; publishing this claim's batch wakes exactly this scan task
+				input.async_result = AsyncResultType::BLOCKED;
 				return QuackFetchResult::BLOCKED;
 			}
-			// Synchronous fallback (async_threads=0): run the wait inline, then retry.
-			async_result.ExecuteTasksSynchronously();
+			// Synchronous fallback (async_threads=0): bounded inline wait, then retry.
+			buffer->WaitForBatch(claim.GetIndex());
 			if (context.IsInterrupted()) {
 				throw InterruptException();
 			}
