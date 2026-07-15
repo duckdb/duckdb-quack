@@ -21,7 +21,7 @@ class QuackClientConnection;
 class QuackCatalog : public Catalog {
 public:
 	explicit QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri_p, ClientContext &context,
-	                      const string &token);
+	                      const string &token, string client_id = {});
 	~QuackCatalog() override;
 
 public:

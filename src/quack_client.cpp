@@ -1,3 +1,4 @@
+#include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
@@ -64,8 +65,9 @@ void QuackClient::LogRequest(Logger &logger, MessageType request_type, const str
 	if (!logger.ShouldLog(QuackLogType::NAME, QuackLogType::LEVEL)) {
 		return;
 	}
-	auto msg = QuackLogType::ConstructLogMessage(request_type, connection_id, client_query_id, query, uri.Http(),
-	                                             duration_ms, response_type, error);
+	// client_id_hash is a server-side identifier (never sent back to the client), so it is empty here.
+	auto msg = QuackLogType::ConstructLogMessage(request_type, connection_id, string(), client_query_id, query,
+	                                             uri.Http(), duration_ms, response_type, error);
 	logger.WriteLog(QuackLogType::NAME, QuackLogType::LEVEL, msg);
 }
 
@@ -177,8 +179,35 @@ QuackClientConnection::~QuackClientConnection() {
 	}
 }
 
+void QuackClient::ValidateClientId(const string &client_id) {
+	// An empty client_id means "no client_id" (opt-out); anything non-empty must carry a little entropy,
+	// mirroring the >= 4 minimum QuackServer::ValidateToken enforces on the token.
+	if (!client_id.empty() && client_id.size() < 4) {
+		throw InvalidInputException("client_id must be at least 4 characters long");
+	}
+}
+
+string QuackClient::ResolveClientId(ClientContext &context, optional_ptr<const Value> explicit_value) {
+	if (explicit_value) {
+		if (explicit_value->IsNull()) {
+			throw InvalidInputException("client_id cannot be null");
+		}
+		return explicit_value->GetValue<string>();
+	}
+	// No explicit value -> fall back to the precomputed default (set from $QUACK_CLIENT_ID or a random
+	// per-instance id at load time). An empty setting means the deployment opted out of a default.
+	Value setting_val;
+	if (context.TryGetCurrentSetting("quack_default_client_id", setting_val) && !setting_val.IsNull()) {
+		return setting_val.GetValue<string>();
+	}
+	return string();
+}
+
 shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &context, const QuackUri &uri,
-                                                               string token) {
+                                                               string token, string client_id) {
+	// Single choke point for every connection path (ATTACH + quack_query), so a malformed client_id is
+	// rejected here regardless of where it came from.
+	ValidateClientId(client_id);
 	// if no token is provided fetch it from the secret manager
 	if (token.empty()) {
 		auto &secret_manager = SecretManager::Get(context);
@@ -197,8 +226,8 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 	auto client = QuackClient::GetClient(context, uri);
 
 	// submit the connection request
-	auto connection_request_response =
-	    client->Request<ConnectionResponseMessage>(context, make_uniq<ConnectionRequestMessage>(token));
+	auto connection_request_response = client->Request<ConnectionResponseMessage>(
+	    context, make_uniq<ConnectionRequestMessage>(token, std::move(client_id)));
 	// Validate the server's selected protocol version before trusting the connection (client speaks QUACK_VERSION).
 	if (connection_request_response->QuackVersion() != QUACK_VERSION) {
 		throw IOException("Incompatible Quack protocol version: server uses %llu, client supports %llu",

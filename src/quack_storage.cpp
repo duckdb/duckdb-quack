@@ -3,6 +3,7 @@
 #include "duckdb/main/database.hpp"
 
 #include "quack_storage.hpp"
+#include "quack_client.hpp"
 #include "quack_server.hpp"
 #include "storage/quack_catalog.hpp"
 #include "storage/quack_transaction_manager.hpp"
@@ -97,7 +98,10 @@ static unique_ptr<Catalog> QuackAttach(optional_ptr<StorageExtensionInfo> storag
 	if (attach_options.options.find("token") != attach_options.options.end()) {
 		token = attach_options.options["token"].GetValue<string>();
 	}
-	return make_uniq<QuackCatalog>(db, QuackUri(uri, enable_ssl), context, token);
+	auto client_id_entry = attach_options.options.find("client_id");
+	auto client_id = QuackClient::ResolveClientId(
+	    context, client_id_entry != attach_options.options.end() ? &client_id_entry->second : nullptr);
+	return make_uniq<QuackCatalog>(db, QuackUri(uri, enable_ssl), context, token, std::move(client_id));
 }
 
 static unique_ptr<TransactionManager> QuackCreateTransactionManager(optional_ptr<StorageExtensionInfo> storage_info,

@@ -73,6 +73,10 @@ struct QuackConnection {
 	//! Current query UUID
 	hugeint_t query_uuid;
 	string session_id;
+
+	//! Stable per-client reconnect key: HMAC-SHA256(server_hmac_key, client_id). Intentionally excludes
+	//! session_id so it stays identical across (re)connections for the same client_id. Empty if no client_id.
+	string client_id_hash;
 	string sql_query;
 	QuackQueryState query_state = QuackQueryState::IDLE;
 	timestamp_t query_started_at {0};
@@ -84,6 +88,7 @@ struct QuackConnection {
 struct QuackConnectionSnapshot {
 	string server_id;
 	string session_id;
+	string client_id_hash;
 	string sql_query;
 	QuackQueryState query_state = QuackQueryState::IDLE;
 	timestamp_t query_started_at {0};
@@ -108,7 +113,7 @@ public:
 	virtual void Close() {};
 
 	shared_ptr<QuackConnection> GetConnection(const string &connection_id);
-	string CreateNewConnection(const string &session_id);
+	string CreateNewConnection(const string &session_id, const string &client_id_hash = {});
 	bool DisconnectConnection(const string &session_id);
 	// TODO need something to destroy connections
 
@@ -154,6 +159,8 @@ protected:
 
 private:
 	string token;
+	//! Per-server random key that seeds the HMAC for client_id_hash.
+	string server_hmac_key;
 };
 
 class HttpQuackServer : public QuackServer {
