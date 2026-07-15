@@ -25,7 +25,7 @@ attach {server} as rpc (token 'asdf')
 query II
 explain select * from rpc.t1
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 query I
 select count(*) from rpc.t1
@@ -36,7 +36,7 @@ select count(*) from rpc.t1
 query II
 explain select * from rpc.t1 where i > 5
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 query I
 select count(*) from rpc.t1 where i > 5
@@ -47,7 +47,7 @@ select count(*) from rpc.t1 where i > 5
 query II
 explain select * from rpc.t1 limit 5
 ----
-physical_plan	<!REGEX>:.*LIMIT.*
+physical_plan	<!REGEX>:.*Limit.*
 
 query I
 select count(*) from (select * from rpc.t1 limit 5)
@@ -58,7 +58,7 @@ select count(*) from (select * from rpc.t1 limit 5)
 query II
 explain select i from rpc.t1 order by i limit 3 offset 5
 ----
-physical_plan	<!REGEX>:.*LIMIT.*
+physical_plan	<!REGEX>:.*Limit.*
 
 query I
 select i from rpc.t1 order by i limit 3 offset 5
@@ -71,7 +71,7 @@ select i from rpc.t1 order by i limit 3 offset 5
 query II
 explain select distinct i from rpc.t1
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 query I
 select count(*) from (select distinct i from rpc.t1)
@@ -83,7 +83,7 @@ select count(*) from (select distinct i from rpc.t1)
 query II
 explain select count(*) from rpc.t1
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 query I
 select sum(i) from rpc.t1
@@ -105,7 +105,7 @@ select count(distinct i) from rpc.t1
 query II
 explain select i % 2 as parity, count(*) from rpc.t1 group by parity
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 # t1 = {0..9}: 5 even, 5 odd
 query II
@@ -128,7 +128,7 @@ select count(*) from (
 query II
 explain select i from rpc.t1 order by i desc
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 query I
 select i from rpc.t1 order by i desc limit 3
@@ -142,7 +142,7 @@ select i from rpc.t1 order by i desc limit 3
 query II
 explain select i * 2 as doubled from rpc.t1
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 # sum of doubled values: 2*(0+1+...+9) = 90
 query I
@@ -154,7 +154,7 @@ select sum(i * 2) from rpc.t1
 query II
 explain select case when i < 5 then 0 else 1 end as bucket from rpc.t1
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 # 5 rows < 5, 5 rows >= 5
 query II
@@ -183,7 +183,7 @@ select count(*) from rpc.t1 where i::varchar = '5'
 query II
 explain select a.i from rpc.t1 a join rpc.t1 b on a.i = b.i
 ----
-physical_plan	<!REGEX>:.*JOIN.*
+physical_plan	<!REGEX>:.*Join.*
 
 query I
 select count(*) from rpc.t1 a join rpc.t1 b on a.i = b.i
@@ -200,7 +200,7 @@ select count(*) from rpc.t1 a join rpc.t1 b using (i)
 query II
 explain select * from rpc.t1 join rpc.t2 on i = j
 ----
-physical_plan	<!REGEX>:.*JOIN.*
+physical_plan	<!REGEX>:.*Join.*
 
 query I
 select count(*) from rpc.t1 join rpc.t2 on i = j
@@ -218,7 +218,7 @@ select count(*) from rpc.t1 left join rpc.t2 on i = j
 query II
 explain select i, row_number() over (order by i) as rn from rpc.t1
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 # row_number over filtered rows: i=0,1,2 get rn=1,2,3
 query II

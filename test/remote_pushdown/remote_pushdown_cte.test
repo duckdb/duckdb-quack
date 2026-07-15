@@ -24,7 +24,7 @@ insert into local_t from range(10);
 query II
 explain with cte as (select * from rpc.t1) select * from cte
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 query I
 with cte as (select * from rpc.t1 where i > 5) select count(*) from cte
@@ -39,7 +39,7 @@ with cte as (select i from rpc.t1 where i < 5) select sum(i) from cte
 query II
 explain with cte as (select * from rpc.t1 limit 5) select count(*) from cte
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 query I
 with cte as (select * from rpc.t1 order by i limit 5) select count(*) from cte
@@ -51,7 +51,7 @@ query II
 explain with cte as (select i from rpc.t1 where i < 5)
 select count(*) from cte a join cte b on a.i = b.i
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 # {0..4} self-join: 5 matching pairs
 query I
@@ -65,7 +65,7 @@ query II
 explain with cte as (select i from rpc.t1 where i > 7)
 select count(*) from rpc.t1 where i in (select i from cte)
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 # cte={8,9}; t1 WHERE i in {8,9} = 2 rows
 query I
@@ -80,7 +80,7 @@ query II
 explain with c1 as (select * from rpc.t1), c2 as (select i * 2 as val from c1)
 select count(*) from c2
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 query I
 with c1 as (select * from rpc.t1), c2 as (select i * 2 as val from c1)
@@ -107,7 +107,7 @@ query II
 explain with cte as (select * from local_t)
 select * from cte c join rpc.t1 r on c.i = r.i
 ----
-physical_plan	<REGEX>:.*JOIN.*
+physical_plan	<REGEX>:.*Join.*
 
 # local_t={0..9}, rpc.t1={0..9}: all 10 values match
 query I
@@ -149,7 +149,7 @@ query II
 explain with cte as (select i from rpc.t1 where i < 5)
 select * from cte union all select * from rpc.t1 where i >= 5
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 # cte={0,1,2,3,4}, second arm={5,6,7,8,9} → 10 rows total
 query I
@@ -163,7 +163,7 @@ query II
 explain with cte as (select i from local_t where i < 5)
 select * from cte union all select * from rpc.t1 where i >= 5
 ----
-physical_plan	<REGEX>:.*UNION.*
+physical_plan	<REGEX>:.*Union.*
 
 # cte={0,1,2,3,4} from local_t, second arm={5,6,7,8,9} → 10 rows
 query I
@@ -180,7 +180,7 @@ explain with recursive r(n) as (
   select 1 union all select n+1 from r where n < 5
 ) select count(*) from r
 ----
-physical_plan	<REGEX>:.*REC_CTE.*
+physical_plan	<REGEX>:.*Rec CTE.*
 
 # {1,2,3,4,5} → count = 5
 query I
@@ -198,7 +198,7 @@ explain with recursive chain(n, depth) as (
   select n+1, depth+1 from chain where depth < 4
 ) select count(*) from chain
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 # base (0,0) + 4 steps → 5 rows
 query I
@@ -219,7 +219,7 @@ explain with recursive acc(val) as (
   select val + 1 from acc join rpc.t1 on rpc.t1.i = acc.val where acc.val < 3
 ) select count(*) from acc
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 # base {0}; steps 0→1, 1→2, 2→3; stops at val=3; count = 4
 query I
@@ -239,7 +239,7 @@ explain with recursive r(n) as (
   select n + 1 from r join rpc.t1 on rpc.t1.i = n + 1 where n < 3
 ) select count(*) from r
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 # base: min=0; steps 0→1, 1→2, 2→3; stops; count = 4
 query I
@@ -259,7 +259,7 @@ explain with recursive r(n) as (
   select n + 1 from r where r.n < 3
 ) select count(*) from r
 ----
-physical_plan	<REGEX>:.*REC_CTE.*
+physical_plan	<REGEX>:.*Rec CTE.*
 
 # base {0}, steps {1,2,3} → 4 rows total
 query I

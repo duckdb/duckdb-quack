@@ -634,7 +634,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		// {0,0} is a wildcard — cancel whatever query is running on this connection
 		bool is_wildcard = cancel_request_message.query_uuid == hugeint_t {0, 0};
 		if (!is_wildcard && connection.query_uuid != cancel_request_message.query_uuid) {
-			return make_uniq<ErrorResponse>("Attempted to cancel a different query with id '%d' instead of '%d'",
+			return make_uniq<ErrorResponse>("Attempted to cancel a different query with id '%s' instead of '%s'",
 			                                cancel_request_message.query_uuid, connection.query_uuid);
 		}
 		connection.duckdb_connection->Interrupt();
