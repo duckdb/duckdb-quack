@@ -1,0 +1,41 @@
+# name: test/sql/reconnects_ack_best_effort.test
+# description: a failed acknowledgement round-trip must NOT fail an already fully-fetched query;
+#             it is swallowed but logged at WARNING (quack_enable_reconnects).
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok quack_db:quack_server_con
+CREATE TABLE tbl AS SELECT range AS i FROM range(3);
+
+statement ok
+CREATE SECRET (TYPE quack, TOKEN 'asdf');
+
+statement ok
+SET quack_enable_reconnects = true;
+
+statement ok
+CALL enable_logging(level='warning');
+
+statement ok
+PREPARE p AS SELECT i FROM quack_query({server}, 'FROM tbl', token=>'asdf');
+
+# Take the server down. The ACK POST will now fail with a connection error.
+statement ok quack_db:quack_server_con
+CALL quack_stop({server});
+
+query I
+EXECUTE p;
+----
+0
+1
+2
+
+# The swallowed failure is not silent
+query I
+SELECT count(*) FROM duckdb_logs
+WHERE log_level = 'WARNING' AND contains(message, 'acknowledgement failed and was ignored');
+----
+1
+
+include test/template/quack_teardown.test_template

@@ -305,9 +305,16 @@ static void SendAcknowledgement(ClientContext &context, QuackScanGlobalState &gl
 	if (global_state.ack_sent.exchange(true)) {
 		return;
 	}
-	auto &client = local_state.client_wrapper->GetClient();
-	client.Request<SuccessResponse>(context,
-	                                make_uniq<AcknowledgementMessage>(bind_data.client_connection->ConnectionId()));
+	try {
+		auto &client = local_state.client_wrapper->GetClient();
+		client.Request<SuccessResponse>(context,
+		                                make_uniq<AcknowledgementMessage>(bind_data.client_connection->ConnectionId()));
+	} catch (const std::exception &e) {
+		// The query is already complete, so we swallow the failure rather than fail the query
+		DUCKDB_LOG_WARNING(
+		    context, StringUtil::Format("Quack: acknowledgement failed and was ignored (query already completed): %s",
+		                                e.what()));
+	}
 }
 
 static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
