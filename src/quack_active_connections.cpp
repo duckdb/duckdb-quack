@@ -39,9 +39,9 @@ struct QuackActiveConnectionsData : FunctionData {
 
 static unique_ptr<FunctionData> QuackActiveConnectionsBind(ClientContext &, TableFunctionBindInput &,
                                                            vector<LogicalType> &return_types, vector<string> &names) {
-	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
-	                LogicalType::TIMESTAMP};
-	names = {"server_id", "connection_id", "query", "state", "query_started_at"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
+	                LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::TIMESTAMP};
+	names = {"server_id", "connection_id", "query", "state", "client_id_hash", "query_started_at"};
 	return make_uniq<QuackActiveConnectionsData>();
 }
 
@@ -59,10 +59,11 @@ static void QuackActiveConnectionsScan(ClientContext &context, TableFunctionInpu
 		output.SetValue(1, row, snap.session_id);
 		output.SetValue(2, row, snap.sql_query);
 		output.SetValue(3, row, Value(QueryStateToString(snap.query_state)));
+		output.SetValue(4, row, snap.client_id_hash.empty() ? Value(LogicalType::VARCHAR) : Value(snap.client_id_hash));
 		if (snap.query_state == QuackQueryState::IDLE) {
-			output.SetValue(4, row, Value(LogicalType::TIMESTAMP));
+			output.SetValue(5, row, Value(LogicalType::TIMESTAMP));
 		} else {
-			output.SetValue(4, row, Value::TIMESTAMP(snap.query_started_at));
+			output.SetValue(5, row, Value::TIMESTAMP(snap.query_started_at));
 		}
 		row++;
 	}

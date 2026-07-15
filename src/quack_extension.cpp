@@ -1,6 +1,9 @@
 #define DUCKDB_EXTENSION_MAIN
 
+#include <cstdlib>
+
 #include "duckdb/catalog/default/default_table_functions.hpp"
+#include "duckdb/common/types/uuid.hpp"
 #include "duckdb/logging/log_manager.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
@@ -184,6 +187,18 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("quack_server_keep_alive_timeout",
 	                          "Seconds an idle keep-alive connection is kept open by the RPC server",
 	                          LogicalType::UBIGINT, Value::UBIGINT(300), nullptr, SetScope::GLOBAL);
+
+	// Default client_id handed to any ATTACH / quack_query that doesn't pass one explicitly
+	string default_client_id;
+	if (const char *env_client_id = std::getenv("QUACK_CLIENT_ID")) {
+		default_client_id = env_client_id;
+	} else {
+		default_client_id = UUID::ToString(UUID::GenerateRandomUUID());
+	}
+	config.AddExtensionOption("quack_default_client_id",
+	                          "client_id used when ATTACH / quack_query omit one; precomputed at load from "
+	                          "$QUACK_CLIENT_ID (empty opts out) or a random per-instance id. Set to '' to opt out.",
+	                          LogicalType::VARCHAR, Value(default_client_id), nullptr, SetScope::GLOBAL);
 
 	// Process-wide fallback anchor for whoami().uptime when whoami_started_at isn't set.
 	// Stored as BIGINT epoch-microseconds to stay TZ-invariant regardless of ICU state.

@@ -15,6 +15,8 @@
 #include "quack_storage.hpp"
 #include "quack_data_stream.hpp"
 
+#include "mbedtls_wrapper.hpp"
+
 namespace duckdb {
 QuackConnection::QuackConnection(string session_id_p) : session_id(std::move(session_id_p)) {
 }
@@ -142,6 +144,7 @@ void QuackServer::ValidateToken(const string &token) {
 QuackServer::QuackServer(ClientContext &context_p, const QuackUri &uri_p, const string &token_p)
     : db_ptr(context_p.db), uri(uri_p), token(token_p) {
 	ValidateToken(token);
+	server_hmac_key = GenerateRandomToken(*context_p.db);
 }
 
 QuackServer::~QuackServer() {
@@ -153,6 +156,7 @@ vector<QuackConnectionSnapshot> QuackServer::GetActiveConnectionSnap() {
 	for (auto &[id, conn] : active_connections) {
 		QuackConnectionSnapshot snapshot;
 		snapshot.session_id = conn->session_id;
+		snapshot.client_id_hash = conn->client_id_hash;
 		snapshot.sql_query = conn->sql_query;
 		snapshot.query_state = conn->query_state;
 		snapshot.query_started_at = conn->query_started_at;
@@ -170,7 +174,7 @@ shared_ptr<QuackConnection> QuackServer::GetConnection(const string &connection_
 	return nullptr;
 }
 
-string QuackServer::CreateNewConnection(const string &session_id) {
+string QuackServer::CreateNewConnection(const string &session_id, const string &client_id_hash) {
 	std::lock_guard<std::mutex> lock(active_connections_mutex);
 
 	D_ASSERT(active_connections.find(session_id) == active_connections.end());
@@ -180,6 +184,7 @@ string QuackServer::CreateNewConnection(const string &session_id) {
 		throw InternalException("Database was closed");
 	}
 	auto new_connection = make_shared_ptr<QuackConnection>(session_id);
+	new_connection->client_id_hash = client_id_hash;
 	new_connection->duckdb_connection = make_uniq<Connection>(*db);
 	new_connection->duckdb_connection->context->config.enable_progress_bar = false;
 	// new_connection->duckdb_connection->context->config.streaming_buffer_size = 10 * 1000000; // 10 MB
@@ -234,6 +239,14 @@ static string HexEncode(const data_t *bytes, idx_t n) {
 		result[2 * i + 1] = Blob::HEX_TABLE[bytes[i] & 0x0F];
 	}
 	return result;
+}
+
+// Derive a stable, per-client reconnect identifier as HMAC-SHA256(server_hmac_key, client_id)
+static string ComputeClientHash(const string &server_hmac_key, const string &client_id) {
+	unsigned char digest[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES];
+	duckdb_mbedtls::MbedTlsWrapper::Hmac256(server_hmac_key.data(), server_hmac_key.size(), client_id.data(),
+	                                        client_id.size(), reinterpret_cast<char *>(digest));
+	return HexEncode(digest, duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES);
 }
 
 string QuackServer::GenerateRandomToken(DatabaseInstance &db) {
@@ -350,9 +363,10 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
 		if (response->Type() == MessageType::ERROR_RESPONSE) {
 			error = response->Cast<ErrorResponse>().ErrorMessage();
 		}
-		auto msg = QuackLogType::ConstructLogMessage(header.type, header.connection_id, header.client_query_id,
-		                                             ExtractQuery(*received_message), "", end_time - start_time,
-		                                             response->Type(), error);
+		auto client_id_hash = connection ? connection->client_id_hash : string();
+		auto msg = QuackLogType::ConstructLogMessage(header.type, header.connection_id, client_id_hash,
+		                                             header.client_query_id, ExtractQuery(*received_message), "",
+		                                             end_time - start_time, response->Type(), error);
 		logger.WriteLog(QuackLogType::NAME, QuackLogType::LEVEL, msg);
 	}
 
@@ -406,7 +420,11 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		    (auth_result.type().id() == LogicalTypeId::BOOLEAN && !auth_result.GetValue<bool>())) {
 			return make_uniq<ErrorResponse>("Authentication failed");
 		}
-		return make_uniq<ConnectionResponseMessage>(CreateNewConnection(session_id));
+		string client_id_hash;
+		if (!connection_request_message.ClientId().empty()) {
+			client_id_hash = ComputeClientHash(server_hmac_key, connection_request_message.ClientId());
+		}
+		return make_uniq<ConnectionResponseMessage>(CreateNewConnection(session_id, client_id_hash));
 	}
 	case MessageType::DISCONNECT_MESSAGE: {
 		auto &connection = *connection_p;

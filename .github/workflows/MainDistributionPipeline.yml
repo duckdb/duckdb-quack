@@ -34,6 +34,8 @@ jobs:
       duckdb_version: ${{ needs.get-duckdb-version.outputs.duckdb_version }}
       ci_tools_version: main
       extension_name: quack
+      # Export QUACK_CLIENT_ID so quack_default_client_id_env.test (require-env gated) runs instead of skipping.
+      test_config: '{"test_env_variables": {"QUACK_CLIENT_ID": "quack_env_client_id"}}'
 
   code-quality-check:
     name: Code Quality Check
