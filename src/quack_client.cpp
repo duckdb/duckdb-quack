@@ -7,15 +7,7 @@
 #include "quack_client.hpp"
 #include "quack_uri.hpp"
 
-#include <chrono>
-
 namespace duckdb {
-
-static int64_t NowMillis() {
-	return std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now())
-	    .time_since_epoch()
-	    .count();
-}
 
 template <class T>
 string GetUriPart(T ele) {
@@ -138,11 +130,11 @@ unique_ptr<QuackMessage> HttpsQuackClient::RequestInternal(optional_ptr<ClientCo
 	lock_guard<mutex> guard(request_mutex);
 	EnsureHttpParams(context);
 
-	int64_t start_time = NowMillis();
+	auto start_time = QuackNowMillis();
 	EncodeRequest(context, *request_message, write_stream);
 	auto response_body = PostRawLocked(write_stream.GetData(), write_stream.GetPosition());
 	auto response_message = DecodeResponse(response_body);
-	int64_t duration_ms = NowMillis() - start_time;
+	auto duration_ms = QuackNowMillis() - start_time;
 
 	string error;
 	if (response_message->Type() == MessageType::ERROR_RESPONSE) {

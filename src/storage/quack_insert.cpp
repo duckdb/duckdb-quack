@@ -113,12 +113,6 @@ unique_ptr<LocalSinkState> QuackInsert::GetLocalSinkState(ExecutionContext &cont
 //===--------------------------------------------------------------------===//
 // Async send task
 //===--------------------------------------------------------------------===//
-static int64_t NowMillis() {
-	return std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now())
-	    .time_since_epoch()
-	    .count();
-}
-
 // Performs the blocking SEND_DATA POST on an ASYNC-pool thread. The payload was serialized on
 // the producing (regular) execution thread; this task only does the network send and checks the ack.
 class QuackSendDataTask : public AsyncTask {
@@ -132,10 +126,10 @@ public:
 
 	void Execute() override {
 		auto &client = client_wrapper->GetClient();
-		auto start_time = NowMillis();
+		auto start_time = QuackNowMillis();
 		// context=nullptr: called off the execution thread, must not touch ClientContext.
 		auto response_body = client.PostRaw(nullptr, payload->GetData(), payload_size);
-		auto duration_ms = NowMillis() - start_time;
+		auto duration_ms = QuackNowMillis() - start_time;
 
 		auto response = QuackClient::DecodeResponse(response_body);
 

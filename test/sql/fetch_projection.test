@@ -4,7 +4,7 @@
 
 include test/template/quack_setup.test_template
 
-# 30000 rows x 2 cols => ~15 DataChunks of 2048 => exceeds quack_fetch_batch_chunks (12),
+# 30000 rows x 2 cols => ~15 DataChunks of 2048 => exceeds quack_fetch_batch_rows (24576),
 # forcing at least one FETCH round-trip after the initial PREPARE batch.
 statement ok quack_db:quack_server_con
 create table big as select range as a, range * 2 as b from range(30000);
