@@ -34,6 +34,19 @@ FROM remote.hello;
 
 This should show the content of the remote table `hello` on the client side.
 
+The `quack` secret also accepts an optional `EXTRA_HTTP_HEADERS` map. Any headers
+provided there are attached to every HTTP request the client sends to the server,
+which is useful for authenticating through a proxy or load balancer in front of the
+Quack server:
+
+```sql
+CREATE SECRET (
+    TYPE quack,
+    TOKEN 'super_secret',
+    EXTRA_HTTP_HEADERS MAP {'X-Api-Key': 'my-key', 'X-Tenant': 'acme'}
+);
+```
+
 We can also copy data from client to server:
 
 ```sql

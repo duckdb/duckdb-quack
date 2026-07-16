@@ -39,6 +39,9 @@ static unique_ptr<BaseSecret> CreateQuackSecretFromConfig(ClientContext &, Creat
 		auto lower_name = StringUtil::Lower(named_param.first);
 		if (lower_name == "token") {
 			secret->secret_map["token"] = named_param.second.ToString();
+		} else if (lower_name == "extra_http_headers") {
+			// Stored as a MAP(VARCHAR, VARCHAR) Value; injected into every quack HTTP request.
+			secret->secret_map["extra_http_headers"] = named_param.second;
 		} else {
 			throw InvalidInputException("Unknown named parameter for quack secret: %s", lower_name);
 		}
@@ -57,6 +60,7 @@ static void RegisterQuackSecretType(ExtensionLoader &loader) {
 
 	CreateSecretFunction config_fun = {QUACK_SECRET_TYPE, "config", CreateQuackSecretFromConfig};
 	config_fun.named_parameters["token"] = LogicalType::VARCHAR;
+	config_fun.named_parameters["extra_http_headers"] = LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR);
 	loader.RegisterFunction(config_fun);
 }
 
