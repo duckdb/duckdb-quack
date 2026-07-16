@@ -86,6 +86,8 @@ private:
 
 class HttpsQuackClient : public QuackClient {
 public:
+	static constexpr uint64_t HTTP_TIMEOUT_SECONDS = 86400;
+
 	HttpsQuackClient(DatabaseInstance &db, const QuackUri &uri_p);
 	~HttpsQuackClient() override;
 

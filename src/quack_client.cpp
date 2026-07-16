@@ -119,6 +119,8 @@ unique_ptr<QuackMessage> HttpsQuackClient::RequestInternal(optional_ptr<ClientCo
 			                                      end_time - start_time, response_message->Type(), error);
 			logger.WriteLog(QuackLogType::NAME, QuackLogType::LEVEL, msg);
 		}
+		http_params->timeout = HTTP_TIMEOUT_SECONDS;
+		http_params->retries = 0;
 	}
 
 	return response_message;
