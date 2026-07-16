@@ -40,6 +40,8 @@ unique_ptr<QuackMessage> HttpsQuackClient::RequestInternal(optional_ptr<ClientCo
 			http_params = http_util.InitializeParameters(db, request_url);
 		}
 	}
+	http_params->timeout = HTTP_TIMEOUT_SECONDS;
+	http_params->retries = 0;
 
 	HTTPHeaders headers;
 
