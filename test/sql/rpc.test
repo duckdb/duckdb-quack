@@ -136,6 +136,11 @@ call quack_stop({server})
 statement ok quack_db:quack_server_con
 call quack_stop({server})
 
+# quack_stop tears the server down asynchronously (workers are joined off-thread to avoid
+# deadlocking a worker that joins itself). Give the detached teardown a moment to close the
+# listening socket before asserting the address is unreachable.
+sleep 2 seconds
+
 statement error
 from quack_query({server}, 'select 42')
 ----

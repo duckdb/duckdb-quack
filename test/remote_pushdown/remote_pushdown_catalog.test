@@ -19,7 +19,7 @@ attach {server} as rpc (token 'asdf')
 query II
 explain select * from rpc.main.t1
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 query I
 select count(*) from rpc.main.t1
@@ -44,7 +44,7 @@ select sum(i) from rpc.main.t1
 query II
 explain select * from rpc.t1 where rpc.t1.i > 5
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 query I
 select count(*) from rpc.t1 where rpc.t1.i > 5
@@ -61,7 +61,7 @@ select count(*) from rpc.main.t1 where rpc.main.t1.i > 5
 query II
 explain select rpc.t1.i from rpc.t1 order by rpc.t1.i
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 query I
 select rpc.t1.i from rpc.t1 order by rpc.t1.i limit 3
@@ -84,7 +84,7 @@ select rpc.t1.i from rpc.t1 where rpc.t1.i <= 2 order by rpc.t1.i desc
 query II
 explain select rpc.t1.i, count(*) from rpc.t1 group by rpc.t1.i order by rpc.t1.i
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 # Verify correct aggregation result with qualified refs
 query II
@@ -152,7 +152,7 @@ SET disabled_optimizers = 'remote_pushdown'
 query II
 explain select * from rpc.t1
 ----
-physical_plan	<REGEX>:.*QUACK_QUERY.*
+physical_plan	<REGEX>:.*Quack Query.*
 
 # Functional: query still works correctly even without pushdown
 query I
@@ -167,7 +167,7 @@ RESET disabled_optimizers
 query II
 explain select * from rpc.t1
 ----
-physical_plan	<!REGEX>:.*SEQ_SCAN.*
+physical_plan	<!REGEX>:.*Seq Scan.*
 
 statement ok quack_db:quack_server_con
 call quack_stop('quack:localhost')
