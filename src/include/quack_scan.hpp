@@ -10,18 +10,23 @@ struct QuackScanBindData : FunctionData {
 		auto &other = other_p.Cast<QuackScanBindData>();
 		return other.client_connection->ConnectionId() == client_connection->ConnectionId() &&
 		       other.client_connection->ServerURI() == client_connection->ServerURI() &&
+		       other.catalog_name == catalog_name && other.schema_name == schema_name &&
 		       other.table_name == table_name && other.column_names == column_names &&
 		       other.column_types == column_types;
 	}
 	unique_ptr<FunctionData> Copy() const override {
 		auto result = make_uniq<QuackScanBindData>();
 		result->client_connection = client_connection;
+		result->catalog_name = catalog_name;
+		result->schema_name = schema_name;
 		result->table_name = table_name;
 		result->column_names = column_names;
 		result->column_types = column_types;
 		return std::move(result);
 	}
 
+	string catalog_name;
+	string schema_name;
 	string table_name;
 	vector<string> column_names;
 	vector<LogicalType> column_types;

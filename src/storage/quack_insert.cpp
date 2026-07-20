@@ -56,8 +56,10 @@ SinkResultType QuackInsert::Sink(ExecutionContext &context, DataChunk &chunk, Op
 	append_chunk->Initialize(context.client, chunk.GetTypes());
 	append_chunk->Reference(chunk);
 	auto chunk_wrapper = make_uniq<DataChunkWrapper>(*append_chunk);
-	auto append_message = make_uniq<AppendRequestMessage>(quack_catalog.GetConnectionId(), tbl.schema.name, tbl.name,
-	                                                      std::move(chunk_wrapper));
+	auto &quack_schema = tbl.schema.Cast<QuackSchemaCatalogEntry>();
+	auto append_message =
+	    make_uniq<AppendRequestMessage>(quack_catalog.GetConnectionId(), quack_schema.SourceCatalogName(),
+	                                    tbl.schema.name, tbl.name, std::move(chunk_wrapper));
 
 	auto client_connection = quack_catalog.GetClientConnection();
 	auto client_wrapper = client_connection->GetClient(context.client);

@@ -1,0 +1,62 @@
+# name: test/sql/attach_source_catalog.test
+# description: preserve source catalogue and schema for attached remote objects
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+statement ok con1
+ATTACH ':memory:' AS ducklake
+
+statement ok con1
+CREATE SCHEMA ducklake.atlas
+
+statement ok con1
+CREATE TABLE ducklake.atlas.documents(id INTEGER, title VARCHAR)
+
+statement ok con1
+INSERT INTO ducklake.atlas.documents VALUES (1, 'first')
+
+statement ok con1
+CREATE VIEW ducklake.atlas.document_titles AS SELECT id, upper(title) AS title FROM ducklake.atlas.documents
+
+foreach server 'quack:localhost'
+
+statement ok con1
+CALL quack_serve({server}, token='asdf')
+
+statement ok con2
+CREATE SECRET (TYPE quack, TOKEN 'asdf')
+
+statement ok con2
+ATTACH {server} AS remote
+
+query II con2
+SELECT id, title FROM remote.atlas.documents ORDER BY id
+----
+1	first
+
+query II con2
+SELECT id, title FROM remote.atlas.document_titles ORDER BY id
+----
+1	FIRST
+
+statement ok con2
+INSERT INTO remote.atlas.documents VALUES (2, 'second')
+
+query II con1
+SELECT id, title FROM ducklake.atlas.documents ORDER BY id
+----
+1	first
+2	second
+
+statement ok con2
+DETACH remote
+
+statement ok con1
+CALL quack_stop({server})
+
+endloop

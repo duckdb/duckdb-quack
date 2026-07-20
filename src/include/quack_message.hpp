@@ -301,10 +301,11 @@ class AppendRequestMessage : public QuackMessage {
 public:
 	static constexpr MessageType TYPE = MessageType::APPEND_REQUEST;
 
-	explicit AppendRequestMessage(string connection_id_p, string schema_name_p, string table_name_p,
-	                              unique_ptr<DataChunkWrapper> append_chunk_p)
-	    : QuackMessage(TYPE, std::move(connection_id_p)), schema_name(std::move(schema_name_p)),
-	      table_name(std::move(table_name_p)), append_chunk(std::move(append_chunk_p)) {
+	explicit AppendRequestMessage(string connection_id_p, string catalog_name_p, string schema_name_p,
+	                              string table_name_p, unique_ptr<DataChunkWrapper> append_chunk_p)
+	    : QuackMessage(TYPE, std::move(connection_id_p)), catalog_name(std::move(catalog_name_p)),
+	      schema_name(std::move(schema_name_p)), table_name(std::move(table_name_p)),
+	      append_chunk(std::move(append_chunk_p)) {
 	}
 
 	void Serialize(Serializer &serializer) const override;
@@ -312,6 +313,9 @@ public:
 
 	DataChunk &AppendChunk() const {
 		return append_chunk->Chunk();
+	}
+	const string &CatalogName() const {
+		return catalog_name;
 	}
 	const string &SchemaName() const {
 		return schema_name;
@@ -325,6 +329,7 @@ protected:
 	}
 
 private:
+	string catalog_name;
 	string schema_name;
 	string table_name;
 	unique_ptr<DataChunkWrapper> append_chunk;

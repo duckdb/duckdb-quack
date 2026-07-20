@@ -31,7 +31,7 @@ class QuackSchemaCatalogEntry : public SchemaCatalogEntry {
 public:
 	QuackSchemaCatalogEntry(Catalog &catalog_p, CreateSchemaInfo &info_p);
 	QuackSchemaCatalogEntry(ClientContext &context, Catalog &catalog_p, CreateSchemaInfo &info_p,
-	                        const QuackLoadCatalogData &load_data);
+	                        const QuackLoadCatalogData &load_data, string source_catalog_p);
 	~QuackSchemaCatalogEntry() override;
 
 	void Scan(ClientContext &context, CatalogType type, const std::function<void(CatalogEntry &)> &callback) override;
@@ -57,12 +57,17 @@ public:
 	void DropEntry(ClientContext &context, DropInfo &info) override;
 	void Alter(CatalogTransaction transaction, AlterInfo &info) override;
 
+	const string &SourceCatalogName() const {
+		return source_catalog;
+	}
+
 private:
 	optional_ptr<CatalogEntry> TryLoadBuiltInFunction(const string &entry_name);
 	optional_ptr<CatalogEntry> LoadBuiltInFunction(DefaultTableMacro macro);
 
 private:
 	unique_ptr<QuackTableSet> tables;
+	string source_catalog;
 
 private:
 	mutex default_function_lock;

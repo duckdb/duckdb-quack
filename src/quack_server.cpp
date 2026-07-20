@@ -412,9 +412,9 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 
 		// we never execute this query, but throw it at the authorization function so it can check if this user gets to
 		// insert into this table
-		auto dummy_insert_query =
-		    StringUtil::Format("INSERT INTO %s.%s VALUES (NULL)", SQLIdentifier(append_request_message.SchemaName()),
-		                       SQLIdentifier(append_request_message.TableName()));
+		auto dummy_insert_query = StringUtil::Format(
+		    "INSERT INTO %s.%s.%s VALUES (NULL)", SQLIdentifier(append_request_message.CatalogName()),
+		    SQLIdentifier(append_request_message.SchemaName()), SQLIdentifier(append_request_message.TableName()));
 
 		// TODO do not do this if there is no fun set
 		{
@@ -429,11 +429,12 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 
 		std::unique_lock<std::mutex> lock(connection.lock);
 		auto &context = *connection.duckdb_connection->context;
-		auto table_info = context.TableInfo(append_request_message.SchemaName(), append_request_message.TableName());
+		auto table_info = context.TableInfo(append_request_message.CatalogName(), append_request_message.SchemaName(),
+		                                    append_request_message.TableName());
 		if (!table_info) {
-			return make_uniq<ErrorResponse>("Table %s.%s does not exist",
-			                                SQLIdentifier(append_request_message.SchemaName()),
-			                                SQLIdentifier(append_request_message.TableName()));
+			return make_uniq<ErrorResponse>(
+			    "Table %s.%s.%s does not exist", SQLIdentifier(append_request_message.CatalogName()),
+			    SQLIdentifier(append_request_message.SchemaName()), SQLIdentifier(append_request_message.TableName()));
 		}
 		try {
 			ColumnDataCollection collection(Allocator::Get(context), append_request_message.AppendChunk().GetTypes());
