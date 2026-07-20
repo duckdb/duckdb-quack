@@ -43,6 +43,11 @@
         "id": 1,
         "name": "sql_query",
         "type": "string"
+      },
+      {
+        "id": 2,
+        "name": "parameters",
+        "type": "vector<Value>"
       }
     ]
   },
@@ -181,4 +186,3 @@
     ]
   }
 ]
-

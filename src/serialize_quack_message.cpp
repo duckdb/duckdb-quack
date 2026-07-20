@@ -111,11 +111,13 @@ MessageHeader MessageHeader::Deserialize(Deserializer &deserializer) {
 
 void PrepareRequestMessage::Serialize(Serializer &serializer) const {
 	serializer.WritePropertyWithDefault<string>(1, "sql_query", sql_query);
+	serializer.WritePropertyWithDefault<vector<Value>>(2, "parameters", parameters);
 }
 
 unique_ptr<PrepareRequestMessage> PrepareRequestMessage::Deserialize(Deserializer &deserializer) {
 	auto result = duckdb::unique_ptr<PrepareRequestMessage>(new PrepareRequestMessage());
 	deserializer.ReadPropertyWithDefault<string>(1, "sql_query", result->sql_query);
+	deserializer.ReadPropertyWithDefault<vector<Value>>(2, "parameters", result->parameters);
 	return result;
 }
 
@@ -133,8 +135,7 @@ unique_ptr<PrepareResponseMessage> PrepareResponseMessage::Deserialize(Deseriali
 	auto needs_more_fetch = deserializer.ReadPropertyWithDefault<bool>(3, "needs_more_fetch");
 	auto results = deserializer.ReadPropertyWithDefault<vector<unique_ptr<DataChunkWrapper>>>(4, "results");
 	auto result_uuid = deserializer.ReadProperty<hugeint_t>(5, "result_uuid");
-	auto result = duckdb::unique_ptr<PrepareResponseMessage>(new PrepareResponseMessage(
-	    std::move(result_types), std::move(result_names), std::move(results), needs_more_fetch, result_uuid));
+	auto result = duckdb::unique_ptr<PrepareResponseMessage>(new PrepareResponseMessage(std::move(result_types), std::move(result_names), std::move(results), needs_more_fetch, result_uuid));
 	return result;
 }
 

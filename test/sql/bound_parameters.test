@@ -1,0 +1,40 @@
+# name: test/sql/bound_parameters.test
+# description: bind typed values on the server without rendering SQL literals
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+foreach server 'quack:localhost'
+
+statement ok con1
+CALL quack_serve({server}, token='asdf')
+
+statement ok con2
+ATTACH {server} AS remote (TOKEN 'asdf')
+
+query ITT con2
+FROM quack_query_by_name('remote', 'SELECT ?::INTEGER, ?::UUID, ?::VARCHAR', 42, UUID '12345678-1234-5678-1234-567812345678', 'Robert''); DROP TABLE students;--')
+----
+42	12345678-1234-5678-1234-567812345678	Robert'); DROP TABLE students;--
+
+query TI con2
+FROM quack_query_by_name('remote', 'SELECT ?::DATE, ?::BOOLEAN', DATE '2026-07-12', true)
+----
+2026-07-12	true
+
+query IT con2
+FROM quack_query_by_name('remote', 'SELECT ? IS NULL, ?::INTEGER[]', NULL, [1, 2, 3])
+----
+true	[1, 2, 3]
+
+statement ok con2
+DETACH remote
+
+statement ok con1
+CALL quack_stop({server})
+
+endloop

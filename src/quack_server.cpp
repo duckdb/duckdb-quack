@@ -329,7 +329,18 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		connection.query_started_at = Timestamp::GetCurrentTimestamp();
 
 		{
-			auto query_result = connection.duckdb_connection->SendQuery(effective_sql);
+			unique_ptr<QueryResult> query_result;
+			if (prepare_request_message.Parameters().empty()) {
+				query_result = connection.duckdb_connection->SendQuery(effective_sql);
+			} else {
+				auto pending = connection.duckdb_connection->PendingQuery(
+				    effective_sql, prepare_request_message.Parameters(), QueryResultOutputType::ALLOW_STREAMING);
+				if (pending->HasError()) {
+					query_result = make_uniq<MaterializedQueryResult>(pending->GetErrorObject());
+				} else {
+					query_result = pending->Execute();
+				}
+			}
 			if (query_result->HasError()) {
 				// TODO; instead of cancelled, add an ERROR state
 				connection.query_state = QuackQueryState::CANCELLED;
