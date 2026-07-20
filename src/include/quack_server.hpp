@@ -79,6 +79,11 @@ public:
 	//! Throw InvalidInputException if `token` doesn't meet requirements(currently, length >= 4)
 	static void ValidateToken(const string &token);
 
+	//! Look up a quack secret matching `uri` and return its token, or an empty
+	//! string when no secret matches. Lets a token be sourced from the secret
+	//! manager when the caller didn't supply one explicitly.
+	static string TokenFromSecret(ClientContext &context, const QuackUri &uri);
+
 	vector<QuackConnectionSnapshot> GetActiveConnectionSnap();
 
 	const string &Token() {

@@ -50,13 +50,19 @@ static unique_ptr<FunctionData> QuackServeBind(ClientContext &context, TableFunc
 	names.emplace_back("listen_url");
 	names.emplace_back("auth_token");
 
-	// Every server has a token: either user-supplied or auto-generated. The
-	// authn callback (default token-check or a user-defined function) decides
+	// Every server has a token, resolved in priority order:
+	//   1. a user-supplied `token` parameter,
+	//   2. the token of a quack secret matching this endpoint,
+	//   3. a freshly generated random token.
+	// The authn callback (default token-check or a user-defined function) decides
 	// what to do with it; the server itself doesn't care which path is in use.
 	if (input.named_parameters.find("token") != input.named_parameters.end()) {
 		bind_data->token = input.named_parameters["token"].GetValue<string>();
 	} else {
-		bind_data->token = QuackServer::GenerateRandomToken(*context.db);
+		bind_data->token = QuackServer::TokenFromSecret(context, bind_data->listen_uri);
+		if (bind_data->token.empty()) {
+			bind_data->token = QuackServer::GenerateRandomToken(*context.db);
+		}
 	}
 	// Validate at bind-time: a length error here fails before the listener
 	// thread is spawned, instead of leaving a half-built server behind.

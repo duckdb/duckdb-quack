@@ -5,6 +5,7 @@
 #include "duckdb/main/secret/secret_manager.hpp"
 
 #include "quack_client.hpp"
+#include "quack_server.hpp"
 #include "quack_uri.hpp"
 
 namespace duckdb {
@@ -187,13 +188,7 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
                                                                string token) {
 	// if no token is provided fetch it from the secret manager
 	if (token.empty()) {
-		auto &secret_manager = SecretManager::Get(context);
-		auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
-		auto match = secret_manager.LookupSecret(transaction, uri.Uri(), "quack");
-		if (match.HasMatch()) {
-			const auto &kv = dynamic_cast<const KeyValueSecret &>(*match.secret_entry->secret);
-			token = kv.TryGetValue("token", true).ToString();
-		}
+		token = QuackServer::TokenFromSecret(context, uri);
 	}
 	if (token.empty()) {
 		throw InvalidInputException("Could not find a Quack authentication token");
