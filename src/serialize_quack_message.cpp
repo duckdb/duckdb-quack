@@ -197,7 +197,6 @@ unique_ptr<SuccessResponse> SuccessResponse::Deserialize(Deserializer &deseriali
 	return result;
 }
 
-
 void AcknowledgementMessage::Serialize(Serializer &serializer) const {
 }
 
