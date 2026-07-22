@@ -1,0 +1,14 @@
+# name: test/sql/quack_default_client_id_env.test
+# description: quack_default_client_id is seeded from $QUACK_CLIENT_ID at extension load
+# group: [sql]
+
+# Gated on an exported QUACK_CLIENT_ID (sqllogictest test-env can't setenv); skipped otherwise.
+require-env QUACK_CLIENT_ID quack_env_client_id
+
+require quack
+
+# $QUACK_CLIENT_ID is authoritative when present: the load-time default mirrors it verbatim.
+query I
+SELECT current_setting('quack_default_client_id') = 'quack_env_client_id';
+----
+true

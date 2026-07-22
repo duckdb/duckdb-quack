@@ -11,6 +11,11 @@ include test/template/quack_setup.test_template
 statement ok
 FROM quack_query({server}, 'CALL quack_stop('{server}')', token='asdf');
 
+# The server tears itself down asynchronously (the worker running quack_stop can't join the
+# worker pool from inside it). Give the detached teardown a moment to close the listening
+# socket before asserting the address is unreachable.
+sleep 2 seconds
+
 # Server is now gone — a subsequent client request to the same address must
 # fail (any error is fine, as long as it doesn't hang or succeed).
 statement error

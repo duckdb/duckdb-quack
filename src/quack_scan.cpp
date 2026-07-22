@@ -7,6 +7,7 @@
 
 #include "quack_scan.hpp"
 #include "quack_client.hpp"
+#include "quack_fetch_ahead.hpp"
 #include "include/storage/quack_catalog.hpp"
 #include "storage/quack_transaction.hpp"
 
@@ -41,7 +42,10 @@ static unique_ptr<FunctionData> QuackScanBind(ClientContext &context, TableFunct
 	if (input.named_parameters.find("token") != input.named_parameters.end()) {
 		token = input.named_parameters["token"].GetValue<string>();
 	}
-	bind_data->client_connection = QuackClient::ConnectToServer(context, server_uri, token);
+	auto client_id_entry = input.named_parameters.find("client_id");
+	auto client_id = QuackClient::ResolveClientId(
+	    context, client_id_entry != input.named_parameters.end() ? &client_id_entry->second : nullptr);
+	bind_data->client_connection = QuackClient::ConnectToServer(context, server_uri, token, std::move(client_id));
 	auto &client_connection = *bind_data->client_connection;
 
 	auto client_wrapper = client_connection.GetClient(context);
@@ -130,11 +134,14 @@ struct QuackScanLocalState : public LocalTableFunctionState {
 	~QuackScanLocalState() override {
 	}
 
-	unique_ptr<QuackClientWrapper> client_wrapper;
-	//! batch_index of the batch that `fetched_results` currently holds chunks from (server-assigned).
-	//! Surfaced to DuckDB via get_partition_data so downstream order-preserving operators
-	//! (CTAS, COPY TO, INSERT SELECT) can run the scan in parallel without losing order.
+	//! Server-assigned index of the batch currently being drained; surfaced via get_partition_data
+	//! so order-preserving operators (CTAS, COPY TO) can run the scan in parallel without losing order.
 	optional_idx current_batch_index;
+
+	//! This thread's outstanding batch claim; persists across BLOCKED yields until the batch arrives.
+	optional_idx fetch_claim;
+	//! The stream ended below this thread's claim; no more batches for this thread.
+	bool fetch_exhausted = false;
 
 	queue<ChunkResult> results;
 	ColumnDataScanState scan_state;
@@ -144,8 +151,7 @@ struct QuackScanGlobalState : GlobalTableFunctionState {
 	explicit QuackScanGlobalState(vector<ColumnIndex> column_ids_p, vector<idx_t> projection_id_p,
 	                              vector<ChunkResult> results_p, bool needs_more_fetch_p, hugeint_t query_uuid_p)
 	    : max_threads(needs_more_fetch_p ? MAX_THREADS : 1), column_ids(std::move(column_ids_p)),
-	      projection_ids(std::move(projection_id_p)), needs_more_fetch(needs_more_fetch_p), query_uuid(query_uuid_p),
-	      results(std::move(results_p)) {
+	      projection_ids(std::move(projection_id_p)), query_uuid(query_uuid_p), results(std::move(results_p)) {
 	}
 	idx_t MaxThreads() const override {
 		return max_threads;
@@ -153,10 +159,10 @@ struct QuackScanGlobalState : GlobalTableFunctionState {
 	idx_t max_threads;
 	vector<ColumnIndex> column_ids;
 	vector<idx_t> projection_ids;
-	atomic<bool> needs_more_fetch;
 	atomic<bool> ack_sent {false};
-	atomic<int> active_fetches {0};
 	hugeint_t query_uuid;
+	//! FETCH read-ahead pipeline; set when the PREPARE response signals more batches to fetch.
+	shared_ptr<QuackFetcher> fetcher;
 
 	vector<ChunkResult> TryGetResults() {
 		lock_guard<mutex> guard(lock);
@@ -270,8 +276,14 @@ unique_ptr<GlobalTableFunctionState> QuackScanInitGlobal(ClientContext &context,
 		query_uuid = bind_data.query_uuid;
 	}
 	// we only multithread if there is more to fetch
-	return make_uniq<QuackScanGlobalState>(input.column_indexes, input.projection_ids, std::move(results),
-	                                       needs_more_fetch, query_uuid);
+	auto global_state = make_uniq<QuackScanGlobalState>(input.column_indexes, input.projection_ids, std::move(results),
+	                                                    needs_more_fetch, query_uuid);
+	if (needs_more_fetch) {
+		// start pipelining FETCH requests on the ASYNC pool before the first scan call
+		global_state->fetcher = make_shared_ptr<QuackFetcher>(context, *bind_data.client_connection, query_uuid,
+		                                                      QuackFetcher::GetReadAheadDepth(context));
+	}
+	return std::move(global_state);
 }
 
 unique_ptr<LocalTableFunctionState> QuackScanInitLocal(ExecutionContext &context, TableFunctionInitInput &input,
@@ -280,8 +292,6 @@ unique_ptr<LocalTableFunctionState> QuackScanInitLocal(ExecutionContext &context
 	auto &global_state = global_state_p->Cast<QuackScanGlobalState>();
 	auto local_state = make_uniq<QuackScanLocalState>();
 
-	// re-use initial client from bind if possible
-	local_state->client_wrapper = bind_data.client_connection->GetClient(context.client);
 	auto results = global_state.TryGetResults();
 	for (auto &chunk : results) {
 		local_state->results.push(std::move(chunk));
@@ -298,7 +308,7 @@ static bool ReconnectsEnabled(ClientContext &context) {
 }
 
 static void SendAcknowledgement(ClientContext &context, QuackScanGlobalState &global_state,
-                                QuackScanLocalState &local_state, QuackScanBindData &bind_data) {
+                                QuackScanBindData &bind_data) {
 	if (!ReconnectsEnabled(context)) {
 		return;
 	}
@@ -306,7 +316,8 @@ static void SendAcknowledgement(ClientContext &context, QuackScanGlobalState &gl
 		return;
 	}
 	try {
-		auto &client = local_state.client_wrapper->GetClient();
+		auto client_wrapper = bind_data.client_connection->GetClient(context);
+		auto &client = client_wrapper->GetClient();
 		client.Request<SuccessResponse>(context,
 		                                make_uniq<AcknowledgementMessage>(bind_data.client_connection->ConnectionId()));
 	} catch (const std::exception &e) {
@@ -349,41 +360,38 @@ static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChu
 			}
 		}
 
-		// if that did not work, we request more results
-		if (local_state.results.empty() && global_state.needs_more_fetch) {
-			auto &client = local_state.client_wrapper->GetClient();
-			bool reconnects_enabled = ReconnectsEnabled(context);
-			if (reconnects_enabled) {
-				global_state.active_fetches++;
-			}
-
-			auto fetch_response = client.Request<FetchResponseMessage>(
-			    context,
-			    make_uniq<FetchRequestMessage>(bind_data.client_connection->ConnectionId(), global_state.query_uuid));
-			if (reconnects_enabled) {
-				global_state.active_fetches--;
-			}
-			if (fetch_response->MutableResults().empty()) {
-				// server is done, we are done
-				global_state.needs_more_fetch = false;
-				bind_data.completed = true;
-				if (global_state.active_fetches == 0) {
-					SendAcknowledgement(context, global_state, local_state, bind_data);
+		// if that did not work, we consume this thread's claimed batch from the fetcher
+		if (local_state.results.empty() && global_state.fetcher && !local_state.fetch_exhausted) {
+			idx_t batch_index;
+			vector<unique_ptr<DataChunk>> chunks;
+			switch (global_state.fetcher->GetBatch(context, input, local_state.fetch_claim, batch_index, chunks)) {
+			case QuackFetchResult::BATCH: {
+				// tag fetched chunks like the initial batch (see QuackScanInitGlobal): direct queries
+				// return full-width chunks that still need projection, the catalog path already projected
+				auto fetched_pushdown_type = bind_data.table_name.empty()
+				                                 ? ChunkResultPushdownType::REQUIRES_PUSHDOWN
+				                                 : ChunkResultPushdownType::PUSHDOWN_ALREADY_APPLIED;
+				for (auto &chunk : chunks) {
+					local_state.results.emplace(*chunk, fetched_pushdown_type);
 				}
+				local_state.current_batch_index = batch_index;
+				continue;
+			}
+			case QuackFetchResult::FINISHED:
+				// server is done, this thread is done
+				local_state.fetch_exhausted = true;
+				bind_data.completed = true;
+				// FINISHED is only observable once the fetcher drained every in-flight FETCH,
+				// so the acknowledgement is guaranteed to be the query's last message
+				SendAcknowledgement(context, global_state, bind_data);
+				return;
+			case QuackFetchResult::BLOCKED:
 				return;
 			}
-			// set up buffer for scan in next iteration
-			for (auto &chunk : fetch_response->MutableResults()) {
-				local_state.results.emplace(chunk->Chunk(), ChunkResultPushdownType::PUSHDOWN_ALREADY_APPLIED);
-			}
-			local_state.current_batch_index = fetch_response->BatchIndex();
-			continue;
 		}
 		// we did not have anything cached and then request to the server did not yield anything - we are done
 		bind_data.completed = true;
-		if (global_state.active_fetches == 0) {
-			SendAcknowledgement(context, global_state, local_state, bind_data);
-		}
+		SendAcknowledgement(context, global_state, bind_data);
 		break;
 	}
 }
@@ -426,6 +434,7 @@ TableFunction QuackScanFunction::GetFunction() {
 	                         QuackScanInitGlobal, QuackScanInitLocal);
 	fun.named_parameters["disable_ssl"] = LogicalType::BOOLEAN;
 	fun.named_parameters["token"] = LogicalType::VARCHAR;
+	fun.named_parameters["client_id"] = LogicalType::VARCHAR;
 
 	fun.projection_pushdown = true;
 	fun.get_partition_data = QuackScanGetPartitionData;

@@ -1,0 +1,135 @@
+# name: test/sql/attach_insert.test
+# description: server-side INSERT via scan_data_from_quack_client + PhysicalBatchInsert; autocommit failure is atomic
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+# --- basic INSERT ... SELECT
+statement ok
+create table rpc.t(i bigint);
+
+statement ok
+insert into rpc.t select * from range(100000) t(i);
+
+query IIII
+select count(*), min(i), max(i), sum(i) from rpc.t;
+----
+100000	0	99999	4999950000
+
+# --- empty source: client sends no chunks, only the finalize marker
+statement ok
+create table rpc.empty_t(i bigint);
+
+statement ok
+insert into rpc.empty_t select * from range(0) t(i);
+
+query I
+select count(*) from rpc.empty_t;
+----
+0
+
+# --- CTAS flows through the same append path
+statement ok
+create table rpc.ctas as select * from range(50000) t(i);
+
+query II
+select count(*), sum(i) from rpc.ctas;
+----
+50000	1249975000
+
+# --- ATOMICITY: a failing autocommit INSERT ... SELECT must leave 0 rows (previously leaked partial rows)
+statement ok
+create table rpc.checked(i bigint check (i < 250000));
+
+statement error
+insert into rpc.checked select * from range(500000) t(i);
+----
+CHECK constraint failed
+
+query I
+select count(*) from rpc.checked;
+----
+0
+
+# --- the connection survives a failed insert
+statement ok
+create table rpc.ok(i bigint);
+
+statement ok
+insert into rpc.ok select * from range(1000) t(i);
+
+query I
+select count(*) from rpc.ok;
+----
+1000
+
+# --- async_threads sweep: the server-side scan source must behave the same whether its wait runs on
+# the ASYNC pool (BLOCKED, async_threads>0) or inline (SYNCHRONOUS fallback, async_threads=0).
+foreach at 0 8
+
+statement ok
+SET async_threads={at};
+
+statement ok
+create table rpc.sweep(i bigint);
+
+statement ok
+insert into rpc.sweep select * from range(50000) t(i);
+
+query II
+select count(*), sum(i) from rpc.sweep;
+----
+50000	1249975000
+
+# atomicity still holds in both modes
+statement ok
+create table rpc.sweep_checked(i bigint check (i < 25000));
+
+statement error
+insert into rpc.sweep_checked select * from range(50000) t(i);
+----
+CHECK constraint failed
+
+query I
+select count(*) from rpc.sweep_checked;
+----
+0
+
+statement ok
+drop table rpc.sweep;
+
+statement ok
+drop table rpc.sweep_checked;
+
+endloop
+
+statement ok
+reset async_threads;
+
+# --- client-side source failure mid-stream: the client sends some chunks then errors and never sends
+# FINALIZE. The server must abort (roll back) the abandoned insert rather than hang holding the
+# connection lock, so a following statement on the same connection still works.
+statement ok
+create table rpc.local_fail(i bigint);
+
+statement error
+insert into rpc.local_fail
+select case when i >= 2048 then error('local source failed') else i end::bigint from range(4096) t(i);
+----
+local source failed
+
+statement ok
+insert into rpc.local_fail values (-1);
+
+query I
+select count(*) from rpc.local_fail;
+----
+1
+
+statement ok con2
+detach rpc;
+
+include test/template/quack_teardown.test_template

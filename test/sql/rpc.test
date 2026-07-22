@@ -10,6 +10,24 @@ from quack_query({server}, 'select 42', token='asdf')
 ----
 42
 
+# a NULL client_id must be rejected, not silently accepted and hashed as the literal string "NULL"
+statement error
+from quack_query({server}, 'select 42', token='asdf', client_id=NULL)
+----
+client_id cannot be null
+
+# a client_id on the direct quack_query path is accepted
+query I
+from quack_query({server}, 'select 42', token='asdf', client_id='direct_client')
+----
+42
+
+# an empty-string client_id is accepted
+query I
+from quack_query({server}, 'select 42', token='asdf', client_id='')
+----
+42
+
 # we fail with the wrong token
 statement error
 from quack_query({server}, 'select 42', token='fdsa')
@@ -117,6 +135,11 @@ call quack_stop({server})
 
 statement ok quack_db:quack_server_con
 call quack_stop({server})
+
+# quack_stop tears the server down asynchronously (workers are joined off-thread to avoid
+# deadlocking a worker that joins itself). Give the detached teardown a moment to close the
+# listening socket before asserting the address is unreachable.
+sleep 2 seconds
 
 statement error
 from quack_query({server}, 'select 42')

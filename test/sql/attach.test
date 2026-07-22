@@ -130,6 +130,10 @@ database not found
 
 include test/template/quack_teardown.test_template
 
+# quack_stop tears the server down asynchronously; wait for the listening socket to close
+# before asserting a fresh attach to the same address fails.
+sleep 2 seconds
+
 statement error
 attach {server} as rpc
 ----

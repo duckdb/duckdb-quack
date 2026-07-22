@@ -1,12 +1,12 @@
 # name: test/sql/reconnects_parallel.test
-# description: exactly-once ACK across a parallel, multi-batch scan (exercises active_fetches / "last ACK last")
+# description: exactly-once ACK across a parallel, multi-batch scan (the ACK must be the query's last message)
 # group: [sql]
 
 include test/template/quack_setup.test_template
 
 # One chunk per FETCH batch forces ack_sent machinery is engaged.
 statement ok quack_db:quack_server_con
-SET GLOBAL quack_fetch_batch_chunks = 1;
+SET GLOBAL quack_fetch_batch_rows = 1;
 
 statement ok quack_db:quack_server_con
 CREATE TABLE big AS SELECT range AS i FROM range(300000);
@@ -62,7 +62,7 @@ WHERE message_type = 'ACKNOWLEDGEMENT' AND response_type = 'SUCCESS_RESPONSE';
 2
 
 statement ok quack_db:quack_server_con
-RESET GLOBAL quack_fetch_batch_chunks;
+RESET GLOBAL quack_fetch_batch_rows;
 
 statement ok
 DETACH remote;

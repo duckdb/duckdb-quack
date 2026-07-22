@@ -1,6 +1,9 @@
 #define DUCKDB_EXTENSION_MAIN
 
+#include <cstdlib>
+
 #include "duckdb/catalog/default/default_table_functions.hpp"
+#include "duckdb/common/types/uuid.hpp"
 #include "duckdb/logging/log_manager.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
@@ -18,6 +21,7 @@
 #include "quack_extension.hpp"
 #include "quack_log.hpp"
 #include "quack_scan.hpp"
+#include "quack_scan_from_client.hpp"
 #include "quack_cancel.hpp"
 #include "quack_startstop.hpp"
 #include "quack_storage.hpp"
@@ -123,6 +127,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	loader.RegisterFunction(QuackScanFunction::GetFunction());
 	loader.RegisterFunction(QuackScanByNameFunction::GetFunction());
+	loader.RegisterFunction(QuackScanFromClientFunction::GetFunction());
 	loader.RegisterFunction(QuackServeFunction::GetFunction());
 	loader.RegisterFunction(QuackCancelFunction::GetFunction());
 	loader.RegisterFunction(QuackStopFunction::GetFunction());
@@ -168,8 +173,43 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("quack_authorization_function", "Name of a callback function for authorization",
 	                          LogicalType::VARCHAR, Value("quack_nop_authorization"), nullptr, SetScope::GLOBAL);
 
-	config.AddExtensionOption("quack_fetch_batch_chunks", "Maximum number of DataChunks returned per FETCH response",
-	                          LogicalType::UBIGINT, Value::UBIGINT(12));
+	config.AddExtensionOption("quack_fetch_batch_rows",
+	                          "Rows accumulated per FETCH response batch (whole DataChunks, so the last chunk "
+	                          "may overshoot the cap)",
+	                          LogicalType::UBIGINT, Value::UBIGINT(24576));
+
+	config.AddExtensionOption("quack_fetch_read_ahead",
+	                          "FETCH requests kept in flight ahead of the scan (0 = number of async threads)",
+	                          LogicalType::UBIGINT, Value::UBIGINT(0));
+
+	config.AddExtensionOption("quack_debug_fetch_delay_ms",
+	                          "DEBUG SETTING: max random delay in ms before a FETCH response is published, "
+	                          "stressing out-of-order batch arrival",
+	                          LogicalType::UBIGINT, Value::UBIGINT(0));
+
+	config.AddExtensionOption("quack_send_data_flush_rows",
+	                          "Rows a thread buffers before flushing one SEND_DATA_REQUEST (0 = default 204800)",
+	                          LogicalType::UBIGINT, Value::UBIGINT(0));
+
+	config.AddExtensionOption("quack_server_max_connections",
+	                          "Maximum concurrent connections the RPC server accepts; beyond this new "
+	                          "connections are refused",
+	                          LogicalType::UBIGINT, Value::UBIGINT(1024), nullptr, SetScope::GLOBAL);
+	config.AddExtensionOption("quack_server_keep_alive_timeout",
+	                          "Seconds an idle keep-alive connection is kept open by the RPC server",
+	                          LogicalType::UBIGINT, Value::UBIGINT(300), nullptr, SetScope::GLOBAL);
+
+	// Default client_id handed to any ATTACH / quack_query that doesn't pass one explicitly
+	string default_client_id;
+	if (const char *env_client_id = std::getenv("QUACK_CLIENT_ID")) {
+		default_client_id = env_client_id;
+	} else {
+		default_client_id = UUID::ToString(UUID::GenerateRandomUUID());
+	}
+	config.AddExtensionOption("quack_default_client_id",
+	                          "client_id used when ATTACH / quack_query omit one; precomputed at load from "
+	                          "$QUACK_CLIENT_ID (empty opts out) or a random per-instance id. Set to '' to opt out.",
+	                          LogicalType::VARCHAR, Value(default_client_id), nullptr, SetScope::GLOBAL);
 
 	config.AddExtensionOption("quack_enable_reconnects",
 	                          "Send an acknowledgement to the server after a query completes", LogicalType::BOOLEAN,

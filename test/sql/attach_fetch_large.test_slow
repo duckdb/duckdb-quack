@@ -23,9 +23,20 @@ select count(*), sum(i) from quack_query_by_name('rpc', 'from big_tbl')
 statement ok
 detach rpc;
 
+# large fetch must behave the same with the read-ahead on the ASYNC pool or inline (async_threads=0)
+foreach at 0 8
+
+statement ok
+SET async_threads={at};
+
 query II
 select count(*), sum(i) from quack_query({server}, 'from big_tbl', token='asdf')
 ----
 10000000	49999995000000
+
+endloop
+
+statement ok
+reset async_threads;
 
 include test/template/quack_teardown.test_template

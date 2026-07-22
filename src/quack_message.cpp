@@ -5,7 +5,6 @@
 
 #include "quack_message.hpp"
 
-#include "quack_server.hpp"
 #include "duckdb/main/database.hpp"
 
 namespace duckdb {
@@ -42,8 +41,11 @@ MessageType EnumUtil::FromString<MessageType>(const char *value) {
 	if (StringUtil::Equals(value, "FETCH_RESPONSE")) {
 		return MessageType::FETCH_RESPONSE;
 	}
-	if (StringUtil::Equals(value, "APPEND_REQUEST")) {
-		return MessageType::APPEND_REQUEST;
+	if (StringUtil::Equals(value, "SEND_DATA_REQUEST")) {
+		return MessageType::SEND_DATA_REQUEST;
+	}
+	if (StringUtil::Equals(value, "SEND_DATA_RESPONSE")) {
+		return MessageType::SEND_DATA_RESPONSE;
 	}
 	if (StringUtil::Equals(value, "SUCCESS_RESPONSE")) {
 		return MessageType::SUCCESS_RESPONSE;
@@ -53,6 +55,9 @@ MessageType EnumUtil::FromString<MessageType>(const char *value) {
 	}
 	if (StringUtil::Equals(value, "CANCEL_REQUEST")) {
 		return MessageType::CANCEL_REQUEST;
+	}
+	if (StringUtil::Equals(value, "FINALIZE")) {
+		return MessageType::FINALIZE;
 	}
 	if (StringUtil::Equals(value, "ACKNOWLEDGEMENT")) {
 		return MessageType::ACKNOWLEDGEMENT;
@@ -79,14 +84,18 @@ const char *EnumUtil::ToChars<MessageType>(MessageType value) {
 		return "FETCH_REQUEST";
 	case MessageType::FETCH_RESPONSE:
 		return "FETCH_RESPONSE";
-	case MessageType::APPEND_REQUEST:
-		return "APPEND_REQUEST";
+	case MessageType::SEND_DATA_REQUEST:
+		return "SEND_DATA_REQUEST";
+	case MessageType::SEND_DATA_RESPONSE:
+		return "SEND_DATA_RESPONSE";
 	case MessageType::SUCCESS_RESPONSE:
 		return "SUCCESS_RESPONSE";
 	case MessageType::DISCONNECT_MESSAGE:
 		return "DISCONNECT_MESSAGE";
 	case MessageType::CANCEL_REQUEST:
 		return "CANCEL_REQUEST";
+	case MessageType::FINALIZE:
+		return "FINALIZE";
 	case MessageType::ACKNOWLEDGEMENT:
 		return "ACKNOWLEDGEMENT";
 	case MessageType::ERROR_RESPONSE:
@@ -101,7 +110,7 @@ const char *EnumUtil::ToChars<MessageType>(MessageType value) {
 void QuackMessage::ToMemoryStream(MemoryStream &write_stream) const {
 	write_stream.Rewind();
 	SerializationOptions options;
-	options.storage_compatibility = StorageCompatibility::FromIndex(StorageVersion::V1_5_0);
+	options.storage_compatibility = StorageCompatibility::FromIndex(StorageVersion::V2_0_0);
 
 	BinarySerializer serializer(write_stream, options);
 
@@ -129,14 +138,18 @@ unique_ptr<QuackMessage> QuackMessage::Deserialize(Deserializer &deserializer, M
 		return FetchRequestMessage::Deserialize(deserializer);
 	case MessageType::FETCH_RESPONSE:
 		return FetchResponseMessage::Deserialize(deserializer);
-	case MessageType::APPEND_REQUEST:
-		return AppendRequestMessage::Deserialize(deserializer);
+	case MessageType::SEND_DATA_REQUEST:
+		return SendDataRequestMessage::Deserialize(deserializer);
+	case MessageType::SEND_DATA_RESPONSE:
+		return SendDataResponseMessage::Deserialize(deserializer);
 	case MessageType::SUCCESS_RESPONSE:
 		return SuccessResponse::Deserialize(deserializer);
 	case MessageType::DISCONNECT_MESSAGE:
 		return DisconnectMessage::Deserialize(deserializer);
 	case MessageType::CANCEL_REQUEST:
 		return CancelRequestMessage::Deserialize(deserializer);
+	case MessageType::FINALIZE:
+		return FinalizeMessage::Deserialize(deserializer);
 	case MessageType::ACKNOWLEDGEMENT:
 		return AcknowledgementMessage::Deserialize(deserializer);
 	case MessageType::ERROR_RESPONSE:
@@ -162,15 +175,15 @@ unique_ptr<QuackMessage> QuackMessage::DeserializeMessage(BinaryDeserializer &de
 	return result;
 }
 
-ConnectionRequestMessage::ConnectionRequestMessage(const string &auth_string_p)
-    : QuackMessage(TYPE), auth_string(auth_string_p), client_duckdb_version(DuckDB::LibraryVersion()),
-      client_platform(DuckDB::Platform()), min_supported_quack_version(QuackServer::QUACK_VERSION),
-      max_supported_quack_version(QuackServer::QUACK_VERSION) {
+ConnectionRequestMessage::ConnectionRequestMessage(const string &auth_string_p, string client_id_p)
+    : QuackMessage(TYPE), auth_string(auth_string_p), client_id(std::move(client_id_p)),
+      client_duckdb_version(DuckDB::LibraryVersion()), client_platform(DuckDB::Platform()),
+      min_supported_quack_version(QUACK_VERSION), max_supported_quack_version(QUACK_VERSION) {
 }
 
 ConnectionResponseMessage::ConnectionResponseMessage(string connection_id_p)
     : QuackMessage(TYPE, std::move(connection_id_p)), server_duckdb_version(DuckDB::LibraryVersion()),
-      server_platform(DuckDB::Platform()), quack_version(QuackServer::QUACK_VERSION) {
+      server_platform(DuckDB::Platform()), quack_version(QUACK_VERSION) {
 }
 
 unique_ptr<QuackMessage> QuackMessage::FromMemoryStream(MemoryStream &read_stream) {

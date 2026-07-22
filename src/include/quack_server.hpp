@@ -4,6 +4,7 @@
 
 #include "duckdb/common/atomic.hpp"
 #include "duckdb/common/mutex.hpp"
+#include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/unordered_map.hpp"
@@ -22,8 +23,43 @@ class QueryResult;
 class DatabaseInstance;
 class PreparedStatement;
 class EncryptionState;
+class QuackDataStream;
+class ErrorData;
 
 enum class QuackQueryState : uint8_t { IDLE, ACTIVE, FINISHED, CANCELLED, QUACK_ERROR };
+
+//! An insert stream + its driver thread, taken off a connection so finish/join can run unlocked.
+struct DetachedInsertStream {
+	shared_ptr<QuackDataStream> stream;
+	std::thread thread;
+	string id;
+	//! Finish + join + deregister; returns any INSERT error. Call WITHOUT a lock held.
+	ErrorData FinishAndJoin();
+	//! Roll the INSERT back (SetError) + join + deregister. Call WITHOUT a lock held.
+	void AbortAndJoin(const string &reason);
+};
+
+//! Server-side state for the INSERT a client is currently driving via a SEND_DATA stream on this
+//! connection (one at a time). `lock` is held only briefly — never across a Push or a join.
+struct QuackInsertState {
+	annotated_mutex lock;
+	shared_ptr<QuackDataStream> stream DUCKDB_GUARDED_BY(lock);
+	std::thread thread DUCKDB_GUARDED_BY(lock);
+	string stream_id DUCKDB_GUARDED_BY(lock);
+	//! Dead-range markers that arrived before the stream-creating data message, tagged with the stream
+	//! they belong to; applied once that stream is created.
+	string pending_marker_stream_id DUCKDB_GUARDED_BY(lock);
+	vector<std::pair<idx_t, idx_t>> pending_dead_ranges DUCKDB_GUARDED_BY(lock);
+
+	//! Take the active stream/thread/id off (briefly under the lock) for an unlocked finish/abort.
+	DetachedInsertStream Detach();
+	//! Detach only if the active stream is unrelated to `msg_stream_id` (else return an empty detach).
+	DetachedInsertStream DetachIfUnrelated(const string &msg_stream_id);
+	//! Detach + drain (`watermark`) + finish + join; returns any INSERT error. Empty if none active.
+	ErrorData Finalize(optional_idx watermark = optional_idx());
+	//! Active stream if it matches `sid` (caller pushes the range), else buffer the range and return null.
+	shared_ptr<QuackDataStream> StreamForDeadRangeOrBuffer(const string &sid, idx_t lo, idx_t hi);
+};
 
 struct QuackConnection {
 	explicit QuackConnection(string session_id_p);
@@ -37,14 +73,22 @@ struct QuackConnection {
 	//! Current query UUID
 	hugeint_t query_uuid;
 	string session_id;
+
+	//! Stable per-client reconnect key: HMAC-SHA256(server_hmac_key, client_id). Intentionally excludes
+	//! session_id so it stays identical across (re)connections for the same client_id. Empty if no client_id.
+	string client_id_hash;
 	string sql_query;
 	QuackQueryState query_state = QuackQueryState::IDLE;
 	timestamp_t query_started_at {0};
+
+	//! The INSERT this connection is currently driving via a client SEND_DATA stream (one at a time).
+	QuackInsertState insert;
 };
 
 struct QuackConnectionSnapshot {
 	string server_id;
 	string session_id;
+	string client_id_hash;
 	string sql_query;
 	QuackQueryState query_state = QuackQueryState::IDLE;
 	timestamp_t query_started_at {0};
@@ -53,9 +97,6 @@ struct QuackConnectionSnapshot {
 enum class QuackServerState { UNINITIALIZED, WAITING_TO_START, RUNNING, CLOSED };
 
 class QuackServer {
-public:
-	static constexpr const idx_t QUACK_VERSION = 1;
-
 public:
 	explicit QuackServer(ClientContext &context_p, const QuackUri &uri_p, const string &token_p);
 	virtual ~QuackServer();
@@ -72,7 +113,7 @@ public:
 	virtual void Close() {};
 
 	shared_ptr<QuackConnection> GetConnection(const string &connection_id);
-	string CreateNewConnection(const string &session_id);
+	string CreateNewConnection(const string &session_id, const string &client_id_hash = {});
 	bool DisconnectConnection(const string &session_id);
 	// TODO need something to destroy connections
 
@@ -118,6 +159,8 @@ protected:
 
 private:
 	string token;
+	//! Per-server random key that seeds the HMAC for client_id_hash.
+	string server_hmac_key;
 };
 
 class HttpQuackServer : public QuackServer {
