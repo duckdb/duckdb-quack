@@ -59,6 +59,9 @@ MessageType EnumUtil::FromString<MessageType>(const char *value) {
 	if (StringUtil::Equals(value, "FINALIZE")) {
 		return MessageType::FINALIZE;
 	}
+	if (StringUtil::Equals(value, "ACKNOWLEDGEMENT")) {
+		return MessageType::ACKNOWLEDGEMENT;
+	}
 	if (StringUtil::Equals(value, "ERROR_RESPONSE")) {
 		return MessageType::ERROR_RESPONSE;
 	}
@@ -93,6 +96,8 @@ const char *EnumUtil::ToChars<MessageType>(MessageType value) {
 		return "CANCEL_REQUEST";
 	case MessageType::FINALIZE:
 		return "FINALIZE";
+	case MessageType::ACKNOWLEDGEMENT:
+		return "ACKNOWLEDGEMENT";
 	case MessageType::ERROR_RESPONSE:
 		return "ERROR_RESPONSE";
 
@@ -145,6 +150,8 @@ unique_ptr<QuackMessage> QuackMessage::Deserialize(Deserializer &deserializer, M
 		return CancelRequestMessage::Deserialize(deserializer);
 	case MessageType::FINALIZE:
 		return FinalizeMessage::Deserialize(deserializer);
+	case MessageType::ACKNOWLEDGEMENT:
+		return AcknowledgementMessage::Deserialize(deserializer);
 	case MessageType::ERROR_RESPONSE:
 		return ErrorResponse::Deserialize(deserializer);
 	default:

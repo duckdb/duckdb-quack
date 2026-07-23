@@ -197,4 +197,13 @@ unique_ptr<SuccessResponse> SuccessResponse::Deserialize(Deserializer &deseriali
 	return result;
 }
 
+
+void AcknowledgementMessage::Serialize(Serializer &serializer) const {
+}
+
+unique_ptr<AcknowledgementMessage> AcknowledgementMessage::Deserialize(Deserializer &deserializer) {
+	auto result = duckdb::unique_ptr<AcknowledgementMessage>(new AcknowledgementMessage());
+	return result;
+}
+
 } // namespace duckdb

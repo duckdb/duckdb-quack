@@ -159,6 +159,7 @@ struct QuackScanGlobalState : GlobalTableFunctionState {
 	idx_t max_threads;
 	vector<ColumnIndex> column_ids;
 	vector<idx_t> projection_ids;
+	atomic<bool> ack_sent {false};
 	hugeint_t query_uuid;
 	//! FETCH read-ahead pipeline; set when the PREPARE response signals more batches to fetch.
 	shared_ptr<QuackFetcher> fetcher;
@@ -298,6 +299,35 @@ unique_ptr<LocalTableFunctionState> QuackScanInitLocal(ExecutionContext &context
 	return local_state;
 }
 
+static bool ReconnectsEnabled(ClientContext &context) {
+	Value val;
+	if (!context.TryGetCurrentSetting("quack_enable_reconnects", val)) {
+		return false;
+	}
+	return val.GetValue<bool>();
+}
+
+static void SendAcknowledgement(ClientContext &context, QuackScanGlobalState &global_state,
+                                QuackScanBindData &bind_data) {
+	if (!ReconnectsEnabled(context)) {
+		return;
+	}
+	if (global_state.ack_sent.exchange(true)) {
+		return;
+	}
+	try {
+		auto client_wrapper = bind_data.client_connection->GetClient(context);
+		auto &client = client_wrapper->GetClient();
+		client.Request<SuccessResponse>(context,
+		                                make_uniq<AcknowledgementMessage>(bind_data.client_connection->ConnectionId()));
+	} catch (const std::exception &e) {
+		// The query is already complete, so we swallow the failure rather than fail the query
+		DUCKDB_LOG_WARNING(
+		    context, StringUtil::Format("Quack: acknowledgement failed and was ignored (query already completed): %s",
+		                                e.what()));
+	}
+}
+
 static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
 	auto &bind_data = input.bind_data->CastNoConst<QuackScanBindData>();
 	auto &global_state = input.global_state->Cast<QuackScanGlobalState>();
@@ -351,6 +381,9 @@ static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChu
 				// server is done, this thread is done
 				local_state.fetch_exhausted = true;
 				bind_data.completed = true;
+				// FINISHED is only observable once the fetcher drained every in-flight FETCH,
+				// so the acknowledgement is guaranteed to be the query's last message
+				SendAcknowledgement(context, global_state, bind_data);
 				return;
 			case QuackFetchResult::BLOCKED:
 				return;
@@ -358,6 +391,7 @@ static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChu
 		}
 		// we did not have anything cached and then request to the server did not yield anything - we are done
 		bind_data.completed = true;
+		SendAcknowledgement(context, global_state, bind_data);
 		break;
 	}
 }

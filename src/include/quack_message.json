@@ -257,5 +257,9 @@
         "type": "idx_t"
       }
     ]
+  },
+  {
+    "class": "AcknowledgementMessage",
+    "members": []
   }
 ]

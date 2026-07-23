@@ -211,6 +211,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "$QUACK_CLIENT_ID (empty opts out) or a random per-instance id. Set to '' to opt out.",
 	                          LogicalType::VARCHAR, Value(default_client_id), nullptr, SetScope::GLOBAL);
 
+	config.AddExtensionOption("quack_enable_reconnects",
+	                          "Send an acknowledgement to the server after a query completes", LogicalType::BOOLEAN,
+	                          Value::BOOLEAN(false));
+
 	// Process-wide fallback anchor for whoami().uptime when whoami_started_at isn't set.
 	// Stored as BIGINT epoch-microseconds to stay TZ-invariant regardless of ICU state.
 	config.AddExtensionOption("quack_loaded_at_us", "Epoch microseconds at extension load", LogicalType::BIGINT,

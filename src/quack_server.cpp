@@ -296,6 +296,7 @@ bool ServerSupportsMessage(MessageType type) {
 	case MessageType::DISCONNECT_MESSAGE:
 	case MessageType::CANCEL_REQUEST:
 	case MessageType::FINALIZE:
+	case MessageType::ACKNOWLEDGEMENT:
 		return true;
 	default:
 		return false;
@@ -659,6 +660,9 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		connection.duckdb_connection->Interrupt();
 		connection.query_state = QuackQueryState::CANCELLED;
 		connection.duckdb_query_result.reset();
+		return make_uniq<SuccessResponse>();
+	}
+	case MessageType::ACKNOWLEDGEMENT: {
 		return make_uniq<SuccessResponse>();
 	}
 	default: {
