@@ -171,6 +171,30 @@ vector<QuackConnectionSnapshot> QuackServer::GetActiveConnectionSnap() {
 	return result;
 }
 
+void QuackServer::SweepExpiredCaches(DatabaseInstance &db) {
+	auto ttl_micros = ResultTtlMicros(db);
+	if (ttl_micros == 0) {
+		return;
+	}
+	vector<shared_ptr<QuackConnection>> connections;
+	{
+		std::lock_guard<std::mutex> lock(active_connections_mutex);
+		connections.reserve(active_connections.size());
+		for (auto &entry : active_connections) {
+			connections.push_back(entry.second);
+		}
+	}
+	auto now = Timestamp::GetCurrentTimestamp();
+	for (auto &connection : connections) {
+		std::unique_lock<std::mutex> lock(connection->lock, std::try_to_lock);
+		if (!lock.owns_lock()) {
+			// busy serving a request right now, by definition not idle
+			continue;
+		}
+		ExpireCacheIfStale(*connection, now, ttl_micros);
+	}
+}
+
 shared_ptr<QuackConnection> QuackServer::GetConnection(const string &connection_id) {
 	std::lock_guard<std::mutex> lock(active_connections_mutex);
 	auto it = active_connections.find(connection_id);
@@ -343,6 +367,9 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
 	if (!ServerSupportsMessage(header.type)) {
 		return make_uniq<ErrorResponse>("Unsupported message type for server");
 	}
+
+	// any inbound traffic reaps result caches whose TTL has lapsed, across all connections
+	SweepExpiredCaches(*db);
 
 	// if the message requires it, obtain a connection
 	// these are basically all messages aside from connect request

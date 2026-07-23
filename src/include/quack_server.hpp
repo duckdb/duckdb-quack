@@ -159,6 +159,8 @@ public:
 
 protected:
 	unique_ptr<QuackMessage> HandleMessage(MemoryStream &read_stream);
+	//! Drops caches idle past quack_result_ttl on every connection whose lock is free, runs on any inbound message
+	void SweepExpiredCaches(DatabaseInstance &db);
 	unique_ptr<QuackMessage> HandleMessageInternal(DatabaseInstance &db, QuackMessage &received_message,
 	                                               optional_ptr<QuackConnection> connection);
 

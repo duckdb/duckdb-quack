@@ -1,5 +1,6 @@
 #include "quack_result_cache.hpp"
 
+#include "duckdb/common/types/interval.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/query_result.hpp"
@@ -45,6 +46,27 @@ idx_t CacheMaxRows(DatabaseInstance &db) {
 	return val.GetValue<uint64_t>();
 }
 
+int64_t ResultTtlMicros(DatabaseInstance &db) {
+	Value val;
+	DBConfig::GetConfig(db).TryGetCurrentSetting("quack_result_ttl", val);
+	return NumericCast<int64_t>(val.GetValue<uint64_t>()) * Interval::MICROS_PER_SEC;
+}
+
+void ExpireCacheIfStale(QuackConnection &connection, timestamp_t now, int64_t ttl_micros) {
+	auto &cache = connection.result_cache;
+	if (!cache || ttl_micros == 0) {
+		return;
+	}
+	if (now.value - cache->last_served_at.value <= ttl_micros) {
+		return;
+	}
+	// an expired unfinished stream must fail loudly on later fetches instead of silently truncating
+	if (cache->query_uuid == connection.query_uuid && cache->tail) {
+		connection.query_state = QuackQueryState::CANCELLED;
+	}
+	connection.ClearResultCache();
+}
+
 bool HasMoreResults(QuackConnection &connection) {
 	auto &cache = connection.result_cache;
 	if (cache && cache->query_uuid == connection.query_uuid) {
@@ -58,6 +80,7 @@ vector<unique_ptr<DataChunkWrapper>> ServeBatch(QuackConnection &connection, idx
 	if (!cache || cache->query_uuid != connection.query_uuid) {
 		return CreateBatch(connection.duckdb_query_result, max_rows);
 	}
+	cache->last_served_at = Timestamp::GetCurrentTimestamp();
 	vector<unique_ptr<DataChunkWrapper>> results;
 	idx_t rows = 0;
 	while (rows < max_rows && cache->tail) {
