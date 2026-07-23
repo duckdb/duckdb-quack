@@ -16,10 +16,55 @@
 #include "quack_storage.hpp"
 
 namespace duckdb {
-QuackConnection::QuackConnection(string session_id_p) : session_id(std::move(session_id_p)) {
+struct QuackConnectionRegistry {
+	explicit QuackConnectionRegistry(std::chrono::milliseconds idle_timeout_p) : idle_timeout(idle_timeout_p) {
+	}
+
+	mutex connections_mutex;
+	unordered_map<string, shared_ptr<QuackConnection>> connections;
+
+	std::chrono::milliseconds idle_timeout;
+	mutex reaper_mutex;
+	std::condition_variable reaper_cv;
+	bool reaper_stopping = false;
+	std::thread reaper_thread;
+};
+
+int64_t QuackConnection::MonotonicMillis() noexcept {
+	return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+	    .count();
+}
+
+QuackConnection::QuackConnection(string session_id_p)
+    : session_id(std::move(session_id_p)), last_activity_ms(MonotonicMillis()) {
 }
 
 QuackConnection::~QuackConnection() {
+}
+
+void QuackConnection::BeginRequest() noexcept {
+	active_requests.fetch_add(1, std::memory_order_acq_rel);
+	last_activity_ms.store(MonotonicMillis(), std::memory_order_release);
+}
+
+void QuackConnection::EndRequest() noexcept {
+	last_activity_ms.store(MonotonicMillis(), std::memory_order_release);
+	auto previous = active_requests.fetch_sub(1, std::memory_order_acq_rel);
+	D_ASSERT(previous > 0);
+}
+
+bool QuackConnection::IsIdleBefore(int64_t cutoff_ms) const noexcept {
+	return active_requests.load(std::memory_order_acquire) == 0 &&
+	       last_activity_ms.load(std::memory_order_acquire) <= cutoff_ms;
+}
+
+QuackConnectionLease::QuackConnectionLease(shared_ptr<QuackConnection> connection_p)
+    : connection(std::move(connection_p)) {
+	connection->BeginRequest();
+}
+
+QuackConnectionLease::~QuackConnectionLease() {
+	connection->EndRequest();
 }
 
 void QuackServer::ValidateToken(const string &token) {
@@ -28,8 +73,10 @@ void QuackServer::ValidateToken(const string &token) {
 	}
 }
 
-QuackServer::QuackServer(ClientContext &context_p, const QuackUri &uri_p, const string &token_p)
-    : db_ptr(context_p.db), uri(uri_p), token(token_p) {
+QuackServer::QuackServer(ClientContext &context_p, const QuackUri &uri_p, const string &token_p,
+                         std::chrono::milliseconds connection_idle_timeout_p)
+    : db_ptr(context_p.db), uri(uri_p), token(token_p),
+      connection_registry(make_shared_ptr<QuackConnectionRegistry>(connection_idle_timeout_p)) {
 	ValidateToken(token);
 }
 
@@ -47,12 +94,13 @@ string QuackServer::TokenFromSecret(ClientContext &context, const QuackUri &uri)
 }
 
 QuackServer::~QuackServer() {
+	StopConnectionReaper();
 }
 
 vector<QuackConnectionSnapshot> QuackServer::GetActiveConnectionSnap() {
 	vector<QuackConnectionSnapshot> result;
-	std::lock_guard<std::mutex> lock(active_connections_mutex);
-	for (auto &conn_kv : active_connections) {
+	std::lock_guard<std::mutex> lock(connection_registry->connections_mutex);
+	for (auto &conn_kv : connection_registry->connections) {
 		auto &conn = conn_kv.second;
 		QuackConnectionSnapshot snapshot;
 		snapshot.session_id = conn->session_id;
@@ -64,19 +112,19 @@ vector<QuackConnectionSnapshot> QuackServer::GetActiveConnectionSnap() {
 	return result;
 }
 
-shared_ptr<QuackConnection> QuackServer::GetConnection(const string &connection_id) {
-	std::lock_guard<std::mutex> lock(active_connections_mutex);
-	auto it = active_connections.find(connection_id);
-	if (it != active_connections.end()) {
-		return it->second;
+unique_ptr<QuackConnectionLease> QuackServer::AcquireConnection(const string &connection_id) {
+	std::lock_guard<std::mutex> lock(connection_registry->connections_mutex);
+	auto it = connection_registry->connections.find(connection_id);
+	if (it != connection_registry->connections.end()) {
+		return make_uniq<QuackConnectionLease>(it->second);
 	}
 	return nullptr;
 }
 
 string QuackServer::CreateNewConnection(const string &session_id) {
-	std::lock_guard<std::mutex> lock(active_connections_mutex);
+	std::lock_guard<std::mutex> lock(connection_registry->connections_mutex);
 
-	D_ASSERT(active_connections.find(session_id) == active_connections.end());
+	D_ASSERT(connection_registry->connections.find(session_id) == connection_registry->connections.end());
 
 	auto db = db_ptr.lock();
 	if (!db) {
@@ -86,20 +134,84 @@ string QuackServer::CreateNewConnection(const string &session_id) {
 	new_connection->duckdb_connection = make_uniq<Connection>(*db);
 	new_connection->duckdb_connection->context->config.enable_progress_bar = false;
 	// new_connection->duckdb_connection->context->config.streaming_buffer_size = 10 * 1000000; // 10 MB
-	active_connections[session_id] = std::move(new_connection);
+	connection_registry->connections[session_id] = std::move(new_connection);
 	return session_id;
 }
 
 bool QuackServer::DisconnectConnection(const string &session_id) {
-	std::lock_guard<std::mutex> lock(active_connections_mutex);
-
-	auto entry = active_connections.find(session_id);
-	if (entry == active_connections.end()) {
-		// unknown client
-		return false;
+	shared_ptr<QuackConnection> removed_connection;
+	{
+		std::lock_guard<std::mutex> lock(connection_registry->connections_mutex);
+		auto entry = connection_registry->connections.find(session_id);
+		if (entry == connection_registry->connections.end()) {
+			// unknown client
+			return false;
+		}
+		removed_connection = std::move(entry->second);
+		connection_registry->connections.erase(entry);
 	}
-	active_connections.erase(entry);
 	return true;
+}
+
+idx_t QuackServer::ActiveConnectionCount() {
+	std::lock_guard<std::mutex> lock(connection_registry->connections_mutex);
+	return connection_registry->connections.size();
+}
+
+void QuackServer::StartConnectionReaper() {
+	auto registry = connection_registry;
+	if (registry->idle_timeout.count() == 0) {
+		return;
+	}
+	D_ASSERT(!registry->reaper_thread.joinable());
+	auto reaper_thread = std::thread(&QuackServer::ConnectionReaperLoop, registry);
+	registry->reaper_thread = std::move(reaper_thread);
+}
+
+void QuackServer::StopConnectionReaper() {
+	auto registry = connection_registry;
+	{
+		std::lock_guard<std::mutex> lock(registry->reaper_mutex);
+		registry->reaper_stopping = true;
+	}
+	registry->reaper_cv.notify_all();
+	if (!registry->reaper_thread.joinable()) {
+		return;
+	}
+	if (registry->reaper_thread.get_id() == std::this_thread::get_id()) {
+		// Expiring the last connection can release the DatabaseInstance that owns this server.
+		// The worker only retains the shared registry state, so it can safely finish after detaching.
+		registry->reaper_thread.detach();
+	} else {
+		registry->reaper_thread.join();
+	}
+}
+
+void QuackServer::ConnectionReaperLoop(shared_ptr<QuackConnectionRegistry> registry) {
+	auto sweep_interval =
+	    registry->idle_timeout < std::chrono::seconds(1) ? registry->idle_timeout : std::chrono::milliseconds(1000);
+	std::unique_lock<std::mutex> lock(registry->reaper_mutex);
+	while (!registry->reaper_cv.wait_for(lock, sweep_interval, [&registry] { return registry->reaper_stopping; })) {
+		lock.unlock();
+		ReapIdleConnections(*registry);
+		lock.lock();
+	}
+}
+
+void QuackServer::ReapIdleConnections(QuackConnectionRegistry &registry) {
+	vector<shared_ptr<QuackConnection>> expired_connections;
+	auto cutoff = QuackConnection::MonotonicMillis() - registry.idle_timeout.count();
+	{
+		std::lock_guard<std::mutex> lock(registry.connections_mutex);
+		for (auto entry = registry.connections.begin(); entry != registry.connections.end();) {
+			if (!entry->second->IsIdleBefore(cutoff)) {
+				entry++;
+				continue;
+			}
+			expired_connections.push_back(std::move(entry->second));
+			entry = registry.connections.erase(entry);
+		}
+	}
 }
 
 static string GetSettingString(DatabaseInstance &db, const string &setting_name) {
@@ -229,10 +341,10 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
 
 	// if the message requires it, obtain a connection
 	// these are basically all messages aside from connect request
-	shared_ptr<QuackConnection> connection;
+	unique_ptr<QuackConnectionLease> connection_lease;
 	if (MessageRequiresConnection(header.type)) {
-		connection = GetConnection(header.connection_id);
-		if (!connection) {
+		connection_lease = AcquireConnection(header.connection_id);
+		if (!connection_lease) {
 			return make_uniq<ErrorResponse>("Invalid connection id");
 		}
 	}
@@ -241,7 +353,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
 	auto received_message = QuackMessage::DeserializeMessage(deserializer, header);
 
 	// process the message
-	auto response = HandleMessageInternal(*db, *received_message, connection);
+	auto response = HandleMessageInternal(*db, *received_message, connection_lease ? connection_lease->Get() : nullptr);
 
 	if (should_log) {
 		int64_t end_time = std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now())

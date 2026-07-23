@@ -1,0 +1,120 @@
+# name: test/sql/connection_idle_timeout.test
+# description: expire abandoned server-side connections without racing active requests
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+statement ok con1
+CREATE TABLE idle_timeout_test AS SELECT 42 AS i;
+
+# The timeout is opt-in and must be positive when supplied.
+statement error con1
+CALL quack_serve('quack:localhost', token='asdf', connection_idle_timeout=INTERVAL 0 MILLISECOND);
+----
+connection_idle_timeout must be at least 1 millisecond
+
+# Without the option, existing connections do not expire.
+statement ok con1
+CALL quack_serve('quack:localhost', token='asdf');
+
+statement ok con2
+ATTACH 'quack:localhost' AS no_timeout (token 'asdf');
+
+sleep 100 millisecond
+
+query I con1
+SELECT count(*) FROM quack_active_connections();
+----
+1
+
+statement ok con2
+DETACH no_timeout;
+
+statement ok con1
+CALL quack_stop('quack:localhost');
+
+# A request that runs longer than the timeout retains its connection lease.
+statement ok con1
+CALL quack_serve('quack:localhost', token='asdf', connection_idle_timeout=INTERVAL 50 MILLISECOND);
+
+statement ok con2
+ATTACH 'quack:localhost' AS rpc (token 'asdf');
+
+query I con2
+SELECT i FROM quack_query_by_name('rpc', 'SELECT sleep_ms(150), 42 AS i');
+----
+42
+
+query I con1
+SELECT count(*) FROM quack_active_connections();
+----
+1
+
+query I con2
+SELECT * FROM rpc.main.idle_timeout_test;
+----
+42
+
+# Graceful disconnect remains immediate.
+statement ok con2
+DETACH rpc;
+
+query I con1
+SELECT count(*) FROM quack_active_connections();
+----
+0
+
+statement ok con1
+CALL quack_stop('quack:localhost');
+
+# A client that stops sending requests without disconnecting is expired.
+statement ok con1
+CALL quack_serve('quack:localhost', token='asdf', connection_idle_timeout=INTERVAL 50 MILLISECOND);
+
+statement ok con3
+ATTACH 'quack:localhost' AS abandoned (token 'asdf');
+
+statement ok con3
+BEGIN;
+
+statement ok con3
+CREATE TABLE abandoned.main.expired_transaction(i INTEGER);
+
+statement ok con3
+INSERT INTO abandoned.main.expired_transaction VALUES (42);
+
+query I con1
+SELECT count(*) FROM quack_active_connections();
+----
+1
+
+sleep 200 millisecond
+
+query I con1
+SELECT count(*) FROM quack_active_connections();
+----
+0
+
+statement error con3
+SELECT * FROM abandoned.main.idle_timeout_test;
+----
+Invalid connection id
+
+# Destroying the expired DuckDB connection rolls back its open transaction.
+query I con1
+SELECT n
+FROM quack_query(
+    'quack:localhost',
+    'SELECT count(*) AS n FROM duckdb_tables() WHERE table_name = ''expired_transaction''',
+    token='asdf'
+);
+----
+0
+
+# Stopping a server with an active expiry worker must not hang.
+statement ok con1
+CALL quack_stop('quack:localhost');

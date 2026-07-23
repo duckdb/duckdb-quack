@@ -1,5 +1,8 @@
 #pragma once
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <thread>
 
 #include "duckdb/common/optional_ptr.hpp"
@@ -19,6 +22,7 @@ class QueryResult;
 class DatabaseInstance;
 class PreparedStatement;
 class EncryptionState;
+struct QuackConnectionRegistry;
 
 enum class QuackQueryState : uint8_t { IDLE, ACTIVE, FINISHED, CANCELLED };
 
@@ -37,6 +41,36 @@ struct QuackConnection {
 	string sql_query;
 	QuackQueryState query_state = QuackQueryState::IDLE;
 	timestamp_t query_started_at {0};
+
+private:
+	friend class QuackServer;
+	friend class QuackConnectionLease;
+
+	static int64_t MonotonicMillis() noexcept;
+	void BeginRequest() noexcept;
+	void EndRequest() noexcept;
+	bool IsIdleBefore(int64_t cutoff_ms) const noexcept;
+
+	//! Request activity is updated through QuackConnectionLease. Acquisition happens
+	//! while the connection registry is locked, preventing expiry from racing with lookup.
+	std::atomic<idx_t> active_requests {0};
+	std::atomic<int64_t> last_activity_ms;
+};
+
+class QuackConnectionLease {
+public:
+	explicit QuackConnectionLease(shared_ptr<QuackConnection> connection_p);
+	~QuackConnectionLease();
+
+	QuackConnectionLease(const QuackConnectionLease &) = delete;
+	QuackConnectionLease &operator=(const QuackConnectionLease &) = delete;
+
+	optional_ptr<QuackConnection> Get() {
+		return connection.get();
+	}
+
+private:
+	shared_ptr<QuackConnection> connection;
 };
 
 struct QuackConnectionSnapshot {
@@ -52,7 +86,8 @@ public:
 	static constexpr const idx_t QUACK_VERSION = 1;
 
 public:
-	explicit QuackServer(ClientContext &context_p, const QuackUri &uri_p, const string &token_p);
+	explicit QuackServer(ClientContext &context_p, const QuackUri &uri_p, const string &token_p,
+	                     std::chrono::milliseconds connection_idle_timeout_p);
 	virtual ~QuackServer();
 
 	//! Stop accepting new connections (close the listener socket) without
@@ -66,10 +101,9 @@ public:
 	//! listen-loop teardown joins all workers, which would deadlock.
 	virtual void Close() {};
 
-	shared_ptr<QuackConnection> GetConnection(const string &connection_id);
+	unique_ptr<QuackConnectionLease> AcquireConnection(const string &connection_id);
 	string CreateNewConnection(const string &session_id);
 	bool DisconnectConnection(const string &session_id);
-	// TODO need something to destroy connections
 
 	string GenerateSessionId();
 
@@ -94,12 +128,11 @@ public:
 		return uri;
 	}
 
-	idx_t ActiveConnectionCount() {
-		std::lock_guard<std::mutex> lock(active_connections_mutex);
-		return active_connections.size();
-	}
+	idx_t ActiveConnectionCount();
 
 protected:
+	void StartConnectionReaper();
+
 	unique_ptr<QuackMessage> HandleMessage(MemoryStream &read_stream);
 	unique_ptr<QuackMessage> HandleMessageInternal(DatabaseInstance &db, QuackMessage &received_message,
 	                                               optional_ptr<QuackConnection> connection);
@@ -108,20 +141,24 @@ protected:
 	std::vector<std::thread> listen_threads;
 
 	weak_ptr<DatabaseInstance> db_ptr;
-	mutex active_connections_mutex;
-	unordered_map<string, shared_ptr<QuackConnection>> active_connections;
 
 	mutex session_id_rng_mutex;
 	shared_ptr<EncryptionState> session_id_rng;
 
 private:
+	static void ConnectionReaperLoop(shared_ptr<QuackConnectionRegistry> registry);
+	static void ReapIdleConnections(QuackConnectionRegistry &registry);
+	void StopConnectionReaper();
+
 	QuackUri uri;
 	string token;
+	shared_ptr<QuackConnectionRegistry> connection_registry;
 };
 
 class HttpQuackServer : public QuackServer {
 public:
-	HttpQuackServer(ClientContext &context_p, const QuackUri &uri_p, const string &token_p);
+	HttpQuackServer(ClientContext &context_p, const QuackUri &uri_p, const string &token_p,
+	                std::chrono::milliseconds connection_idle_timeout_p);
 
 	void StopAccepting() override;
 	void Close() override;
