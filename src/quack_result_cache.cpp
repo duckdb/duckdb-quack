@@ -49,7 +49,13 @@ idx_t CacheMaxRows(DatabaseInstance &db) {
 int64_t ResultTtlMicros(DatabaseInstance &db) {
 	Value val;
 	DBConfig::GetConfig(db).TryGetCurrentSetting("quack_result_ttl", val);
-	return NumericCast<int64_t>(val.GetValue<uint64_t>()) * Interval::MICROS_PER_SEC;
+	auto ttl_seconds = val.GetValue<uint64_t>();
+	// Saturate a huge TTL to never expire so the per message sweep cannot throw or wrap the micros multiply negative
+	auto max_ttl_seconds = static_cast<uint64_t>(NumericLimits<int64_t>::Maximum()) / Interval::MICROS_PER_SEC;
+	if (ttl_seconds > max_ttl_seconds) {
+		return NumericLimits<int64_t>::Maximum();
+	}
+	return NumericCast<int64_t>(ttl_seconds) * Interval::MICROS_PER_SEC;
 }
 
 void ExpireCacheIfStale(QuackConnection &connection, timestamp_t now, int64_t ttl_micros) {
