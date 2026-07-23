@@ -1,4 +1,5 @@
 #include "duckdb/main/database.hpp"
+#include "duckdb/common/types/interval.hpp"
 
 #include "quack_startstop.hpp"
 #include "quack_storage.hpp"
@@ -12,6 +13,7 @@ struct QuackStartStopFunctionData : public TableFunctionData {
 	bool finished = false;
 	QuackUri listen_uri;
 	string token;
+	std::chrono::milliseconds connection_idle_timeout {0};
 };
 
 static unique_ptr<FunctionData> QuackServeBind(ClientContext &context, TableFunctionBindInput &input,
@@ -68,6 +70,18 @@ static unique_ptr<FunctionData> QuackServeBind(ClientContext &context, TableFunc
 	// thread is spawned, instead of leaving a half-built server behind.
 	QuackServer::ValidateToken(bind_data->token);
 
+	if (input.named_parameters.find("connection_idle_timeout") != input.named_parameters.end()) {
+		auto timeout = input.named_parameters["connection_idle_timeout"];
+		if (timeout.IsNull()) {
+			throw InvalidInputException("connection_idle_timeout cannot be NULL");
+		}
+		auto timeout_ms = Interval::GetMilli(timeout.GetValue<interval_t>());
+		if (timeout_ms <= 0) {
+			throw InvalidInputException("connection_idle_timeout must be at least 1 millisecond");
+		}
+		bind_data->connection_idle_timeout = std::chrono::milliseconds(timeout_ms);
+	}
+
 	return std::move(bind_data);
 }
 
@@ -77,7 +91,8 @@ static void QuackServe(ClientContext &context, TableFunctionInput &data_p, DataC
 		return;
 	}
 
-	QuackStorageExtensionInfo::GetState(*context.db).CreateServer(context, bind_data.listen_uri, bind_data.token);
+	QuackStorageExtensionInfo::GetState(*context.db)
+	    .CreateServer(context, bind_data.listen_uri, bind_data.token, bind_data.connection_idle_timeout);
 	output.SetValue(0, 0, bind_data.listen_uri.Uri());
 	output.SetValue(1, 0, bind_data.listen_uri.Http());
 	output.SetValue(2, 0, bind_data.token);
@@ -92,6 +107,7 @@ TableFunctionSet QuackServeFunction::GetFunction() {
 	fun.named_parameters["disable_ssl"] = LogicalType::BOOLEAN;
 	fun.named_parameters["allow_other_hostname"] = LogicalType::BOOLEAN;
 	fun.named_parameters["token"] = LogicalType::VARCHAR;
+	fun.named_parameters["connection_idle_timeout"] = LogicalType::INTERVAL;
 	set.AddFunction(fun);
 	fun.arguments.clear();
 	set.AddFunction(fun);
