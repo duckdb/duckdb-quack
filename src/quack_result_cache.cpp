@@ -39,6 +39,12 @@ bool ServerCachingEnabled(DatabaseInstance &db) {
 	return !val.IsNull() && val.GetValue<bool>();
 }
 
+idx_t CacheMaxRows(DatabaseInstance &db) {
+	Value val;
+	DBConfig::GetConfig(db).TryGetCurrentSetting("quack_cache_max_rows", val);
+	return val.GetValue<uint64_t>();
+}
+
 bool HasMoreResults(QuackConnection &connection) {
 	auto &cache = connection.result_cache;
 	if (cache && cache->query_uuid == connection.query_uuid) {
@@ -47,7 +53,7 @@ bool HasMoreResults(QuackConnection &connection) {
 	return connection.duckdb_query_result != nullptr;
 }
 
-vector<unique_ptr<DataChunkWrapper>> ServeBatch(QuackConnection &connection, idx_t max_rows) {
+vector<unique_ptr<DataChunkWrapper>> ServeBatch(QuackConnection &connection, idx_t max_rows, idx_t max_cache_rows) {
 	auto cache = connection.result_cache.get();
 	if (!cache || cache->query_uuid != connection.query_uuid) {
 		return CreateBatch(connection.duckdb_query_result, max_rows);
@@ -68,6 +74,11 @@ vector<unique_ptr<DataChunkWrapper>> ServeBatch(QuackConnection &connection, idx
 		rows += result_chunk->size();
 		cache->retained.Append(cache->append_state, *result_chunk);
 		results.push_back(make_uniq<DataChunkWrapper>(*result_chunk));
+	}
+	if (max_cache_rows != 0 && cache->retained.Count() > max_cache_rows) {
+		// Too large to replay, hand the tail back to plain streaming and drop the cache
+		connection.duckdb_query_result = std::move(cache->tail);
+		connection.ClearResultCache();
 	}
 	return results;
 }

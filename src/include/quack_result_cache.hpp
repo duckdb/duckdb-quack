@@ -33,10 +33,13 @@ struct QuackResultCache {
 //! Server-side half of quack_enable_reconnects: cache the result stream of each client query.
 bool ServerCachingEnabled(DatabaseInstance &db);
 
+//! Rows the server may retain per connection cache before it degrades to plain streaming (0 = unlimited)
+idx_t CacheMaxRows(DatabaseInstance &db);
+
 //! True while the connection's active query still has unserved chunks (cached or live).
 bool HasMoreResults(QuackConnection &connection);
 
 //! Serve up to max_rows of the active query. Producer errors land in duckdb_query_result like the uncached path
-vector<unique_ptr<DataChunkWrapper>> ServeBatch(QuackConnection &connection, idx_t max_rows);
+vector<unique_ptr<DataChunkWrapper>> ServeBatch(QuackConnection &connection, idx_t max_rows, idx_t max_cache_rows);
 
 } // namespace duckdb

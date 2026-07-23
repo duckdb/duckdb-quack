@@ -482,7 +482,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		DBConfig::GetConfig(db).TryGetCurrentSetting("quack_fetch_batch_rows", max_rows_val);
 		auto max_rows_per_batch = max_rows_val.GetValue<uint64_t>();
 
-		auto results = ServeBatch(connection, max_rows_per_batch);
+		auto results = ServeBatch(connection, max_rows_per_batch, CacheMaxRows(db));
 		if (connection.duckdb_query_result && connection.duckdb_query_result->HasError()) {
 			D_ASSERT(results.empty());
 
@@ -521,7 +521,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		DBConfig::GetConfig(db).TryGetCurrentSetting("quack_fetch_batch_rows", max_rows_val);
 		auto max_rows_per_batch = max_rows_val.GetValue<uint64_t>();
 
-		auto results = ServeBatch(connection, max_rows_per_batch);
+		auto results = ServeBatch(connection, max_rows_per_batch, CacheMaxRows(db));
 		if (connection.duckdb_query_result && connection.duckdb_query_result->HasError()) { // TODO this is duplicated
 			D_ASSERT(results.empty());
 			auto error_message = connection.duckdb_query_result->GetErrorObject();
