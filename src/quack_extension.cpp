@@ -212,8 +212,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          LogicalType::VARCHAR, Value(default_client_id), nullptr, SetScope::GLOBAL);
 
 	config.AddExtensionOption("quack_enable_reconnects",
-	                          "Send an acknowledgement to the server after a query completes", LogicalType::BOOLEAN,
-	                          Value::BOOLEAN(false));
+	                          "Reconnect support. Client: send an acknowledgement to the server after fully receiving "
+	                          "a query result. Server (GLOBAL): cache each connection's last result until it is "
+	                          "acknowledged, so a reconnecting client can replay it",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(false));
 
 	// Process-wide fallback anchor for whoami().uptime when whoami_started_at isn't set.
 	// Stored as BIGINT epoch-microseconds to stay TZ-invariant regardless of ICU state.

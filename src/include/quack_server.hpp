@@ -9,6 +9,7 @@
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/unordered_map.hpp"
 
+#include "quack_result_cache.hpp"
 #include "quack_uri.hpp"
 
 #include "httplib.hpp" // TODO forward declare
@@ -68,11 +69,25 @@ struct QuackConnection {
 	mutex lock;
 	unique_ptr<Connection> duckdb_connection;
 	unique_ptr<QueryResult> duckdb_query_result;
+	//! Replay cache of the last client query's result stream, null unless quack_enable_reconnects.
+	unique_ptr<QuackResultCache> result_cache;
+	//! Rows held by result_cache
+	atomic<idx_t> cached_rows {DConstants::INVALID_INDEX};
 	//! Monotonic counter assigned per FETCH batch — enables order-preserving parallel scans on
 	idx_t next_batch_index = 1;
 	//! Current query UUID
 	hugeint_t query_uuid;
 	string session_id;
+
+	void SyncCachedRows() {
+		cached_rows = result_cache ? result_cache->retained.Count() : DConstants::INVALID_INDEX;
+	}
+
+	//! The only way to drop the cache, keeps the lock-free cached_rows mirror in sync with the drop
+	void ClearResultCache() {
+		result_cache.reset();
+		SyncCachedRows();
+	}
 
 	//! Stable per-client reconnect key: HMAC-SHA256(server_hmac_key, client_id). Intentionally excludes
 	//! session_id so it stays identical across (re)connections for the same client_id. Empty if no client_id.
@@ -92,6 +107,8 @@ struct QuackConnectionSnapshot {
 	string sql_query;
 	QuackQueryState query_state = QuackQueryState::IDLE;
 	timestamp_t query_started_at {0};
+	//! Rows in the connection's result cache
+	optional_idx cached_rows;
 };
 
 enum class QuackServerState { UNINITIALIZED, WAITING_TO_START, RUNNING, CLOSED };

@@ -6,12 +6,14 @@
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
+#include "duckdb/storage/buffer_manager.hpp"
 #include "duckdb/storage/temporary_file_manager.hpp"
 #include "duckdb/common/serializer/binary_deserializer.hpp"
 
 #include "quack_server.hpp"
 #include "quack_message.hpp"
 #include "quack_log.hpp"
+#include "quack_result_cache.hpp"
 #include "quack_storage.hpp"
 #include "quack_data_stream.hpp"
 
@@ -160,6 +162,10 @@ vector<QuackConnectionSnapshot> QuackServer::GetActiveConnectionSnap() {
 		snapshot.sql_query = conn->sql_query;
 		snapshot.query_state = conn->query_state;
 		snapshot.query_started_at = conn->query_started_at;
+		auto cached_rows = conn->cached_rows.load();
+		if (cached_rows != DConstants::INVALID_INDEX) {
+			snapshot.cached_rows = cached_rows;
+		}
 		result.push_back(std::move(snapshot));
 	}
 	return result;
@@ -370,31 +376,6 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
 	return response;
 }
 
-// Accumulate whole chunks until `max_rows` is reached (row-based like the send path, so sparse
-// filtered chunks don't shrink the batch). Resets query_result once the cursor is exhausted.
-static vector<unique_ptr<DataChunkWrapper>> CreateBatch(Allocator &allocator, unique_ptr<QueryResult> &query_result,
-                                                        idx_t max_rows) {
-	vector<unique_ptr<DataChunkWrapper>> results;
-
-	idx_t rows = 0;
-	while (rows < max_rows) {
-		auto result_chunk = query_result->Fetch();
-		// error case
-		if (!result_chunk && query_result->HasError()) {
-			results.clear();
-			return results;
-		}
-		// we are done case
-		if (!result_chunk || result_chunk->size() == 0) {
-			query_result.reset();
-			break;
-		}
-		rows += result_chunk->size();
-		results.push_back(make_uniq<DataChunkWrapper>(*result_chunk));
-	}
-	return results;
-}
-
 unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db, QuackMessage &received_message,
                                                             optional_ptr<QuackConnection> connection_p) {
 	if (connection_p) {
@@ -451,10 +432,18 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 
 		std::unique_lock<std::mutex> lock(connection.lock);
 		connection.duckdb_query_result.reset();
+		// A client query displaces the old cache even if caching is now off. Internal queries (uuid 0) leave it alone
+		bool client_query = prepare_request_message.QueryUUID() != hugeint_t {0, 0};
+		if (client_query) {
+			connection.ClearResultCache();
+		}
+		bool cache_result = client_query && ServerCachingEnabled(db);
 		connection.sql_query = prepare_request_message.Query();
 		connection.query_state = QuackQueryState::ACTIVE;
 		connection.query_started_at = Timestamp::GetCurrentTimestamp();
 
+		vector<string> names;
+		vector<LogicalType> types;
 		{
 			auto query_result = connection.duckdb_connection->SendQuery(effective_sql);
 			if (query_result->HasError()) {
@@ -472,7 +461,17 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 				return make_uniq<ErrorResponse>("Query did not return any columns");
 			}
 
-			connection.duckdb_query_result = std::move(query_result);
+			names = query_result->names;
+			types = query_result->types;
+			if (cache_result) {
+				auto cache =
+				    make_uniq<QuackResultCache>(BufferManager::GetBufferManager(db), prepare_request_message.Query(),
+				                                prepare_request_message.QueryUUID(), types);
+				cache->tail = std::move(query_result);
+				connection.result_cache = std::move(cache);
+			} else {
+				connection.duckdb_query_result = std::move(query_result);
+			}
 		}
 		// Fresh query → restart batch numbering. Clients' local state is re-initialized on
 		// a new PREPARE, so indices start at 0 again.
@@ -483,10 +482,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		DBConfig::GetConfig(db).TryGetCurrentSetting("quack_fetch_batch_rows", max_rows_val);
 		auto max_rows_per_batch = max_rows_val.GetValue<uint64_t>();
 
-		auto names = connection.duckdb_query_result->names;
-		auto types = connection.duckdb_query_result->types;
-
-		auto results = CreateBatch(Allocator::Get(db), connection.duckdb_query_result, max_rows_per_batch);
+		auto results = ServeBatch(connection, max_rows_per_batch);
 		if (connection.duckdb_query_result && connection.duckdb_query_result->HasError()) {
 			D_ASSERT(results.empty());
 
@@ -494,11 +490,11 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			connection.duckdb_query_result.reset();
 			return make_uniq<ErrorResponse>(std::move(error_message));
 		}
-		// CreateBatch resets the cursor on exhaustion; a live cursor means more batches remain.
-		auto needs_more_fetch = connection.duckdb_query_result != nullptr;
+		auto needs_more_fetch = HasMoreResults(connection);
 		if (!needs_more_fetch && connection.query_state == QuackQueryState::ACTIVE) {
 			connection.query_state = QuackQueryState::FINISHED;
 		}
+		connection.SyncCachedRows();
 		return make_uniq<PrepareResponseMessage>(types, names, std::move(results), needs_more_fetch,
 		                                         connection.query_uuid);
 	}
@@ -514,10 +510,10 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		if (connection.query_state == QuackQueryState::CANCELLED) {
 			return make_uniq<ErrorResponse>("Query was interrupted");
 		}
-		if (!connection.duckdb_query_result) {
+		if (!HasMoreResults(connection)) {
 			return make_uniq<FetchResponseMessage>();
 		}
-		if (connection.duckdb_query_result->HasError()) {
+		if (connection.duckdb_query_result && connection.duckdb_query_result->HasError()) {
 			return make_uniq<ErrorResponse>(connection.duckdb_query_result->GetErrorObject());
 		}
 
@@ -525,7 +521,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		DBConfig::GetConfig(db).TryGetCurrentSetting("quack_fetch_batch_rows", max_rows_val);
 		auto max_rows_per_batch = max_rows_val.GetValue<uint64_t>();
 
-		auto results = CreateBatch(Allocator::Get(db), connection.duckdb_query_result, max_rows_per_batch);
+		auto results = ServeBatch(connection, max_rows_per_batch);
 		if (connection.duckdb_query_result && connection.duckdb_query_result->HasError()) { // TODO this is duplicated
 			D_ASSERT(results.empty());
 			auto error_message = connection.duckdb_query_result->GetErrorObject();
@@ -533,9 +529,10 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			return make_uniq<ErrorResponse>(std::move(error_message));
 		}
 		auto assigned_batch_index = connection.next_batch_index++;
-		if (!connection.duckdb_query_result && connection.query_state == QuackQueryState::ACTIVE) {
+		if (!HasMoreResults(connection) && connection.query_state == QuackQueryState::ACTIVE) {
 			connection.query_state = QuackQueryState::FINISHED;
 		}
+		connection.SyncCachedRows();
 		return make_uniq<FetchResponseMessage>(std::move(results), optional_idx(assigned_batch_index));
 	}
 
@@ -657,12 +654,19 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			return make_uniq<ErrorResponse>("Attempted to cancel a different query with id '%s' instead of '%s'",
 			                                cancel_request_message.query_uuid, connection.query_uuid);
 		}
+		// Interrupt without the lock so the running query aborts, then clean up under the lock to not race ServeBatch
 		connection.duckdb_connection->Interrupt();
+		std::unique_lock<std::mutex> lock(connection.lock);
 		connection.query_state = QuackQueryState::CANCELLED;
 		connection.duckdb_query_result.reset();
+		connection.ClearResultCache();
 		return make_uniq<SuccessResponse>();
 	}
 	case MessageType::ACKNOWLEDGEMENT: {
+		auto &connection = *connection_p;
+		std::unique_lock<std::mutex> lock(connection.lock);
+		// The client confirmed it received the full result, the replay cache has served its purpose
+		connection.ClearResultCache();
 		return make_uniq<SuccessResponse>();
 	}
 	default: {
