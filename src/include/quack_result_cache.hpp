@@ -1,5 +1,7 @@
 #pragma once
 
+#include "duckdb/common/atomic.hpp"
+#include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/types/column/column_data_collection.hpp"
 #include "duckdb/common/types/column/column_data_scan_states.hpp"
@@ -15,11 +17,21 @@ struct QuackConnection;
 
 //! Replayable server-side copy of the result stream of a connection's last client query
 struct QuackResultCache {
-	QuackResultCache(BufferManager &buffer_manager, string sql_p, hugeint_t query_uuid_p, vector<LogicalType> types)
+	QuackResultCache(BufferManager &buffer_manager, string sql_p, hugeint_t query_uuid_p, vector<LogicalType> types,
+	                 shared_ptr<atomic<idx_t>> live_caches_p)
 	    : sql(std::move(sql_p)), query_uuid(query_uuid_p), retained(buffer_manager, std::move(types)),
-	      last_served_at(Timestamp::GetCurrentTimestamp()) {
+	      last_served_at(Timestamp::GetCurrentTimestamp()), live_caches(std::move(live_caches_p)) {
+		D_ASSERT(live_caches);
 		retained.InitializeAppend(append_state);
+		(*live_caches)++;
 	}
+	~QuackResultCache() {
+		(*live_caches)--;
+	}
+
+	// the live-cache count is maintained by this object's lifetime, so it must not be copied or moved
+	QuackResultCache(const QuackResultCache &) = delete;
+	QuackResultCache &operator=(const QuackResultCache &) = delete;
 
 	//! The query text exactly as the client sent it.
 	string sql;
@@ -32,6 +44,8 @@ struct QuackResultCache {
 	unique_ptr<QueryResult> tail;
 	//! Last time this cache served a batch, anchors the quack_result_ttl expiry clock
 	timestamp_t last_served_at {0};
+	//! Caches live on the owning server, counted so the TTL sweep can skip a server with nothing cached
+	shared_ptr<atomic<idx_t>> live_caches;
 };
 
 //! Cache the result stream of each client query.

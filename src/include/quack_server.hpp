@@ -71,6 +71,8 @@ struct QuackConnection {
 	unique_ptr<QueryResult> duckdb_query_result;
 	//! Replay cache of the last client query's result stream, null unless quack_enable_reconnects.
 	unique_ptr<QuackResultCache> result_cache;
+	//! The owning server's live-cache counter, handed to every cache this connection creates.
+	shared_ptr<atomic<idx_t>> live_caches;
 	//! Rows held by result_cache
 	atomic<idx_t> cached_rows {DConstants::INVALID_INDEX};
 	//! Monotonic counter assigned per FETCH batch — enables order-preserving parallel scans on
@@ -170,6 +172,7 @@ protected:
 	weak_ptr<DatabaseInstance> db_ptr;
 	mutex active_connections_mutex;
 	unordered_map<string, shared_ptr<QuackConnection>> active_connections;
+	shared_ptr<atomic<idx_t>> live_caches = make_shared_ptr<atomic<idx_t>>(0);
 
 	mutex session_id_rng_mutex;
 	shared_ptr<EncryptionState> session_id_rng;

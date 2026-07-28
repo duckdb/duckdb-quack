@@ -172,6 +172,10 @@ vector<QuackConnectionSnapshot> QuackServer::GetActiveConnectionSnap() {
 }
 
 void QuackServer::SweepExpiredCaches(DatabaseInstance &db) {
+	// nothing cached anywhere, we skip the settings lookup and the walk over every connection
+	if (live_caches->load(std::memory_order_relaxed) == 0) {
+		return;
+	}
 	auto ttl_micros = ResultTtlMicros(db);
 	if (ttl_micros == 0) {
 		return;
@@ -215,6 +219,7 @@ string QuackServer::CreateNewConnection(const string &session_id, const string &
 	}
 	auto new_connection = make_shared_ptr<QuackConnection>(session_id);
 	new_connection->client_id_hash = client_id_hash;
+	new_connection->live_caches = live_caches;
 	new_connection->duckdb_connection = make_uniq<Connection>(*db);
 	new_connection->duckdb_connection->context->config.enable_progress_bar = false;
 	// new_connection->duckdb_connection->context->config.streaming_buffer_size = 10 * 1000000; // 10 MB
@@ -493,7 +498,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			if (cache_result) {
 				auto cache =
 				    make_uniq<QuackResultCache>(BufferManager::GetBufferManager(db), prepare_request_message.Query(),
-				                                prepare_request_message.QueryUUID(), types);
+				                                prepare_request_message.QueryUUID(), types, connection.live_caches);
 				cache->tail = std::move(query_result);
 				connection.result_cache = std::move(cache);
 			} else {
