@@ -2,6 +2,8 @@ add_library(
   quack_storage OBJECT
   quack_catalog.cpp
   quack_catalog_set.cpp
+  quack_secret_storage.cpp
+  quack_connection_secret_storage.cpp
   quack_insert.cpp
   quack_optimizer.cpp
   quack_table.cpp

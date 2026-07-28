@@ -5,6 +5,7 @@
 #include "quack_storage.hpp"
 #include "quack_server.hpp"
 #include "storage/quack_catalog.hpp"
+#include "storage/quack_connection_secret_storage.hpp"
 #include "storage/quack_transaction_manager.hpp"
 
 using namespace duckdb;
@@ -29,6 +30,11 @@ QuackServer &QuackStorageExtensionInfo::CreateServer(ClientContext &context, con
 	unique_ptr<QuackServer> server;
 	server = make_uniq<HttpQuackServer>(context, listen_uri, token);
 	servers.emplace(key, std::move(server));
+
+	// Make the connection-scoped secret storage available so clients can ship secrets that are isolated to, and
+	// reaped with, their server-side connection.
+	QuackConnectionSecretStorage::Register(*context.db);
+
 	return *servers[key];
 }
 

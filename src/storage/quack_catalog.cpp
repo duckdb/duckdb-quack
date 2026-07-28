@@ -14,6 +14,7 @@
 #include "storage/quack_insert.hpp"
 #include "quack_message.hpp"
 #include "quack_client.hpp"
+#include "storage/quack_secret_storage.hpp"
 #include "storage/quack_transaction.hpp"
 
 // FIXME bunch of stuff copied from postgres scanner, can probably be simplified!
@@ -29,6 +30,10 @@ QuackCatalog::QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri, C
 	// load the entire catalog up-front
 	auto load_info = LoadCatalog(context);
 	schemas = make_uniq<QuackSchemaSet>(context, *this, load_info);
+
+	// register a secret storage named after the attach alias, so `CREATE SECRET ... IN <alias>` ships secrets to the
+	// server (where federated queries actually execute). Inert until explicitly targeted via `IN <alias>`.
+	QuackSecretStorage::Register(context, db_p.GetName());
 }
 
 QuackLoadCatalogData QuackCatalog::LoadCatalog(ClientContext &context) {
