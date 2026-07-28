@@ -78,8 +78,7 @@ SELECT cached_rows IS NOT NULL AND cached_rows <> 5 FROM quack_active_connection
 ----
 true
 
-# An empty result is still a (zero-row) cached result. (Plain projection: an aggregate would be
-# pushed down whole and produce a 1-row result server-side.)
+# An empty result is still a (zero-row) cached result; the plain projection avoids a 1-row aggregate pushdown.
 query I
 SELECT i FROM remote.empty_t;
 ----
@@ -120,8 +119,7 @@ SET GLOBAL quack_cache_max_rows = 100;
 statement ok
 PREPARE p AS SELECT sum(i) FROM quack_query({server}, 'FROM big', token=>'asdf');
 
-# The 300000-row stream exceeds the cap: the result is correct and nothing is retained for it
-# (two sessions now: the ATTACH one, acked clean above, and the quack_query one, over the cap).
+# Over the cap the result is still correct and neither session (ATTACH acked clean, quack_query capped) retains rows.
 query I
 EXECUTE p;
 ----
@@ -132,8 +130,7 @@ SELECT count(*), count(cached_rows) FROM quack_active_connections();
 ----
 2	0
 
-# cap 0 = unlimited: the same query is now fully retained. A fresh prepared statement is needed:
-# re-EXECUTE of a prepared quack_query does not re-run the spent server-side stream.
+# cap 0 = unlimited: a fresh prepared statement is fully retained (re-EXECUTE would not re-run the spent stream).
 statement ok quack_db:quack_server_con
 SET GLOBAL quack_cache_max_rows = 0;
 

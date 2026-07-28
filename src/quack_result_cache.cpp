@@ -10,20 +10,15 @@
 
 namespace duckdb {
 
-// Accumulate whole chunks until `max_rows` is reached (row-based like the send path, so sparse
-// filtered chunks don't shrink the batch). Resets query_result once the cursor is exhausted.
 static vector<unique_ptr<DataChunkWrapper>> CreateBatch(unique_ptr<QueryResult> &query_result, idx_t max_rows) {
 	vector<unique_ptr<DataChunkWrapper>> results;
-
 	idx_t rows = 0;
 	while (rows < max_rows) {
 		auto result_chunk = query_result->Fetch();
-		// error case
 		if (!result_chunk && query_result->HasError()) {
 			results.clear();
 			return results;
 		}
-		// we are done case
 		if (!result_chunk || result_chunk->size() == 0) {
 			query_result.reset();
 			break;
@@ -50,7 +45,6 @@ int64_t ResultTtlMicros(DatabaseInstance &db) {
 	Value val;
 	DBConfig::GetConfig(db).TryGetCurrentSetting("quack_result_ttl", val);
 	auto ttl_seconds = val.GetValue<uint64_t>();
-	// Saturate a huge TTL to never expire so the per message sweep cannot throw or wrap the micros multiply negative
 	auto max_ttl_seconds = static_cast<uint64_t>(NumericLimits<int64_t>::Maximum()) / Interval::MICROS_PER_SEC;
 	if (ttl_seconds > max_ttl_seconds) {
 		return NumericLimits<int64_t>::Maximum();

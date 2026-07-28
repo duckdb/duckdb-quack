@@ -34,7 +34,7 @@ struct QuackResultCache {
 	timestamp_t last_served_at {0};
 };
 
-//! Server-side half of quack_enable_reconnects: cache the result stream of each client query.
+//! Cache the result stream of each client query.
 bool ServerCachingEnabled(DatabaseInstance &db);
 
 //! Rows the server may retain per connection cache before it degrades to plain streaming (0 = unlimited)
@@ -43,13 +43,13 @@ idx_t CacheMaxRows(DatabaseInstance &db);
 //! quack_result_ttl in microseconds (0 = caches never expire)
 int64_t ResultTtlMicros(DatabaseInstance &db);
 
-//! Drops the cache once idle past the TTL, failing an unfinished stream like a cancelled query. Call under the lock
+//! Drops the cache once idle past the TTL, failing an unfinished stream like a cancelled query.
 void ExpireCacheIfStale(QuackConnection &connection, timestamp_t now, int64_t ttl_micros);
 
 //! True while the connection's active query still has unserved chunks (cached or live).
 bool HasMoreResults(QuackConnection &connection);
 
-//! Serve up to max_rows of the active query. Producer errors land in duckdb_query_result like the uncached path
+//! Serve up to max_rows of the active query.
 vector<unique_ptr<DataChunkWrapper>> ServeBatch(QuackConnection &connection, idx_t max_rows, idx_t max_cache_rows);
 
 } // namespace duckdb

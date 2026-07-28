@@ -126,37 +126,6 @@ clients must have the server's token set in their session:
 SET rpc_default_token = '<token-from-rpc_start>';
 ```
 
-### Result caching (reconnect support)
-
-The server can retain each connection's last query result so a client
-that dies mid-query can later fetch the result it never received,
-without re-running the query. The feature is opt-in on both sides via
-`quack_enable_reconnects`:
-
-```sql
--- server side (GLOBAL): retain each connection's last result until acknowledged
-SET GLOBAL quack_enable_reconnects = true;
-
--- client side: acknowledge results after fully receiving them
-SET quack_enable_reconnects = true;
-```
-
-With the server half enabled, every client query's result stream is
-retained in a per-connection replay cache as it is served (streaming
-behavior is unchanged; results larger than `quack_cache_max_rows` are
-streamed through without being retained). The client half sends an
-`ACKNOWLEDGEMENT` after the last batch of a fully-received result — one
-extra round-trip per query, negligible for the long-running queries this
-feature targets — which drops the cache. A result that is never
-acknowledged is the signature of a dead client: it stays cached until it
-has sat idle for `quack_result_ttl` seconds, after which any server
-traffic reaps it. If the reaped cache still had an unfinished stream,
-later fetches of that query fail like a cancelled query rather than
-silently truncating the result.
-
-Observability: `quack_active_connections()` exposes `cached_rows` per
-session (`NULL` when nothing is cached).
-
 ---
 
 ## Function reference
@@ -286,11 +255,3 @@ reduce per-chunk overhead. Tune with:
 | `quack_fetch_batch_bytes`   | UBIGINT | `4194304`    | Max estimated payload bytes per FETCH response (4 MiB). |
 
 A FETCH returns as soon as either limit is hit.
-
-### Result caching
-
-| Setting                   | Type    | Default  | Description                                                                 |
-|---------------------------|---------|----------|-----------------------------------------------------------------------------|
-| `quack_enable_reconnects` | BOOLEAN | `false`  | Client: acknowledge fully-received results. Server (GLOBAL): retain each connection's last result until acknowledged. |
-| `quack_cache_max_rows`    | UBIGINT | `100000` | Server (GLOBAL): max rows retained per connection's replay cache; larger results stream through uncached. `0` = unlimited. |
-| `quack_result_ttl`        | UBIGINT | `3600`   | Server (GLOBAL): seconds an unacknowledged cached result may sit idle before any server traffic reaps it. `0` = never expire. |

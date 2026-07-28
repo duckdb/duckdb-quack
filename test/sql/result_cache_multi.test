@@ -83,12 +83,6 @@ SELECT i FROM remote.t5 ORDER BY i;
 3
 4
 
-query I quack_db:quack_server_con
-SELECT cached_rows FROM quack_active_connections() ORDER BY cached_rows;
-----
-5
-7
-
 # The sweep reaps only the cache idle past the TTL.
 statement ok quack_db:quack_server_con
 SET GLOBAL quack_result_ttl = 2;

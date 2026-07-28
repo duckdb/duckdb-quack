@@ -36,8 +36,7 @@ SELECT cached_rows FROM quack_active_connections();
 statement ok quack_db:quack_server_con
 SET GLOBAL quack_result_ttl = 18446744073709551615;
 
-# The sweep runs on every inbound message: a plain client query must still succeed, not error
-# with a server-side 500.
+# The sweep runs on every inbound message: a plain client query must still succeed, not hit a server-side 500.
 query I
 SELECT i FROM remote.t5 ORDER BY i;
 ----
@@ -58,8 +57,7 @@ SELECT count(cached_rows) FROM quack_active_connections();
 statement ok quack_db:quack_server_con
 SET GLOBAL quack_result_ttl = 9223372036855;
 
-# A second client's connect request runs the sweep; the young cache must survive, not be
-# evicted instantly by a negative TTL.
+# A second client's connect request runs the sweep; the young cache must not be evicted by a negative TTL.
 statement ok
 ATTACH {server} AS remote2;
 
