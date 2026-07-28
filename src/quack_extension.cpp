@@ -20,6 +20,7 @@
 #include "quack_clear_cache.hpp"
 #include "quack_extension.hpp"
 #include "quack_log.hpp"
+#include "quack_rebalancer_sink.hpp"
 #include "quack_scan.hpp"
 #include "quack_scan_from_client.hpp"
 #include "quack_cancel.hpp"
@@ -173,10 +174,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("quack_authorization_function", "Name of a callback function for authorization",
 	                          LogicalType::VARCHAR, Value("quack_nop_authorization"), nullptr, SetScope::GLOBAL);
 
-	config.AddExtensionOption("quack_fetch_batch_rows",
-	                          "Rows accumulated per FETCH response batch (whole DataChunks, so the last chunk "
-	                          "may overshoot the cap)",
-	                          LogicalType::UBIGINT, Value::UBIGINT(24576));
+	config.AddExtensionOption("quack_prepare_inline_rows",
+	                          "Rows returned inline in the PREPARE response before the remainder is left to "
+	                          "FETCH; drains whole batches, so it may overshoot to a batch boundary",
+	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_PREPARE_INLINE_ROWS_DEFAULT));
 
 	config.AddExtensionOption("quack_fetch_read_ahead",
 	                          "FETCH requests kept in flight ahead of the scan (0 = number of async threads)",
@@ -187,9 +188,29 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "stressing out-of-order batch arrival",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
 
+	config.AddExtensionOption("quack_debug_emit_delay_ms",
+	                          "DEBUG SETTING: max random delay in ms before the fetch collector publishes a "
+	                          "batch, stressing out-of-order emission",
+	                          LogicalType::UBIGINT, Value::UBIGINT(0));
+
+	config.AddExtensionOption("quack_target_batch_bytes",
+	                          "Target in-memory size of one rebalanced batch (one wire message payload); "
+	                          "batches are cut when they reach this size",
+	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_TARGET_BATCH_BYTES_DEFAULT));
+
+	config.AddExtensionOption("quack_rebalance_buffer_bytes",
+	                          "Pending (unstamped) bytes the batch rebalancer buffers before gating non-minimum "
+	                          "producers (0 = automatic, memory-manager governed)",
+	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_REBALANCE_BUFFER_BYTES_DEFAULT));
+
 	config.AddExtensionOption("quack_send_data_flush_rows",
 	                          "Rows a thread buffers before flushing one SEND_DATA_REQUEST (0 = default 204800)",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
+
+	config.AddExtensionOption("quack_fetch_producer_buffer_bytes",
+	                          "Server-side cap on bytes buffered ahead by the fetch collector; the query "
+	                          "executor blocks when the client falls this far behind",
+	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_FETCH_PRODUCER_BUFFER_BYTES_DEFAULT));
 
 	config.AddExtensionOption("quack_server_max_connections",
 	                          "Maximum concurrent connections the RPC server accepts; beyond this new "
