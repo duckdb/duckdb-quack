@@ -2,11 +2,14 @@
 
 #include "duckdb/common/serializer/binary_serializer.hpp"
 #include "duckdb/common/serializer/memory_stream.hpp"
+#include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/common/types/uuid.hpp"
 #include "duckdb/common/error_data.hpp"
 
 namespace duckdb {
+
+class ClientContext;
 
 //! Quack wire-protocol version. Client and server agree on it during the connection handshake.
 static constexpr idx_t QUACK_VERSION = 2;
@@ -54,6 +57,31 @@ private:
 
 string MessageTypeToString(MessageType type);
 
+//! Fixed-width (8-byte LE) batch-index wire field, serialized LAST so an already-encoded payload can
+//! be stamped in place. 0 = invalid/absent; PLACEHOLDER = never stamped (receivers reject it).
+struct QuackBatchIndexField {
+	static constexpr uint64_t PLACEHOLDER = 0xF1DCBA99C0FFEE42ULL;
+	static constexpr uint64_t INVALID = 0;
+
+	static void Encode(uint64_t value, data_ptr_t out) {
+		for (idx_t i = 0; i < 8; i++) {
+			out[i] = static_cast<data_t>((value >> (i * 8)) & 0xFF);
+		}
+	}
+	static uint64_t Decode(const_data_ptr_t in) {
+		uint64_t value = 0;
+		for (idx_t i = 0; i < 8; i++) {
+			value |= static_cast<uint64_t>(in[i]) << (i * 8);
+		}
+		return value;
+	}
+	//! Stamp the dense index into an encoded payload.
+	static void Patch(data_ptr_t payload, idx_t payload_size, idx_t offset, idx_t batch_index) {
+		D_ASSERT(offset + 8 <= payload_size);
+		Encode(batch_index, payload + offset);
+	}
+};
+
 struct MessageHeader {
 	MessageHeader(MessageType type_p, string connection_id_p)
 	    : type(type_p), connection_id(std::move(connection_id_p)) {
@@ -69,12 +97,19 @@ struct MessageHeader {
 
 class QuackMessage {
 public:
-	void ToMemoryStream(MemoryStream &write_stream) const;
+	virtual void ToMemoryStream(MemoryStream &write_stream) const;
 	static unique_ptr<QuackMessage> FromMemoryStream(MemoryStream &read_stream);
+
+	//! Pre-serialized payload carried instead of a serializable body (see QuackRawPayloadResponse);
+	//! the HTTP layer sends these bytes directly. Null for normal messages.
+	virtual optional_ptr<MemoryStream> RawPayload() const {
+		return nullptr;
+	}
 
 	template <class TARGET>
 	TARGET &Cast() {
-		if (header.type != TARGET::TYPE) {
+		// a raw-payload carrier shares the payload's type tag but not its layout
+		if (header.type != TARGET::TYPE || RawPayload()) {
 			throw InternalException("Failed to cast message to type - message type mismatch");
 		}
 		return reinterpret_cast<TARGET &>(*this);
@@ -82,7 +117,7 @@ public:
 
 	template <class TARGET>
 	const TARGET &Cast() const {
-		if (header.type != TARGET::TYPE) {
+		if (header.type != TARGET::TYPE || RawPayload()) {
 			throw InternalException("Failed to cast message to type - message type mismatch");
 		}
 		return reinterpret_cast<const TARGET &>(*this);
@@ -282,8 +317,8 @@ class FetchRequestMessage : public QuackMessage {
 public:
 	static constexpr MessageType TYPE = MessageType::FETCH_REQUEST;
 
-	explicit FetchRequestMessage(string connection_id_p, hugeint_t uuid)
-	    : QuackMessage(TYPE, std::move(connection_id_p)), uuid(uuid) {
+	FetchRequestMessage(string connection_id_p, hugeint_t uuid, idx_t batch_index, idx_t ack_index)
+	    : QuackMessage(TYPE, std::move(connection_id_p)), uuid(uuid), batch_index(batch_index), ack_index(ack_index) {
 	}
 
 protected:
@@ -295,8 +330,15 @@ public:
 	static unique_ptr<FetchRequestMessage> Deserialize(Deserializer &deserializer);
 
 	hugeint_t uuid;
+	//! Client-visible dense batch index (from 1) this request claims. Every request names its batch,
+	//! so a transport-level retry re-asks for the SAME batch instead of popping the next one.
+	idx_t batch_index = 0;
+	//! Highest index with all of 1..ack_index received; the server may drop retained batches <= it.
+	idx_t ack_index = 0;
 };
 
+// One dense batch of a query result (server -> client). Data responses are pre-serialized by
+// FetchResponsePayloadWriter; this class serializes only the empty terminal FINISHED response.
 class FetchResponseMessage : public QuackMessage {
 public:
 	static constexpr MessageType TYPE = MessageType::FETCH_RESPONSE;
@@ -310,6 +352,11 @@ public:
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<FetchResponseMessage> Deserialize(Deserializer &deserializer);
 
+	//! batch_index encoded as the fixed-width QuackBatchIndexField wire string (generator hook).
+	string EncodeBatchIndexFixed() const;
+	//! Decode + validate the wire string back into batch_index; rejects unstamped payloads.
+	void ApplyBatchIndexFixed(const string &bytes);
+
 	vector<unique_ptr<DataChunkWrapper>> &MutableResults() {
 		return results;
 	}
@@ -318,9 +365,18 @@ public:
 		return batch_index;
 	}
 
+	//! Client-visible total batch count; only set on the terminal FINISHED response.
+	void SetTotalBatches(optional_idx total_batches_p) {
+		total_batches = total_batches_p;
+	}
+	optional_idx TotalBatches() const {
+		return total_batches;
+	}
+
 private:
 	vector<unique_ptr<DataChunkWrapper>> results;
 	optional_idx batch_index;
+	optional_idx total_batches;
 };
 
 // Streams one or more DataChunks of insert data to the server, keyed by (connection_id, query_uuid).
@@ -405,6 +461,98 @@ private:
 	//! Set only on dead-range markers: batches [batch_index, dead_range_end) are dead (a filtered/pruned
 	//! gap the sink never crossed). Lets the server skip the gap instead of stalling. Invalid on data messages.
 	optional_idx dead_range_end;
+};
+
+//! Incrementally builds one serialized chunk-carrying message on the producing thread — no separate
+//! serialization pass at cut time. The chunk count (zero-padded LEB128) and the dense batch index
+//! (QuackBatchIndexField, LAST field) are fixed-width placeholders patched later. Subclasses MUST
+//! mirror the generated Serialize field-for-field; a debug round-trip check in Seal pins the two.
+class QuackChunkPayloadWriter {
+public:
+	//! Fixed width of the padded chunk-count varint.
+	static constexpr idx_t CHUNK_COUNT_VARINT_WIDTH = 5;
+
+	virtual ~QuackChunkPayloadWriter();
+
+	//! Serialize one chunk into the payload; the chunk may be reused by the caller afterwards.
+	void AppendChunk(DataChunk &chunk);
+	//! Serialized bytes so far; after Seal, the final payload size.
+	idx_t SizeBytes() const;
+	//! Bytes allocated by the backing stream.
+	idx_t AllocatedBytes() const;
+
+	struct SealedPayload {
+		unique_ptr<MemoryStream> payload;
+		idx_t payload_size;
+		//! Offset of the batch-index placeholder (QuackBatchIndexField::Patch target).
+		idx_t index_offset;
+	};
+	//! Patch the chunk count, write the subclass tail fields (ending with the batch-index
+	//! placeholder), close the message and return the payload ready for stamping.
+	SealedPayload Seal();
+
+protected:
+	//! capacity_hint: the previous sealed payload's size, pre-reserved so steady streaming never grows.
+	QuackChunkPayloadWriter(ClientContext &context, idx_t capacity_hint);
+
+	//! Write the message envelope and open the body object. Called once from the subclass ctor.
+	void OpenMessage(const MessageHeader &header);
+	//! The body serializer, for subclass prefix/tail fields.
+	Serializer &Body();
+	//! Open the chunk list: field header + padded count placeholder. Chunks append after this.
+	void BeginChunkList(uint16_t field_id, const char *tag);
+	//! Write the fixed batch-index field (placeholder) and record its patch offset. Must be the
+	//! subclass's LAST tail field.
+	void WriteBatchIndexField(uint16_t field_id, const char *tag);
+	//! Subclass hook called by Seal, after the chunk count is patched: write the tail fields.
+	virtual void WriteTail() = 0;
+	//! The message type this writer encodes (debug round-trip check).
+	virtual MessageType WrittenType() const = 0;
+
+private:
+	class PayloadSerializer;
+
+	unique_ptr<MemoryStream> stream;
+	unique_ptr<PayloadSerializer> serializer;
+	idx_t chunk_count = 0;
+	idx_t chunk_count_offset = 0;
+	idx_t index_offset = 0;
+	idx_t sealed_size = 0;
+};
+
+//! Builds FETCH_RESPONSE payloads (server fetch-collector path). total_batches is never set on
+//! data-carrying responses, so the writer omits it (matching the generated default handling).
+class FetchResponsePayloadWriter : public QuackChunkPayloadWriter {
+public:
+	FetchResponsePayloadWriter(ClientContext &context, idx_t capacity_hint);
+
+protected:
+	void WriteTail() override;
+	MessageType WrittenType() const override {
+		return MessageType::FETCH_RESPONSE;
+	}
+};
+
+//! Carries a pre-serialized response payload; the HTTP layer detects RawPayload() and sends the bytes
+//! directly. Never Cast<> this to the payload's message type — it only shares the header type tag.
+class QuackRawPayloadResponse : public QuackMessage {
+public:
+	//! shared_ptr: served FETCH payloads stay retained on the stream for idempotent re-serves.
+	QuackRawPayloadResponse(MessageType type, shared_ptr<MemoryStream> payload_p)
+	    : QuackMessage(type), payload(std::move(payload_p)) {
+	}
+
+	void Serialize(Serializer &serializer) const override {
+		throw InternalException("QuackRawPayloadResponse must not be serialized; send RawPayload() directly");
+	}
+
+	//! The payload bytes; GetPosition() is the payload size.
+	optional_ptr<MemoryStream> RawPayload() const override {
+		return payload.get();
+	}
+
+private:
+	shared_ptr<MemoryStream> payload;
 };
 
 // Success reply to a SendDataRequestMessage. `accept_budget` is a placeholder for a future flow-control
