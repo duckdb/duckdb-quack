@@ -9,11 +9,16 @@
 #include "duckdb/storage/temporary_file_manager.hpp"
 #include "duckdb/common/serializer/binary_deserializer.hpp"
 
+#include "duckdb/main/client_config.hpp"
+#include "duckdb/main/prepared_statement_data.hpp"
+
 #include "quack_server.hpp"
 #include "quack_message.hpp"
 #include "quack_log.hpp"
 #include "quack_storage.hpp"
 #include "quack_data_stream.hpp"
+#include "quack_fetch_collector.hpp"
+#include "quack_rebalancer_sink.hpp"
 
 #include "mbedtls_wrapper.hpp"
 
@@ -97,10 +102,115 @@ shared_ptr<QuackDataStream> QuackInsertState::StreamForDeadRangeOrBuffer(const s
 	return nullptr;
 }
 
+//! A fetch stream + its producer thread, taken off the connection so aborting can run unlocked.
+struct DetachedFetchStream {
+	shared_ptr<QuackFetchStream> stream;
+	std::thread thread;
+};
+
+//! Error the buffer so consumers and capacity-blocked producers wake, interrupt the query if it is
+//! still running, join the producer. Call WITHOUT the connection lock.
+static void AbortDetachedFetch(QuackConnection &connection, DetachedFetchStream detached, const string &reason) {
+	if (detached.stream) {
+		auto was_finished = detached.stream->buffer.Finished();
+		detached.stream->buffer.SetError(ErrorData(ExceptionType::INTERRUPT, reason));
+		if (!was_finished && connection.duckdb_connection) {
+			connection.duckdb_connection->Interrupt();
+		}
+	}
+	if (detached.thread.joinable()) {
+		detached.thread.join();
+	}
+}
+
+//! Stop + join the connection's fetch collector. Call WITHOUT the connection lock.
+static void AbortFetchStream(QuackConnection &connection, const string &reason) {
+	DetachedFetchStream detached;
+	{
+		lock_guard<mutex> guard(connection.fetch.lock);
+		detached.stream = std::move(connection.fetch.stream);
+		detached.thread = std::move(connection.fetch.thread);
+		if (detached.stream) {
+			// the abort reason must never mask a real failure: prefer the stream's own error
+			connection.fetch.abort_error = detached.stream->buffer.HasError()
+			                                   ? detached.stream->buffer.GetError()
+			                                   : ErrorData(ExceptionType::INTERRUPT, reason);
+		}
+	}
+	AbortDetachedFetch(connection, std::move(detached), reason);
+}
+
+//! Background thread: runs the client's query with the fetch collector plugged in, holding the
+//! connection lock for its duration; the query executes in parallel into the stream's claim buffer.
+static void RunFetchQuery(QuackConnection &connection, shared_ptr<QuackFetchStream> stream, string sql) {
+	try {
+		unique_lock<mutex> guard(connection.lock);
+		auto &context = *connection.duckdb_connection->context;
+
+		// MakeQuackFetchCollector routes the FIRST result-returning statement into the stream (the
+		// protocol's historical multi-statement semantics); other statements keep the default collector.
+		auto &config = ClientConfig::GetConfig(context);
+		config.get_result_collector = [stream](ClientContext &ctx, PreparedStatementData &data) {
+			return MakeQuackFetchCollector(ctx, data, stream);
+		};
+		unique_ptr<QueryResult> result;
+		try {
+			result = connection.duckdb_connection->Query(sql);
+		} catch (...) {
+			// leave no dangling collector hook on the connection's config
+			config.get_result_collector = nullptr;
+			throw;
+		}
+		config.get_result_collector = nullptr;
+		if (result->HasError()) {
+			stream->buffer.SetError(result->GetErrorObject());
+		} else if (!stream->Bound()) {
+			// No collector claimed the stream (no statement returned a query result): route the last
+			// statement's Success/Count result through, as the protocol always has. Columnless = error.
+			if (result->names.empty()) {
+				stream->buffer.SetError(ErrorData(ExceptionType::INVALID_INPUT, "Query did not return any columns"));
+				stream->buffer.Finish();
+				return;
+			}
+			stream->SignalBound(result->types, result->names);
+			unique_ptr<FetchResponsePayloadWriter> writer;
+			idx_t rows = 0;
+			while (auto chunk = result->Fetch()) {
+				if (chunk->size() == 0) {
+					continue;
+				}
+				if (!writer) {
+					writer = make_uniq<FetchResponsePayloadWriter>(context, 0);
+				}
+				writer->AppendChunk(*chunk);
+				rows += chunk->size();
+			}
+			if (writer) {
+				auto sealed = writer->Seal();
+				QuackFetchPayload entry;
+				entry.payload = std::move(sealed.payload);
+				entry.payload_size = sealed.payload_size;
+				entry.index_offset = sealed.index_offset;
+				entry.rows = rows;
+				QuackBatchIndexField::Patch(entry.payload->GetData(), entry.payload_size, entry.index_offset, 1);
+				auto bytes = entry.payload_size;
+				stream->buffer.PushBatch(1, std::move(entry), bytes);
+				stream->announced_total = 1;
+			} else {
+				stream->announced_total = 0;
+			}
+		}
+	} catch (std::exception &ex) {
+		stream->buffer.SetError(ErrorData(ex));
+	}
+	// Close against the collector's announced total: a short stream errors instead of truncating.
+	stream->buffer.Finish(stream->announced_total);
+}
+
 QuackConnection::~QuackConnection() {
-	// Abort + join any in-flight INSERT before members are destroyed.
+	// Abort + join any in-flight INSERT and fetch collector before members are destroyed.
 	insert.Detach().AbortAndJoin("connection closed during insert");
-	duckdb_query_result.reset();
+	AbortFetchStream(*this, "connection closed during fetch");
 }
 
 //! Background thread: runs the INSERT that drains `stream` via scan_data_from_quack_client, holding
@@ -370,31 +480,6 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
 	return response;
 }
 
-// Accumulate whole chunks until `max_rows` is reached (row-based like the send path, so sparse
-// filtered chunks don't shrink the batch). Resets query_result once the cursor is exhausted.
-static vector<unique_ptr<DataChunkWrapper>> CreateBatch(Allocator &allocator, unique_ptr<QueryResult> &query_result,
-                                                        idx_t max_rows) {
-	vector<unique_ptr<DataChunkWrapper>> results;
-
-	idx_t rows = 0;
-	while (rows < max_rows) {
-		auto result_chunk = query_result->Fetch();
-		// error case
-		if (!result_chunk && query_result->HasError()) {
-			results.clear();
-			return results;
-		}
-		// we are done case
-		if (!result_chunk || result_chunk->size() == 0) {
-			query_result.reset();
-			break;
-		}
-		rows += result_chunk->size();
-		results.push_back(make_uniq<DataChunkWrapper>(*result_chunk));
-	}
-	return results;
-}
-
 unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db, QuackMessage &received_message,
                                                             optional_ptr<QuackConnection> connection_p) {
 	if (connection_p) {
@@ -449,94 +534,163 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		auto effective_sql = (auth_result.type().id() == LogicalTypeId::VARCHAR) ? auth_result.GetValue<string>()
 		                                                                         : prepare_request_message.Query();
 
-		std::unique_lock<std::mutex> lock(connection.lock);
-		connection.duckdb_query_result.reset();
-		connection.sql_query = prepare_request_message.Query();
-		connection.query_state = QuackQueryState::ACTIVE;
-		connection.query_started_at = Timestamp::GetCurrentTimestamp();
-
+		// stop any previous producer before touching connection state (joins its thread → lock is free)
+		AbortFetchStream(connection, "superseded by a new query");
 		{
-			auto query_result = connection.duckdb_connection->SendQuery(effective_sql);
-			if (query_result->HasError()) {
+			std::unique_lock<std::mutex> lock(connection.lock);
+			connection.sql_query = prepare_request_message.Query();
+			connection.query_state = QuackQueryState::ACTIVE;
+			connection.query_started_at = Timestamp::GetCurrentTimestamp();
+			connection.query_uuid = prepare_request_message.QueryUUID();
+		}
+
+		auto stream = make_shared_ptr<QuackFetchStream>();
+		stream->buffer.SetCapacity(
+		    QuackGetUBigintSetting(db, "quack_fetch_producer_buffer_bytes", QUACK_FETCH_PRODUCER_BUFFER_BYTES_DEFAULT));
+		DetachedFetchStream superseded;
+		{
+			// Swap-install atomically: a concurrent PREPARE may have installed a producer since the
+			// abort above, and assigning over a joinable std::thread would terminate the process.
+			lock_guard<mutex> guard(connection.fetch.lock);
+			superseded.stream = std::move(connection.fetch.stream);
+			superseded.thread = std::move(connection.fetch.thread);
+			connection.fetch.stream = stream;
+			connection.fetch.uuid = prepare_request_message.QueryUUID();
+			connection.fetch.abort_error = ErrorData();
+			connection.fetch.thread = std::thread(RunFetchQuery, std::ref(connection), stream, effective_sql);
+		}
+		AbortDetachedFetch(connection, std::move(superseded), "superseded by a new query");
+
+		if (!stream->WaitBound()) {
+			// planning failed before a collector existed — surface the error and clean up
+			auto error = stream->buffer.GetError();
+			AbortFetchStream(connection, "query failed");
+			std::unique_lock<std::mutex> lock(connection.lock);
+			connection.sql_query = "";
+			connection.query_state = QuackQueryState::CANCELLED;
+			return make_uniq<ErrorResponse>(error);
+		}
+
+		// Inline the leading batches into the PREPARE response so small results arrive in one round
+		// trip (catalog enumeration never FETCHes); FETCH indices are remapped by the consumed count.
+		idx_t max_inline_rows =
+		    QuackGetUBigintSetting(db, "quack_prepare_inline_rows", QUACK_PREPARE_INLINE_ROWS_DEFAULT);
+		vector<unique_ptr<DataChunkWrapper>> results;
+		idx_t inline_rows = 0;
+		idx_t consumed = 0;
+		while (inline_rows < max_inline_rows) {
+			QuackFetchPayload entry;
+			auto status = stream->buffer.TryPopClaimed(consumed + 1, entry);
+			if (status == QuackClaimPopStatus::BATCH) {
+				consumed++;
+				inline_rows += entry.rows;
+				// Batches are stored pre-serialized; only this inline drain decodes them back to chunks.
+				MemoryStream payload_stream(entry.payload->GetData(), entry.payload_size);
+				auto inline_message = QuackMessage::FromMemoryStream(payload_stream);
+				for (auto &wrapper : inline_message->Cast<FetchResponseMessage>().MutableResults()) {
+					results.push_back(std::move(wrapper));
+				}
+				continue;
+			}
+			if (status == QuackClaimPopStatus::FINISHED) {
+				break;
+			}
+			if (status == QuackClaimPopStatus::ERRORED) {
+				auto error = stream->buffer.GetError();
+				AbortFetchStream(connection, "query failed");
+				std::unique_lock<std::mutex> lock(connection.lock);
 				connection.sql_query = "";
-				auto response = make_uniq<ErrorResponse>(query_result->GetErrorObject());
-				connection.duckdb_query_result.reset();
 				connection.query_state = QuackQueryState::CANCELLED;
-				return response;
+				return make_uniq<ErrorResponse>(error);
 			}
-			if (query_result->names.empty()) {
-				connection.sql_query = "";
-				auto response = make_uniq<ErrorResponse>(query_result->GetErrorObject());
-				connection.duckdb_query_result.reset();
-				connection.query_state = QuackQueryState::QUACK_ERROR;
-				return make_uniq<ErrorResponse>("Query did not return any columns");
-			}
-
-			connection.duckdb_query_result = std::move(query_result);
+			stream->buffer.WaitForBatch(consumed + 1);
 		}
-		// Fresh query → restart batch numbering. Clients' local state is re-initialized on
-		// a new PREPARE, so indices start at 0 again.
-		connection.next_batch_index = 1;
-		connection.query_uuid = prepare_request_message.QueryUUID();
-
-		Value max_rows_val;
-		DBConfig::GetConfig(db).TryGetCurrentSetting("quack_fetch_batch_rows", max_rows_val);
-		auto max_rows_per_batch = max_rows_val.GetValue<uint64_t>();
-
-		auto names = connection.duckdb_query_result->names;
-		auto types = connection.duckdb_query_result->types;
-
-		auto results = CreateBatch(Allocator::Get(db), connection.duckdb_query_result, max_rows_per_batch);
-		if (connection.duckdb_query_result && connection.duckdb_query_result->HasError()) {
-			D_ASSERT(results.empty());
-
-			auto error_message = connection.duckdb_query_result->GetErrorObject();
-			connection.duckdb_query_result.reset();
-			return make_uniq<ErrorResponse>(std::move(error_message));
-		}
-		// CreateBatch resets the cursor on exhaustion; a live cursor means more batches remain.
-		auto needs_more_fetch = connection.duckdb_query_result != nullptr;
-		if (!needs_more_fetch && connection.query_state == QuackQueryState::ACTIVE) {
+		stream->prepare_batches = consumed;
+		// If the drain did not observe a CLEAN stream end, optimistically report more: a spurious true
+		// costs one terminal FETCH; false on an errored buffer would report a truncated result complete.
+		auto needs_more_fetch = !stream->buffer.Exhausted() || stream->buffer.HasError();
+		if (!needs_more_fetch) {
 			connection.query_state = QuackQueryState::FINISHED;
 		}
-		return make_uniq<PrepareResponseMessage>(types, names, std::move(results), needs_more_fetch,
-		                                         connection.query_uuid);
+		return make_uniq<PrepareResponseMessage>(stream->types, stream->names, std::move(results), needs_more_fetch,
+		                                         prepare_request_message.QueryUUID());
 	}
 
 	case MessageType::FETCH_REQUEST: {
 		auto &fetch_request_message = received_message.Cast<FetchRequestMessage>();
 		auto &connection = *connection_p;
-		std::unique_lock<std::mutex> lock(connection.lock);
 
-		if (connection.query_uuid != fetch_request_message.uuid) {
+		// no connection.lock here: the producer thread holds it for the query's duration; FETCH only
+		// touches the stream's buffer
+		shared_ptr<QuackFetchStream> stream;
+		hugeint_t stream_uuid;
+		ErrorData abort_error;
+		{
+			lock_guard<mutex> guard(connection.fetch.lock);
+			stream = connection.fetch.stream;
+			stream_uuid = connection.fetch.uuid;
+			abort_error = connection.fetch.abort_error;
+		}
+		if (!stream && stream_uuid == fetch_request_message.uuid && abort_error.HasError()) {
+			return make_uniq<ErrorResponse>(abort_error);
+		}
+		if (!stream || stream_uuid != fetch_request_message.uuid) {
 			return make_uniq<ErrorResponse>("Result has been closed");
 		}
-		if (connection.query_state == QuackQueryState::CANCELLED) {
-			return make_uniq<ErrorResponse>("Query was interrupted");
-		}
-		if (!connection.duckdb_query_result) {
-			return make_uniq<FetchResponseMessage>();
-		}
-		if (connection.duckdb_query_result->HasError()) {
-			return make_uniq<ErrorResponse>(connection.duckdb_query_result->GetErrorObject());
+		if (fetch_request_message.batch_index == 0) {
+			return make_uniq<ErrorResponse>("FETCH_REQUEST is missing its batch index");
 		}
 
-		Value max_rows_val;
-		DBConfig::GetConfig(db).TryGetCurrentSetting("quack_fetch_batch_rows", max_rows_val);
-		auto max_rows_per_batch = max_rows_val.GetValue<uint64_t>();
+		// The request names its batch (client-visible; add back the batches PREPARE consumed inline).
+		// Served payloads are retained until acked so a transport retry re-serves the SAME batch.
+		auto dense_index = fetch_request_message.batch_index + stream->prepare_batches;
+		auto dense_ack = fetch_request_message.ack_index + stream->prepare_batches;
+		{
+			lock_guard<mutex> guard(stream->serve_lock);
+			// everything <= the ack was received by the client and can never be re-requested
+			stream->served.erase(stream->served.begin(), stream->served.upper_bound(dense_ack));
+		}
 
-		auto results = CreateBatch(Allocator::Get(db), connection.duckdb_query_result, max_rows_per_batch);
-		if (connection.duckdb_query_result && connection.duckdb_query_result->HasError()) { // TODO this is duplicated
-			D_ASSERT(results.empty());
-			auto error_message = connection.duckdb_query_result->GetErrorObject();
-			connection.duckdb_query_result.reset();
-			return make_uniq<ErrorResponse>(std::move(error_message));
+		while (true) {
+			QuackClaimPopStatus status;
+			QuackFetchPayload entry;
+			{
+				// One critical section for retained-check + pop + retain: a concurrent retry of the same
+				// index can never fall through to FINISHED while the original is mid-serve.
+				lock_guard<mutex> guard(stream->serve_lock);
+				auto retained = stream->served.find(dense_index);
+				if (retained != stream->served.end()) {
+					// re-serve (already patched with the client-visible index)
+					return make_uniq<QuackRawPayloadResponse>(MessageType::FETCH_RESPONSE, retained->second);
+				}
+				status = stream->buffer.TryPopClaimed(dense_index, entry);
+				if (status == QuackClaimPopStatus::BATCH) {
+					// re-stamp the sealed payload with the client-visible index; retain it for retries
+					QuackBatchIndexField::Patch(entry.payload->GetData(), entry.payload_size, entry.index_offset,
+					                            fetch_request_message.batch_index);
+					shared_ptr<MemoryStream> payload(std::move(entry.payload));
+					stream->served.emplace(dense_index, payload);
+					return make_uniq<QuackRawPayloadResponse>(MessageType::FETCH_RESPONSE, std::move(payload));
+				}
+			}
+			// BATCH returned under the lock above
+			if (status == QuackClaimPopStatus::ERRORED) {
+				return make_uniq<ErrorResponse>(stream->buffer.GetError());
+			}
+			if (status == QuackClaimPopStatus::FINISHED) {
+				// the stream ended below the requested index: terminal response, announcing the
+				// client-visible total so the client can validate it received the whole stream
+				if (connection.query_state == QuackQueryState::ACTIVE) {
+					connection.query_state = QuackQueryState::FINISHED;
+				}
+				auto response = make_uniq<FetchResponseMessage>();
+				if (stream->announced_total.IsValid()) {
+					response->SetTotalBatches(stream->announced_total.GetIndex() - stream->prepare_batches);
+				}
+				return std::move(response);
+			}
+			stream->buffer.WaitForBatch(dense_index);
 		}
-		auto assigned_batch_index = connection.next_batch_index++;
-		if (!connection.duckdb_query_result && connection.query_state == QuackQueryState::ACTIVE) {
-			connection.query_state = QuackQueryState::FINISHED;
-		}
-		return make_uniq<FetchResponseMessage>(std::move(results), optional_idx(assigned_batch_index));
 	}
 
 	case MessageType::SEND_DATA_REQUEST: {
@@ -657,9 +811,11 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			return make_uniq<ErrorResponse>("Attempted to cancel a different query with id '%s' instead of '%s'",
 			                                cancel_request_message.query_uuid, connection.query_uuid);
 		}
+		// Interrupt() alone cannot wake a producer parked on the claim buffer's capacity wait — the
+		// abort's SetError is what releases it. Clients recognize cancellation by the "Interrupt" text.
+		AbortFetchStream(connection, "Interrupted: query was cancelled");
 		connection.duckdb_connection->Interrupt();
 		connection.query_state = QuackQueryState::CANCELLED;
-		connection.duckdb_query_result.reset();
 		return make_uniq<SuccessResponse>();
 	}
 	case MessageType::ACKNOWLEDGEMENT: {
