@@ -1,0 +1,55 @@
+# name: test/sql/fetch_head_of_line.test
+# description: a full producer buffer of later batches must not starve the head batch (single-threaded client)
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+# The stall shape: jittered emitters fill the small (8-batch) buffer with LATER batches while the
+# head batch's emitter lags; the head then blocks on capacity while the client waits for exactly it.
+# Head-of-stream admission must let it through — without it this test hangs.
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_fetch_producer_buffer_bytes = 524288;
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_target_batch_bytes = 65536;
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_prepare_inline_rows = 1;
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_debug_emit_delay_ms = 5;
+
+statement ok quack_db:quack_server_con
+CREATE TABLE big AS SELECT range AS i, hash(range) AS pad FROM range(200000);
+
+# single consuming scan thread + a read-ahead window of 1: the client only ever waits on one index
+statement ok
+SET threads = 1;
+
+statement ok
+SET quack_fetch_read_ahead = 1;
+
+query II
+SELECT count(*), sum(i) FROM quack_query({server}, 'SELECT i, pad FROM big', token='asdf')
+----
+200000	19999900000
+
+statement ok
+RESET threads;
+
+statement ok
+RESET quack_fetch_read_ahead;
+
+statement ok quack_db:quack_server_con
+RESET GLOBAL quack_fetch_producer_buffer_bytes;
+
+statement ok quack_db:quack_server_con
+RESET GLOBAL quack_target_batch_bytes;
+
+statement ok quack_db:quack_server_con
+RESET GLOBAL quack_prepare_inline_rows;
+
+statement ok quack_db:quack_server_con
+RESET GLOBAL quack_debug_emit_delay_ms;
+
+include test/template/quack_teardown.test_template
