@@ -323,7 +323,8 @@ static void SendAcknowledgement(ClientContext &context, QuackScanGlobalState &gl
 	try {
 		auto client_wrapper = bind_data.client_connection->GetClient(context);
 		client_wrapper->GetClient().Request<SuccessResponse>(
-		    context, make_uniq<AcknowledgementMessage>(bind_data.client_connection->ConnectionId()));
+		    context,
+		    make_uniq<AcknowledgementMessage>(bind_data.client_connection->ConnectionId(), global_state.query_uuid));
 	} catch (const std::exception &e) {
 		// The query is already complete, so we swallow the failure rather than fail the query
 		DUCKDB_LOG_WARNING(

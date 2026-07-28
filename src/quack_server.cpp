@@ -690,8 +690,17 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		return make_uniq<SuccessResponse>();
 	}
 	case MessageType::ACKNOWLEDGEMENT: {
+		auto &acknowledgement_message = received_message.Cast<AcknowledgementMessage>();
 		auto &connection = *connection_p;
 		std::unique_lock<std::mutex> lock(connection.lock);
+		auto &cache = connection.result_cache;
+		if (!cache) {
+			return make_uniq<SuccessResponse>(); // nothing retained, acknowledging is a no-op
+		}
+		if (cache->query_uuid != acknowledgement_message.QueryUUID()) {
+			return make_uniq<ErrorResponse>("Attempted to acknowledge a different query with id '%s' instead of '%s'",
+			                                acknowledgement_message.QueryUUID(), cache->query_uuid);
+		}
 		// The client confirmed it received the full result, the replay cache has served its purpose
 		connection.ClearResultCache();
 		return make_uniq<SuccessResponse>();
