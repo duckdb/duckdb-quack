@@ -14,125 +14,16 @@
 namespace duckdb {
 
 //===--------------------------------------------------------------------===//
-// QuackFetchBuffer
-//===--------------------------------------------------------------------===//
-idx_t QuackFetchBuffer::ClaimBatch() {
-	annotated_lock_guard<annotated_mutex> guard(lock);
-	return next_claim++;
-}
-
-void QuackFetchBuffer::PushBatch(idx_t batch_index, vector<unique_ptr<DataChunk>> chunks) {
-	shared_ptr<ReadAheadJobCompletion> waiter;
-	{
-		annotated_lock_guard<annotated_mutex> guard(lock);
-		if (finished || errored) {
-			return;
-		}
-		batches[batch_index] = std::move(chunks);
-		auto entry = waiters.find(batch_index);
-		if (entry != waiters.end()) {
-			waiter = std::move(entry->second);
-			waiters.erase(entry);
-		}
-	}
-	cv.notify_all();
-	if (waiter) {
-		// wakes exactly the scan task parked on this batch index
-		waiter->FinishIOTask();
-	}
-}
-
-shared_ptr<ReadAheadJobCompletion> QuackFetchBuffer::RegisterWaiter(idx_t claim) {
-	annotated_lock_guard<annotated_mutex> guard(lock);
-	// Checked under the same lock PushBatch inserts with, so a concurrent publish either
-	// makes us retry the pop here or finds the registered waiter — no lost wakeup.
-	if (batches.find(claim) != batches.end() || finished || errored) {
-		return nullptr;
-	}
-	auto entry = waiters.find(claim);
-	if (entry != waiters.end()) {
-		return entry->second;
-	}
-	auto completion = make_shared_ptr<ReadAheadJobCompletion>(1);
-	waiters.emplace(claim, completion);
-	return completion;
-}
-
-QuackFetchBuffer::PopStatus QuackFetchBuffer::TryPopClaimed(idx_t claim, vector<unique_ptr<DataChunk>> &chunks_out) {
-	annotated_lock_guard<annotated_mutex> guard(lock);
-	if (errored) {
-		return PopStatus::ERRORED;
-	}
-	auto entry = batches.find(claim);
-	if (entry != batches.end()) {
-		chunks_out = std::move(entry->second);
-		batches.erase(entry);
-		return PopStatus::BATCH;
-	}
-	// Indices are dense and Finish() runs after the last push, so an absent claim can never arrive.
-	if (finished) {
-		return PopStatus::FINISHED;
-	}
-	return PopStatus::EMPTY;
-}
-
-void QuackFetchBuffer::WaitForBatch(idx_t claim) {
-	annotated_unique_lock<annotated_mutex> guard(lock);
-	if (batches.find(claim) != batches.end() || finished || errored) {
-		return;
-	}
-	// Bounded wait so the scan can re-check cancellation even if the batch never arrives.
-	cv.wait_for(guard, std::chrono::milliseconds(200));
-}
-
-void QuackFetchBuffer::Finish() {
-	std::map<idx_t, shared_ptr<ReadAheadJobCompletion>> drained;
-	{
-		annotated_lock_guard<annotated_mutex> guard(lock);
-		finished = true;
-		drained = std::move(waiters);
-		waiters.clear();
-	}
-	cv.notify_all();
-	// wake every parked claimant so it observes FINISHED
-	for (auto &entry : drained) {
-		entry.second->FinishIOTask();
-	}
-}
-
-void QuackFetchBuffer::SetError(ErrorData error_p) {
-	std::map<idx_t, shared_ptr<ReadAheadJobCompletion>> drained;
-	{
-		annotated_lock_guard<annotated_mutex> guard(lock);
-		if (!errored) {
-			errored = true;
-			error = std::move(error_p);
-		}
-		finished = true;
-		drained = std::move(waiters);
-		waiters.clear();
-	}
-	cv.notify_all();
-	// wake every parked claimant so it observes ERRORED
-	for (auto &entry : drained) {
-		entry.second->FinishIOTask();
-	}
-}
-
-ErrorData QuackFetchBuffer::GetError() {
-	annotated_lock_guard<annotated_mutex> guard(lock);
-	return error;
-}
-
-//===--------------------------------------------------------------------===//
 // Async fetch task
 //===--------------------------------------------------------------------===//
 // Runs the FETCH POST + response decode on an ASYNC-pool thread, publishing the decoded batch.
 // TODO: possibly converge with core's multi-file read-ahead abstraction.
 class QuackFetchDataTask : public AsyncTask {
 public:
-	QuackFetchDataTask(QuackFetcher &fetcher_p, unique_ptr<QuackClientWrapper> client_wrapper_p)
-	    : fetcher(fetcher_p), client_wrapper(std::move(client_wrapper_p)) {
+	QuackFetchDataTask(QuackFetcher &fetcher_p, unique_ptr<QuackClientWrapper> client_wrapper_p, idx_t request_index_p,
+	                   unique_ptr<MemoryStream> payload_p, idx_t payload_size_p)
+	    : fetcher(fetcher_p), client_wrapper(std::move(client_wrapper_p)), request_index(request_index_p),
+	      payload(std::move(payload_p)), payload_size(payload_size_p) {
 	}
 
 	void Execute() override {
@@ -155,7 +46,9 @@ private:
 		auto &client = client_wrapper->GetClient();
 		auto start_time = QuackNowMillis();
 		// context=nullptr: called off the execution thread, must not touch ClientContext.
-		auto response_body = client.PostRaw(nullptr, fetcher.payload->GetData(), fetcher.payload_size);
+		// This task's payload names its batch index, so an HTTP-level retry of this POST asks the
+		// server for the SAME batch again instead of popping the next one.
+		auto response_body = client.PostRaw(nullptr, payload->GetData(), payload_size);
 		auto duration_ms = QuackNowMillis() - start_time;
 
 		auto response = QuackClient::DecodeResponse(response_body);
@@ -185,11 +78,20 @@ private:
 		}
 		bool pushed = false;
 		if (wrappers.empty()) {
+			// terminal response: this request's index lies beyond the stream's total
+			auto total = fetch_response.TotalBatches();
+			if (total.IsValid()) {
+				fetcher.expected_total = total.GetIndex();
+			}
 			fetcher.no_more_fetches = true;
 		} else {
 			auto batch_index = fetch_response.BatchIndex();
 			if (!batch_index.IsValid()) {
 				throw IOException("fetch_response with data is missing its batch index");
+			}
+			if (batch_index.GetIndex() != request_index) {
+				throw IOException("fetch_response carries batch %llu but batch %llu was requested",
+				                  batch_index.GetIndex(), request_index);
 			}
 			// Convert to owned chunks (buffers are shared, Reference is cheap) so decode stays here.
 			vector<unique_ptr<DataChunk>> chunks;
@@ -200,8 +102,8 @@ private:
 				owned->Reference(wrapper->Chunk());
 				chunks.push_back(std::move(owned));
 			}
-			// the thread that claimed this index pops exactly this batch
-			fetcher.buffer->PushBatch(batch_index.GetIndex(), std::move(chunks));
+			fetcher.buffer->PushBatch(request_index, std::move(chunks));
+			fetcher.RecordReceived(request_index);
 			pushed = true;
 		}
 		fetcher.FinishTask(nullptr, pushed);
@@ -210,6 +112,11 @@ private:
 private:
 	QuackFetcher &fetcher;
 	unique_ptr<QuackClientWrapper> client_wrapper;
+	//! The client-visible batch index this task requests; fixed at registration.
+	idx_t request_index;
+	//! This task's encoded FETCH request (index + ack baked in); identical across HTTP retries.
+	unique_ptr<MemoryStream> payload;
+	idx_t payload_size;
 };
 
 //===--------------------------------------------------------------------===//
@@ -242,18 +149,21 @@ QuackFetcher::QuackFetcher(ClientContext &context, QuackClientConnection &connec
 	// Claims start at 1: server-assigned FETCH batch indices are dense from 1 (the PREPARE batch is 0).
 	buffer = make_shared_ptr<QuackFetchBuffer>();
 
-	FetchRequestMessage fetch_msg(connection.ConnectionId(), query_uuid);
-	payload = make_uniq<MemoryStream>();
-	QuackClient::EncodeRequest(context, fetch_msg, *payload);
-	payload_size = payload->GetPosition();
-	connection_id = fetch_msg.ConnectionId();
-	client_query_id = fetch_msg.ClientQueryId();
+	this->query_uuid = query_uuid;
+	connection_id = connection.ConnectionId();
 	logger = context.logger;
+	// Captured once: async tasks read it concurrently for request logging, and it is per-query state.
+	if (context.transaction.HasActiveTransaction()) {
+		auto raw_query_id = context.transaction.GetActiveQuery();
+		if (raw_query_id != DConstants::INVALID_INDEX) {
+			client_query_id = raw_query_id;
+		}
+	}
 
 	for (idx_t i = 0; i < depth; i++) {
 		idle_clients.push_back(connection.GetClient(context));
 	}
-	TopUp();
+	TopUp(context);
 }
 
 QuackFetcher::~QuackFetcher() {
@@ -267,19 +177,19 @@ QuackFetchResult QuackFetcher::GetBatch(ClientContext &context, TableFunctionInp
 	}
 	while (true) {
 		switch (buffer->TryPopClaimed(claim.GetIndex(), chunks)) {
-		case QuackFetchBuffer::PopStatus::BATCH:
+		case QuackClaimPopStatus::BATCH:
 			batch_index = claim.GetIndex();
 			claim = optional_idx();
-			BatchConsumed();
+			BatchConsumed(context);
 			return QuackFetchResult::BATCH;
-		case QuackFetchBuffer::PopStatus::FINISHED:
+		case QuackClaimPopStatus::FINISHED:
 			return QuackFetchResult::FINISHED;
-		case QuackFetchBuffer::PopStatus::ERRORED:
+		case QuackClaimPopStatus::ERRORED:
 			buffer->GetError().Throw();
 			return QuackFetchResult::FINISHED;
-		case QuackFetchBuffer::PopStatus::EMPTY: {
+		case QuackClaimPopStatus::EMPTY: {
 			// refill any free pipeline slots before parking
-			TopUp();
+			TopUp(context);
 			if (input.results_execution_mode == AsyncResultsExecutionMode::TASK_EXECUTOR && input.interrupt_state) {
 				auto completion = buffer->RegisterWaiter(claim.GetIndex());
 				if (!completion || !completion->TryPark(*input.interrupt_state)) {
@@ -301,7 +211,7 @@ QuackFetchResult QuackFetcher::GetBatch(ClientContext &context, TableFunctionInp
 	}
 }
 
-void QuackFetcher::TopUp() {
+void QuackFetcher::TopUp(ClientContext &context) {
 	while (!stop && !no_more_fetches) {
 		auto current = outstanding.load();
 		if (current >= depth) {
@@ -320,14 +230,33 @@ void QuackFetcher::TopUp() {
 			client = std::move(idle_clients.back());
 			idle_clients.pop_back();
 		}
+		// Each task requests one explicit index, assigned in dense order; its payload is encoded once
+		// here (with the current ack) and never changes, so HTTP retries are idempotent.
+		auto request_index = next_request++;
+		FetchRequestMessage fetch_msg(connection_id, query_uuid, request_index, CurrentAck());
+		auto request_payload = make_uniq<MemoryStream>();
+		QuackClient::EncodeRequest(context, fetch_msg, *request_payload);
+		auto request_size = request_payload->GetPosition();
 		++in_flight;
-		queue->Register(make_uniq<QuackFetchDataTask>(*this, std::move(client)), payload_size);
+		queue->Register(make_uniq<QuackFetchDataTask>(*this, std::move(client), request_index,
+		                                              std::move(request_payload), request_size),
+		                request_size);
 	}
 }
 
-void QuackFetcher::BatchConsumed() {
+void QuackFetcher::BatchConsumed(ClientContext &context) {
 	--outstanding;
-	TopUp();
+	TopUp(context);
+}
+
+void QuackFetcher::RecordReceived(idx_t index) {
+	lock_guard<mutex> guard(ack_lock);
+	acked.Insert(index);
+}
+
+idx_t QuackFetcher::CurrentAck() {
+	lock_guard<mutex> guard(ack_lock);
+	return acked.ContiguousMax();
 }
 
 void QuackFetcher::ReturnClient(unique_ptr<QuackClientWrapper> client) {
@@ -344,7 +273,10 @@ void QuackFetcher::FinishTask(unique_ptr<QuackClientWrapper> client, bool pushed
 		--outstanding;
 	}
 	if (--in_flight == 0 && no_more_fetches) {
-		buffer->Finish();
+		// Clean end of stream: validate against the server's announced total (the buffer counted its
+		// own pushes), so lost batches fail loudly. Error/cancel paths never reach here with a total.
+		auto expected = expected_total.load();
+		buffer->Finish(expected == DConstants::INVALID_INDEX ? optional_idx() : optional_idx(expected));
 	}
 }
 
