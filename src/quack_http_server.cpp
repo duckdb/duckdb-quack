@@ -231,8 +231,22 @@ HttpQuackServer::HttpQuackServer(ClientContext &context_p, const QuackUri &uri_p
 			return true;
 		});
 		auto response = HandleMessage(stream);
-		response->ToMemoryStream(stream);
-		res.set_content((const char *)stream.GetData(), stream.GetPosition(), "application/vnd.duckdb");
+		auto raw = response->RawPayload();
+		if (raw) {
+			// Pre-serialized response (fetch data batches): hand the payload to httplib without
+			// re-serializing or copying; the shared_ptr keeps the buffer alive until it is written out.
+			auto data = const_char_ptr_cast(raw->GetData());
+			auto size = raw->GetPosition();
+			shared_ptr<QuackMessage> owned(std::move(response));
+			res.set_content_provider(size, "application/vnd.duckdb",
+			                         [owned, data](size_t offset, size_t length, duckdb_httplib::DataSink &sink) {
+				                         sink.write(data + offset, length);
+				                         return true;
+			                         });
+		} else {
+			response->ToMemoryStream(stream);
+			res.set_content((const char *)stream.GetData(), stream.GetPosition(), "application/vnd.duckdb");
+		}
 	});
 
 	if (!server->is_valid()) {
