@@ -38,12 +38,18 @@ bool ServerCachingEnabled(DatabaseInstance &db) {
 idx_t CacheMaxRows(DatabaseInstance &db) {
 	Value val;
 	DBConfig::GetConfig(db).TryGetCurrentSetting("quack_cache_max_rows", val);
+	if (val.IsNull()) {
+		return 0;
+	}
 	return val.GetValue<uint64_t>();
 }
 
 int64_t ResultTtlMicros(DatabaseInstance &db) {
 	Value val;
 	DBConfig::GetConfig(db).TryGetCurrentSetting("quack_result_ttl", val);
+	if (val.IsNull()) {
+		return 0;
+	}
 	auto ttl_seconds = val.GetValue<uint64_t>();
 	auto max_ttl_seconds = static_cast<uint64_t>(NumericLimits<int64_t>::Maximum()) / Interval::MICROS_PER_SEC;
 	if (ttl_seconds > max_ttl_seconds) {
