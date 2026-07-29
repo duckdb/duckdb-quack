@@ -23,9 +23,7 @@ struct QuackResultCache {
 		D_ASSERT(live_caches);
 		(*live_caches)++;
 	}
-	~QuackResultCache() {
-		(*live_caches)--;
-	}
+	~QuackResultCache();
 
 	// the live-cache count is maintained by this object's lifetime, so it must not be copied or moved
 	QuackResultCache(const QuackResultCache &) = delete;

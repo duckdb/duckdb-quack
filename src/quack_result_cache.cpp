@@ -4,6 +4,7 @@
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/query_result.hpp"
+#include "duckdb/main/stream_query_result.hpp"
 
 #include "quack_message.hpp"
 #include "quack_server.hpp"
@@ -27,6 +28,17 @@ static vector<unique_ptr<DataChunkWrapper>> CreateBatch(unique_ptr<QueryResult> 
 		results.push_back(make_uniq<DataChunkWrapper>(*result_chunk));
 	}
 	return results;
+}
+
+QuackResultCache::~QuackResultCache() {
+	if (tail && tail->type == QueryResultType::STREAM_RESULT) {
+		try {
+			// If it's a stream we gotta close it
+			tail->Cast<StreamQueryResult>().Close();
+		} catch (...) {
+		}
+	}
+	(*live_caches)--;
 }
 
 bool ServerCachingEnabled(DatabaseInstance &db) {

@@ -1,0 +1,56 @@
+# name: test/sql/result_ttl_releases_query.test
+# description: expiring a cache must release the abandoned server-side query too, not just the rows it retained
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok quack_db:quack_server_con
+CREATE TABLE big AS SELECT range AS i, range::VARCHAR AS s FROM range(500000);
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_enable_reconnects = true;
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_cache_max_rows = 0;
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_result_ttl = 1;
+
+statement ok
+CREATE SECRET (TYPE quack, TOKEN 'asdf');
+
+# Binding sends the PREPARE: the server runs the sort, serves the first batch and keeps the rest
+# as an unconsumed tail. The client then idles without ever executing.
+statement ok
+PREPARE p AS SELECT count(*) FROM quack_query({server}, 'SELECT * FROM big ORDER BY s', token=>'asdf');
+
+# The sort's payload is held by the query behind that tail.
+query I quack_db:quack_server_con
+SELECT memory_usage_bytes > 0 FROM duckdb_memory() WHERE tag = 'ORDER_BY';
+----
+true
+
+sleep 2 seconds
+
+# Any inbound traffic runs the sweep.
+statement ok
+ATTACH {server} AS sweeper;
+
+query I quack_db:quack_server_con
+SELECT count(cached_rows) FROM quack_active_connections();
+----
+0
+
+# Dropping the cache released the query behind it, not just the rows it had retained.
+query I quack_db:quack_server_con
+SELECT memory_usage_bytes = 0 FROM duckdb_memory() WHERE tag = 'ORDER_BY';
+----
+true
+
+statement ok
+DETACH sweeper;
+
+statement ok
+DEALLOCATE p;
+
+include test/template/quack_teardown.test_template
