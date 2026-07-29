@@ -101,7 +101,9 @@ vector<unique_ptr<DataChunkWrapper>> ServeBatch(QuackConnection &connection, idx
 			break;
 		}
 		rows += result_chunk->size();
-		cache->retained.Append(cache->append_state, *result_chunk);
+		// the single-argument Append keeps no append state between batches: a retained state pins the
+		// current 256KB block in the buffer manager for the whole life of the cache
+		cache->retained.Append(*result_chunk);
 		results.push_back(make_uniq<DataChunkWrapper>(*result_chunk));
 	}
 	if (max_cache_rows != 0 && cache->retained.Count() > max_cache_rows) {

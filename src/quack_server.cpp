@@ -373,9 +373,6 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
 		return make_uniq<ErrorResponse>("Unsupported message type for server");
 	}
 
-	// any inbound traffic reaps result caches whose TTL has lapsed, across all connections
-	SweepExpiredCaches(*db);
-
 	// if the message requires it, obtain a connection
 	// these are basically all messages aside from connect request
 	shared_ptr<QuackConnection> connection;
@@ -385,6 +382,9 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
 			return make_uniq<ErrorResponse>("Invalid connection id");
 		}
 	}
+
+	// any inbound traffic reaps result caches whose TTL has lapsed, across all connections
+	SweepExpiredCaches(*db);
 
 	// now deserialize the actual message
 	auto received_message = QuackMessage::DeserializeMessage(deserializer, header);

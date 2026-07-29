@@ -4,7 +4,6 @@
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/types/column/column_data_collection.hpp"
-#include "duckdb/common/types/column/column_data_scan_states.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/main/query_result.hpp"
@@ -22,7 +21,6 @@ struct QuackResultCache {
 	    : sql(std::move(sql_p)), query_uuid(query_uuid_p), retained(buffer_manager, std::move(types)),
 	      last_served_at(Timestamp::GetCurrentTimestamp()), live_caches(std::move(live_caches_p)) {
 		D_ASSERT(live_caches);
-		retained.InitializeAppend(append_state);
 		(*live_caches)++;
 	}
 	~QuackResultCache() {
@@ -39,7 +37,6 @@ struct QuackResultCache {
 	hugeint_t query_uuid;
 	//! Chunks retained as they are served, buffer managed so cached data counts against the memory limit
 	ColumnDataCollection retained;
-	ColumnDataAppendState append_state;
 	//! Unproduced remainder of the live result
 	unique_ptr<QueryResult> tail;
 	//! Last time this cache served a batch, anchors the quack_result_ttl expiry clock
