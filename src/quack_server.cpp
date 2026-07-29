@@ -171,8 +171,18 @@ vector<QuackConnectionSnapshot> QuackServer::GetActiveConnectionSnap() {
 	return result;
 }
 
+void QuackServer::RegisterCacheForExpiry(QuackConnection &connection) {
+	if (connection.cache_in_expiry_queue) {
+		// the sweep re-queues the existing slot under the new cache's timestamp once its old snapshot pops
+		return;
+	}
+	connection.cache_in_expiry_queue = true;
+	std::lock_guard<std::mutex> lock(cache_expiry_mutex);
+	cache_expiry_queue.push({connection.result_cache->last_served_at, connection.session_id});
+}
+
 void QuackServer::SweepExpiredCaches(DatabaseInstance &db) {
-	// nothing cached anywhere, we skip the settings lookup and the walk over every connection
+	// nothing cached anywhere, we skip the settings lookup and the expiry queue
 	if (live_caches->load(std::memory_order_relaxed) == 0) {
 		return;
 	}
@@ -180,22 +190,43 @@ void QuackServer::SweepExpiredCaches(DatabaseInstance &db) {
 	if (ttl_micros == 0) {
 		return;
 	}
-	vector<shared_ptr<QuackConnection>> connections;
+	auto now = Timestamp::GetCurrentTimestamp();
+	vector<CacheExpiryEntry> candidates;
 	{
-		std::lock_guard<std::mutex> lock(active_connections_mutex);
-		connections.reserve(active_connections.size());
-		for (auto &entry : active_connections) {
-			connections.push_back(entry.second);
+		std::lock_guard<std::mutex> lock(cache_expiry_mutex);
+		while (!cache_expiry_queue.empty() && now.value - cache_expiry_queue.top().served_at.value > ttl_micros) {
+			candidates.push_back(cache_expiry_queue.top());
+			cache_expiry_queue.pop();
 		}
 	}
-	auto now = Timestamp::GetCurrentTimestamp();
-	for (auto &connection : connections) {
+	vector<CacheExpiryEntry> requeue;
+	for (auto &entry : candidates) {
+		auto connection = GetConnection(entry.session_id);
+		if (!connection) {
+			// disconnected, the cache died with the connection and the slot dies here
+			continue;
+		}
 		std::unique_lock<std::mutex> lock(connection->lock, std::try_to_lock);
 		if (!lock.owns_lock()) {
-			// busy serving a request right now, by definition not idle
+			// busy serving a request right now, by definition not idle; retry on the next sweep
+			requeue.push_back(std::move(entry));
 			continue;
 		}
 		ExpireCacheIfStale(*connection, now, ttl_micros);
+		if (connection->result_cache) {
+			// served (or replaced) since the snapshot was queued, keep the slot under the fresh timestamp
+			entry.served_at = connection->result_cache->last_served_at;
+			requeue.push_back(std::move(entry));
+		} else {
+			connection->cache_in_expiry_queue = false;
+		}
+	}
+	if (requeue.empty()) {
+		return;
+	}
+	std::lock_guard<std::mutex> lock(cache_expiry_mutex);
+	for (auto &entry : requeue) {
+		cache_expiry_queue.push(std::move(entry));
 	}
 }
 
@@ -501,6 +532,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 				                                prepare_request_message.QueryUUID(), types, connection.live_caches);
 				cache->tail = std::move(query_result);
 				connection.result_cache = std::move(cache);
+				RegisterCacheForExpiry(connection);
 			} else {
 				connection.duckdb_query_result = std::move(query_result);
 			}

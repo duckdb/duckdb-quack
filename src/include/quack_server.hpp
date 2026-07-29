@@ -1,5 +1,6 @@
 #pragma once
 
+#include <queue>
 #include <thread>
 
 #include "duckdb/common/atomic.hpp"
@@ -91,6 +92,10 @@ struct QuackConnection {
 		SyncCachedRows();
 	}
 
+	//! True while this connection holds its slot in the server's cache-expiry queue (guarded by `lock`).
+	//! The slot outlives any one cache: the sweep re-queues it while a cache exists and releases it otherwise.
+	bool cache_in_expiry_queue = false;
+
 	//! Stable per-client reconnect key: HMAC-SHA256(server_hmac_key, client_id). Intentionally excludes
 	//! session_id so it stays identical across (re)connections for the same client_id. Empty if no client_id.
 	string client_id_hash;
@@ -114,6 +119,17 @@ struct QuackConnectionSnapshot {
 };
 
 enum class QuackServerState { UNINITIALIZED, WAITING_TO_START, RUNNING, CLOSED };
+
+struct CacheExpiryEntry {
+	timestamp_t served_at;
+	string session_id;
+};
+
+struct CacheExpiresLater {
+	bool operator()(const CacheExpiryEntry &lhs, const CacheExpiryEntry &rhs) const {
+		return lhs.served_at > rhs.served_at;
+	}
+};
 
 class QuackServer {
 public:
@@ -161,8 +177,10 @@ public:
 
 protected:
 	unique_ptr<QuackMessage> HandleMessage(MemoryStream &read_stream);
-	//! Drops caches idle past quack_result_ttl on every connection whose lock is free, runs on any inbound message
+	//! Drops caches idle past quack_result_ttl, runs on any inbound message.
 	void SweepExpiredCaches(DatabaseInstance &db);
+	//! Give `connection` its expiry-queue slot when its cache is created; caller must hold connection.lock.
+	void RegisterCacheForExpiry(QuackConnection &connection);
 	unique_ptr<QuackMessage> HandleMessageInternal(DatabaseInstance &db, QuackMessage &received_message,
 	                                               optional_ptr<QuackConnection> connection);
 
@@ -173,6 +191,9 @@ protected:
 	mutex active_connections_mutex;
 	unordered_map<string, shared_ptr<QuackConnection>> active_connections;
 	shared_ptr<atomic<idx_t>> live_caches = make_shared_ptr<atomic<idx_t>>(0);
+	//! Min-heap of the expiry-queue slots, at most one per connection with a cache
+	mutex cache_expiry_mutex;
+	std::priority_queue<CacheExpiryEntry, vector<CacheExpiryEntry>, CacheExpiresLater> cache_expiry_queue;
 
 	mutex session_id_rng_mutex;
 	shared_ptr<EncryptionState> session_id_rng;
