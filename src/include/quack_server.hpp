@@ -177,7 +177,7 @@ public:
 
 protected:
 	unique_ptr<QuackMessage> HandleMessage(MemoryStream &read_stream);
-	//! Drops caches idle past quack_result_ttl, runs on any inbound message.
+	//! Drops caches idle past quack_result_ttl
 	void SweepExpiredCaches(DatabaseInstance &db);
 	//! Give `connection` its expiry-queue slot when its cache is created; caller must hold connection.lock.
 	void RegisterCacheForExpiry(QuackConnection &connection);
@@ -199,6 +199,10 @@ protected:
 	shared_ptr<EncryptionState> session_id_rng;
 
 	QuackUri uri;
+
+private:
+	//! Destroys reaped caches on a one-shot detached thread so no response waits on their teardown
+	void DestroyCachesDetached(vector<unique_ptr<QuackResultCache>> doomed);
 
 private:
 	string token;

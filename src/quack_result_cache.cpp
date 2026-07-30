@@ -70,19 +70,21 @@ int64_t ResultTtlMicros(DatabaseInstance &db) {
 	return NumericCast<int64_t>(ttl_seconds) * Interval::MICROS_PER_SEC;
 }
 
-void ExpireCacheIfStale(QuackConnection &connection, timestamp_t now, int64_t ttl_micros) {
+unique_ptr<QuackResultCache> ExpireCacheIfStale(QuackConnection &connection, timestamp_t now, int64_t ttl_micros) {
 	auto &cache = connection.result_cache;
 	if (!cache || ttl_micros == 0) {
-		return;
+		return nullptr;
 	}
 	if (now.value - cache->last_served_at.value <= ttl_micros) {
-		return;
+		return nullptr;
 	}
 	// an expired unfinished stream must fail loudly on later fetches instead of silently truncating
 	if (cache->query_uuid == connection.query_uuid && cache->tail) {
 		connection.query_state = QuackQueryState::CANCELLED;
 	}
+	auto doomed = std::move(connection.result_cache);
 	connection.ClearResultCache();
+	return doomed;
 }
 
 bool HasMoreResults(QuackConnection &connection) {

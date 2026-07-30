@@ -52,8 +52,9 @@ idx_t CacheMaxRows(DatabaseInstance &db);
 //! quack_result_ttl in microseconds (0 = caches never expire)
 int64_t ResultTtlMicros(DatabaseInstance &db);
 
-//! Drops the cache once idle past the TTL, failing an unfinished stream like a cancelled query.
-void ExpireCacheIfStale(QuackConnection &connection, timestamp_t now, int64_t ttl_micros);
+//! Detaches the cache once idle past the TTL, failing an unfinished stream like a cancelled query.
+//! Returns the doomed cache (null if kept) so the caller can destroy it off the request path.
+unique_ptr<QuackResultCache> ExpireCacheIfStale(QuackConnection &connection, timestamp_t now, int64_t ttl_micros);
 
 //! True while the connection's active query still has unserved chunks (cached or live).
 bool HasMoreResults(QuackConnection &connection);

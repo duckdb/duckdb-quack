@@ -152,7 +152,25 @@ QuackServer::QuackServer(ClientContext &context_p, const QuackUri &uri_p, const 
 QuackServer::~QuackServer() {
 }
 
+void QuackServer::DestroyCachesDetached(vector<unique_ptr<QuackResultCache>> doomed) {
+	if (doomed.empty()) {
+		return;
+	}
+	auto db = db_ptr.lock();
+	if (!db) {
+		// database teardown, destroy inline as this scope ends
+		return;
+	}
+	// the thread owns only the doomed caches (plus the db keeping their buffers valid), never the server
+	std::thread([db = std::move(db), doomed = std::move(doomed)] {}).detach();
+}
+
 vector<QuackConnectionSnapshot> QuackServer::GetActiveConnectionSnap() {
+	auto db = db_ptr.lock();
+	if (db) {
+		// reap first so an expired-but-unswept cache is never reported as live
+		SweepExpiredCaches(*db);
+	}
 	vector<QuackConnectionSnapshot> result;
 	std::lock_guard<std::mutex> lock(active_connections_mutex);
 	for (auto &[id, conn] : active_connections) {
@@ -200,6 +218,7 @@ void QuackServer::SweepExpiredCaches(DatabaseInstance &db) {
 		}
 	}
 	vector<CacheExpiryEntry> requeue;
+	vector<unique_ptr<QuackResultCache>> doomed;
 	for (auto &entry : candidates) {
 		auto connection = GetConnection(entry.session_id);
 		if (!connection) {
@@ -212,7 +231,10 @@ void QuackServer::SweepExpiredCaches(DatabaseInstance &db) {
 			requeue.push_back(std::move(entry));
 			continue;
 		}
-		ExpireCacheIfStale(*connection, now, ttl_micros);
+		auto expired = ExpireCacheIfStale(*connection, now, ttl_micros);
+		if (expired) {
+			doomed.push_back(std::move(expired));
+		}
 		if (connection->result_cache) {
 			// served (or replaced) since the snapshot was queued, keep the slot under the fresh timestamp
 			entry.served_at = connection->result_cache->last_served_at;
@@ -221,13 +243,13 @@ void QuackServer::SweepExpiredCaches(DatabaseInstance &db) {
 			connection->cache_in_expiry_queue = false;
 		}
 	}
-	if (requeue.empty()) {
-		return;
+	if (!requeue.empty()) {
+		std::lock_guard<std::mutex> lock(cache_expiry_mutex);
+		for (auto &entry : requeue) {
+			cache_expiry_queue.push(std::move(entry));
+		}
 	}
-	std::lock_guard<std::mutex> lock(cache_expiry_mutex);
-	for (auto &entry : requeue) {
-		cache_expiry_queue.push(std::move(entry));
-	}
+	DestroyCachesDetached(std::move(doomed));
 }
 
 shared_ptr<QuackConnection> QuackServer::GetConnection(const string &connection_id) {
@@ -414,7 +436,6 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
 		}
 	}
 
-	// any inbound traffic reaps result caches whose TTL has lapsed, across all connections
 	SweepExpiredCaches(*db);
 
 	// now deserialize the actual message
