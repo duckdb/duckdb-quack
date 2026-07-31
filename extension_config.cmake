@@ -11,9 +11,7 @@ duckdb_extension_load(autocomplete)
 
 duckdb_extension_load(httpfs
     GIT_URL https://github.com/duckdb/duckdb-httpfs
-    # Includes the curl per-read timeout fix (duckdb-httpfs#336): stalled transfers abort via
-    # CURLOPT_LOW_SPEED_* instead of hanging forever / requiring a huge total-transfer timeout.
-    # Newest commit before the 2026-07-30 directory restructure. No APPLY_PATCHES: the carried
-    # patches (prefetch network cost model etc.) were absorbed upstream on 2026-07-03.
-    GIT_TAG a6352ca0a4bec678008133cd41edb13e6465fa88
+    # httpfs main as of 2026-07-31, including the large 2026-07-30 restructure/reimplementation
+    # and the curl per-read timeout fix (duckdb-httpfs#336).
+    GIT_TAG fafb14f2c899ddfd1998f8adf2e07fbbfd28b3fd
 )
