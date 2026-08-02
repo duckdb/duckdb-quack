@@ -31,6 +31,12 @@ attach {server} as rpc_remote (remote_catalog 'remote_db')
 statement ok
 create schema rpc_remote.new_schema;
 
+statement ok
+create table rpc_remote.new_schema.tbl (id integer);
+
+statement ok
+drop table rpc_remote.new_schema.tbl;
+
 query II
 from rpc_remote.shared.tbl;
 ----

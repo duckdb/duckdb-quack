@@ -151,7 +151,10 @@ optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateType(CatalogTransactio
 
 void QuackSchemaCatalogEntry::DropEntry(ClientContext &context, DropInfo &info_p) {
 	auto drop_info = info_p.Copy();
-	drop_info->SetCatalog(GetInfo()->GetQualifiedName().Catalog());
+	auto &quack_catalog = ParentCatalog().Cast<QuackCatalog>();
+	auto &remote_catalog = quack_catalog.GetRemoteCatalog();
+	drop_info->SetCatalog(remote_catalog.empty() ? GetInfo()->GetQualifiedName().Catalog()
+	                                             : Identifier(remote_catalog));
 	drop_info->SetSchema(name);
 	switch (drop_info->type) {
 	case CatalogType::TABLE_ENTRY:
