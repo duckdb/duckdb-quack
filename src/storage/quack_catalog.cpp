@@ -29,7 +29,7 @@ QuackCatalog::QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri, C
                            const string &token, string client_id, string remote_catalog_p)
     : Catalog(db_p), remote_catalog(std::move(remote_catalog_p)) {
 	// connect to the server
-	client_connection = QuackClient::ConnectToServer(context, server_uri, token, std::move(client_id));
+	client_connection = QuackClient::ConnectToServer(context, server_uri, token, std::move(client_id), remote_catalog);
 
 	// load the entire catalog up-front
 	auto load_info = LoadCatalog(context);

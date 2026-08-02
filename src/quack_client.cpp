@@ -204,7 +204,7 @@ string QuackClient::ResolveClientId(ClientContext &context, optional_ptr<const V
 }
 
 shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &context, const QuackUri &uri,
-                                                               string token, string client_id) {
+                                                               string token, string client_id, string remote_catalog) {
 	// Single choke point for every connection path (ATTACH + quack_query), so a malformed client_id is
 	// rejected here regardless of where it came from.
 	ValidateClientId(client_id);
@@ -227,7 +227,7 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 
 	// submit the connection request
 	auto connection_request_response = client->Request<ConnectionResponseMessage>(
-	    context, make_uniq<ConnectionRequestMessage>(token, std::move(client_id)));
+	    context, make_uniq<ConnectionRequestMessage>(token, std::move(client_id), std::move(remote_catalog)));
 	// Validate the server's selected protocol version before trusting the connection (client speaks QUACK_VERSION).
 	if (connection_request_response->QuackVersion() != QUACK_VERSION) {
 		throw IOException("Incompatible Quack protocol version: server uses %llu, client supports %llu",

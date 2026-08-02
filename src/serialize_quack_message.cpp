@@ -26,6 +26,7 @@ void ConnectionRequestMessage::Serialize(Serializer &serializer) const {
 	serializer.WritePropertyWithDefault<idx_t>(4, "min_supported_quack_version", min_supported_quack_version);
 	serializer.WritePropertyWithDefault<idx_t>(5, "max_supported_quack_version", max_supported_quack_version);
 	serializer.WritePropertyWithDefault<string>(6, "client_id", client_id);
+	serializer.WritePropertyWithDefault<string>(7, "remote_catalog", remote_catalog);
 }
 
 unique_ptr<ConnectionRequestMessage> ConnectionRequestMessage::Deserialize(Deserializer &deserializer) {
@@ -36,6 +37,7 @@ unique_ptr<ConnectionRequestMessage> ConnectionRequestMessage::Deserialize(Deser
 	deserializer.ReadPropertyWithDefault<idx_t>(4, "min_supported_quack_version", result->min_supported_quack_version);
 	deserializer.ReadPropertyWithDefault<idx_t>(5, "max_supported_quack_version", result->max_supported_quack_version);
 	deserializer.ReadPropertyWithDefault<string>(6, "client_id", result->client_id);
+	deserializer.ReadPropertyWithDefault<string>(7, "remote_catalog", result->remote_catalog);
 	return result;
 }
 

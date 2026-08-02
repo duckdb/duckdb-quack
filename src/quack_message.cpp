@@ -175,10 +175,12 @@ unique_ptr<QuackMessage> QuackMessage::DeserializeMessage(BinaryDeserializer &de
 	return result;
 }
 
-ConnectionRequestMessage::ConnectionRequestMessage(const string &auth_string_p, string client_id_p)
+ConnectionRequestMessage::ConnectionRequestMessage(const string &auth_string_p, string client_id_p,
+                                                   string remote_catalog_p)
     : QuackMessage(TYPE), auth_string(auth_string_p), client_id(std::move(client_id_p)),
-      client_duckdb_version(DuckDB::LibraryVersion()), client_platform(DuckDB::Platform()),
-      min_supported_quack_version(QUACK_VERSION), max_supported_quack_version(QUACK_VERSION) {
+      remote_catalog(std::move(remote_catalog_p)), client_duckdb_version(DuckDB::LibraryVersion()),
+      client_platform(DuckDB::Platform()), min_supported_quack_version(QUACK_VERSION),
+      max_supported_quack_version(QUACK_VERSION) {
 }
 
 ConnectionResponseMessage::ConnectionResponseMessage(string connection_id_p)

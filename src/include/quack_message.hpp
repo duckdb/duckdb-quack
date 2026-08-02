@@ -9,7 +9,7 @@
 namespace duckdb {
 
 //! Quack wire-protocol version. Client and server agree on it during the connection handshake.
-static constexpr idx_t QUACK_VERSION = 2;
+static constexpr idx_t QUACK_VERSION = 3;
 
 enum class MessageType : uint8_t {
 	INVALID = 0,
@@ -211,7 +211,8 @@ class ConnectionRequestMessage : public QuackMessage {
 public:
 	static constexpr MessageType TYPE = MessageType::CONNECTION_REQUEST;
 
-	explicit ConnectionRequestMessage(const string &auth_string_p, string client_id_p = {});
+	explicit ConnectionRequestMessage(const string &auth_string_p, string client_id_p = {},
+	                                  string remote_catalog_p = {});
 
 public:
 	const string &AuthString() const {
@@ -219,6 +220,9 @@ public:
 	}
 	const string &ClientId() const {
 		return client_id;
+	}
+	const string &RemoteCatalog() const {
+		return remote_catalog;
 	}
 	const string &ClientVersion() const {
 		return client_duckdb_version;
@@ -242,6 +246,7 @@ protected:
 private:
 	string auth_string;
 	string client_id;
+	string remote_catalog;
 	string client_duckdb_version;
 	string client_platform;
 	idx_t min_supported_quack_version;

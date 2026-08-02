@@ -113,7 +113,8 @@ public:
 	virtual void Close() {};
 
 	shared_ptr<QuackConnection> GetConnection(const string &connection_id);
-	string CreateNewConnection(const string &session_id, const string &client_id_hash = {});
+	string CreateNewConnection(const string &session_id, const string &client_id_hash, const string &remote_catalog,
+	                           ErrorData &error);
 	bool DisconnectConnection(const string &session_id);
 	// TODO need something to destroy connections
 

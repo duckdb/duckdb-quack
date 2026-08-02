@@ -22,11 +22,25 @@ create table remote_db.shared.tbl as values(46, 47);
 statement ok quack_db:quack_server_con
 create view remote_db.shared.v1 as from remote_db.shared.tbl;
 
+statement ok quack_db:quack_server_con
+attach ':memory:' as catalog_a;
+
+statement ok quack_db:quack_server_con
+attach ':memory:' as catalog_b;
+
+statement ok quack_db:quack_server_con
+attach ':memory:' as "catalog-with-dash";
+
 statement ok
 create secret (type quack, token 'asdf')
 
 statement ok
 attach {server} as rpc_remote (remote_catalog 'remote_db')
+
+query T
+from rpc_remote.query('select current_catalog()');
+----
+remote_db
 
 statement ok
 create schema rpc_remote.new_schema;
@@ -60,7 +74,7 @@ from rpc_remote.shared.created order by id;
 49
 
 statement ok
-from rpc_remote.query('create table remote_db.shared.refreshed as select 50 as id');
+from rpc_remote.query('create table shared.refreshed as select 50 as id');
 
 statement ok
 call quack_clear_cache();
@@ -73,9 +87,51 @@ from rpc_remote.shared.refreshed;
 statement ok
 detach rpc_remote;
 
+statement ok
+attach {server} as a (remote_catalog 'catalog_a');
+
+statement ok
+attach {server} as b (remote_catalog 'catalog_b');
+
+query T
+from a.query('select current_catalog()');
+----
+catalog_a
+
+query T
+from b.query('select current_catalog()');
+----
+catalog_b
+
+query T
+from a.query('select current_catalog()');
+----
+catalog_a
+
+statement ok
+attach {server} as plain;
+
+query T
+from plain.query('select current_catalog()');
+----
+memory
+
+query T
+from a.query('select current_catalog()');
+----
+catalog_a
+
+statement ok
+attach {server} as quoted (remote_catalog 'catalog-with-dash');
+
+query T
+from quoted.query('select current_catalog()');
+----
+catalog-with-dash
+
 statement error
 attach {server} as missing (remote_catalog 'missing')
 ----
-Remote catalog "missing" not found
+Failed to select remote catalog "missing"
 
 include test/template/quack_teardown.test_template

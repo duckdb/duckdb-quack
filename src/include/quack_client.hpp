@@ -59,7 +59,7 @@ public:
 	static unique_ptr<QuackClient> GetClient(ClientContext &context, const QuackUri &uri);
 
 	static shared_ptr<QuackClientConnection> ConnectToServer(ClientContext &context, const QuackUri &uri, string token,
-	                                                         string client_id = {});
+	                                                         string client_id = {}, string remote_catalog = {});
 
 	//! Resolve the effective client_id for a new connection
 	static string ResolveClientId(ClientContext &context, optional_ptr<const Value> explicit_value);

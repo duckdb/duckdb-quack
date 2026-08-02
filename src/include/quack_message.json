@@ -240,6 +240,11 @@
         "id": 6,
         "name": "client_id",
         "type": "string"
+      },
+      {
+        "id": 7,
+        "name": "remote_catalog",
+        "type": "string"
       }
     ]
   },

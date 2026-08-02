@@ -178,11 +178,8 @@ shared_ptr<QuackConnection> QuackServer::GetConnection(const string &connection_
 	return nullptr;
 }
 
-string QuackServer::CreateNewConnection(const string &session_id, const string &client_id_hash) {
-	std::lock_guard<std::mutex> lock(active_connections_mutex);
-
-	D_ASSERT(active_connections.find(session_id) == active_connections.end());
-
+string QuackServer::CreateNewConnection(const string &session_id, const string &client_id_hash,
+                                        const string &remote_catalog, ErrorData &error) {
 	auto db = db_ptr.lock();
 	if (!db) {
 		throw InternalException("Database was closed");
@@ -191,8 +188,22 @@ string QuackServer::CreateNewConnection(const string &session_id, const string &
 	new_connection->client_id_hash = client_id_hash;
 	new_connection->duckdb_connection = make_uniq<Connection>(*db);
 	new_connection->duckdb_connection->context->config.enable_progress_bar = false;
+	if (!remote_catalog.empty()) {
+		auto result = new_connection->duckdb_connection->Query("USE " + SQLIdentifier(remote_catalog));
+		if (result->HasError()) {
+			auto use_error = result->GetErrorObject();
+			error = ErrorData(use_error.Type(), StringUtil::Format("Failed to select remote catalog \"%s\": %s",
+			                                                       remote_catalog, use_error.RawMessage()));
+			return string();
+		}
+	}
 	// new_connection->duckdb_connection->context->config.streaming_buffer_size = 10 * 1000000; // 10 MB
-	active_connections[session_id] = std::move(new_connection);
+	std::lock_guard<std::mutex> lock(active_connections_mutex);
+	auto inserted = active_connections.emplace(session_id, std::move(new_connection));
+	if (!inserted.second) {
+		error = ErrorData(ExceptionType::INTERNAL, "Generated a duplicate Quack connection id");
+		return string();
+	}
 	return session_id;
 }
 
@@ -429,7 +440,13 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		if (!connection_request_message.ClientId().empty()) {
 			client_id_hash = ComputeClientHash(server_hmac_key, connection_request_message.ClientId());
 		}
-		return make_uniq<ConnectionResponseMessage>(CreateNewConnection(session_id, client_id_hash));
+		ErrorData connection_error;
+		auto connection_id = CreateNewConnection(session_id, client_id_hash, connection_request_message.RemoteCatalog(),
+		                                         connection_error);
+		if (connection_id.empty()) {
+			return make_uniq<ErrorResponse>(std::move(connection_error));
+		}
+		return make_uniq<ConnectionResponseMessage>(std::move(connection_id));
 	}
 	case MessageType::DISCONNECT_MESSAGE: {
 		auto &connection = *connection_p;
