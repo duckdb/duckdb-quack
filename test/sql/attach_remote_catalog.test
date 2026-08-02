@@ -28,6 +28,9 @@ create secret (type quack, token 'asdf')
 statement ok
 attach {server} as rpc_remote (remote_catalog 'remote_db')
 
+statement ok
+create schema rpc_remote.new_schema;
+
 query II
 from rpc_remote.shared.tbl;
 ----

@@ -126,7 +126,13 @@ const string &QuackCatalog::GetRemoteCatalog() const {
 optional_ptr<CatalogEntry> QuackCatalog::CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) {
 	auto &quack_transaction = QuackTransaction::Get(transaction);
 	// create schema remotely
-	quack_transaction.Query(info.ToString());
+	if (remote_catalog.empty()) {
+		quack_transaction.Query(info.ToString());
+	} else {
+		auto remote_info = info.Copy();
+		remote_info->SetCatalog(Identifier(remote_catalog));
+		quack_transaction.Query(remote_info->ToString());
+	}
 	// register schema locally
 	auto schema_entry = make_uniq<QuackSchemaCatalogEntry>(*this, info);
 	return schemas->CreateEntry(std::move(schema_entry), info.on_conflict);
