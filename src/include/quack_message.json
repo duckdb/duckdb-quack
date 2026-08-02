@@ -149,11 +149,6 @@
         "name": "dead_range_end",
         "type": "optional_idx",
         "default": "optional_idx()"
-      },
-      {
-        "id": 10,
-        "name": "catalog_name",
-        "type": "string"
       }
     ]
   },

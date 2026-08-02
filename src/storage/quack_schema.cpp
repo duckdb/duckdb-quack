@@ -20,8 +20,10 @@ void QuackSchemaSet::Reload(ClientContext &context, QuackCatalog &catalog, const
 	Clear();
 	for (auto &row : load_data.schemas->Rows()) {
 		CreateSchemaInfo info;
-		info.SetQualifiedName(QualifiedName(Identifier(row.GetValue(0).GetValue<string>()),
-		                                    Identifier(row.GetValue(1).GetValue<string>()), Identifier()));
+		auto catalog_name =
+		    catalog.GetRemoteCatalog().empty() ? Identifier(row.GetValue(0).GetValue<string>()) : catalog.GetName();
+		info.SetQualifiedName(
+		    QualifiedName(std::move(catalog_name), Identifier(row.GetValue(1).GetValue<string>()), Identifier()));
 		// TODO this will fail if there are two schemas with the same name in different catalogs :/
 		auto schema = make_uniq<QuackSchemaCatalogEntry>(context, catalog, info, load_data);
 		CreateEntry(std::move(schema), OnCreateConflict::REPLACE_ON_CONFLICT);
@@ -91,24 +93,25 @@ optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateTable(CatalogTransacti
 	auto create_table_info = info.Base().Copy();
 	auto schema_info = GetInfo();
 	auto &quack_catalog = ParentCatalog().Cast<QuackCatalog>();
-	create_table_info->SetCatalog(quack_catalog.GetRemoteCatalog().empty()
-	                                  ? schema_info->GetQualifiedName().Catalog()
-	                                  : Identifier(quack_catalog.GetRemoteCatalog()));
+	create_table_info->SetCatalog(quack_catalog.GetRemoteCatalog().empty() ? schema_info->GetQualifiedName().Catalog()
+	                                                                       : Identifier());
 	create_table_info->SetSchema(schema_info->GetQualifiedName().Schema());
 
 	auto &quack_transaction = QuackTransaction::Get(transaction);
 	quack_transaction.Query(create_table_info->ToString());
-	auto quack_entry = make_uniq<QuackTableCatalogEntry>(catalog, *this, create_table_info->Cast<CreateTableInfo>());
+	auto local_info = info.Base().Copy();
+	auto quack_entry = make_uniq<QuackTableCatalogEntry>(catalog, *this, local_info->Cast<CreateTableInfo>());
 	return tables->CreateEntry(std::move(quack_entry), info.Base().on_conflict);
 }
 
 optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateView(CatalogTransaction transaction, CreateViewInfo &info) {
+	auto &quack_catalog = ParentCatalog().Cast<QuackCatalog>();
+	if (!quack_catalog.GetRemoteCatalog().empty()) {
+		throw NotImplementedException("CREATE VIEW is not supported with REMOTE_CATALOG");
+	}
 	auto create_view_info = info.Copy();
 	auto schema_info = GetInfo();
-	auto &quack_catalog = ParentCatalog().Cast<QuackCatalog>();
-	create_view_info->SetCatalog(quack_catalog.GetRemoteCatalog().empty()
-	                                 ? schema_info->GetQualifiedName().Catalog()
-	                                 : Identifier(quack_catalog.GetRemoteCatalog()));
+	create_view_info->SetCatalog(schema_info->GetQualifiedName().Catalog());
 	create_view_info->SetSchema(schema_info->GetQualifiedName().Schema());
 
 	// create the view verbatim in the serer
@@ -118,7 +121,7 @@ optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateView(CatalogTransactio
 	// locally, override the query with a remote procedure call to ensure the view is evaluated remotely
 	info.sql = QuackViewCatalogEntry::CreateViewSQL(ParentCatalog().GetName().GetIdentifierName(),
 	                                                name.GetIdentifierName(), info.GetViewName().GetIdentifierName(),
-	                                                ParentCatalog().Cast<QuackCatalog>().GetRemoteCatalog());
+	                                                schema_info->GetQualifiedName().Catalog().GetIdentifierName());
 	info.query = CreateViewInfo::ParseSelect(info.sql);
 
 	auto quack_entry = make_uniq<QuackViewCatalogEntry>(catalog, *this, info);
@@ -152,9 +155,8 @@ optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateType(CatalogTransactio
 void QuackSchemaCatalogEntry::DropEntry(ClientContext &context, DropInfo &info_p) {
 	auto drop_info = info_p.Copy();
 	auto &quack_catalog = ParentCatalog().Cast<QuackCatalog>();
-	auto &remote_catalog = quack_catalog.GetRemoteCatalog();
-	drop_info->SetCatalog(remote_catalog.empty() ? GetInfo()->GetQualifiedName().Catalog()
-	                                             : Identifier(remote_catalog));
+	drop_info->SetCatalog(quack_catalog.GetRemoteCatalog().empty() ? GetInfo()->GetQualifiedName().Catalog()
+	                                                               : Identifier());
 	drop_info->SetSchema(name);
 	switch (drop_info->type) {
 	case CatalogType::TABLE_ENTRY:

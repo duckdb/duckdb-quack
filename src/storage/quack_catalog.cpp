@@ -39,9 +39,6 @@ QuackCatalog::QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri, C
 QuackLoadCatalogData QuackCatalog::LoadCatalog(ClientContext &context) {
 	QuackLoadCatalogData result;
 	result.schemas = ExecuteCommandInternal(context, QuackSchemaSet::GetLoadQuery(remote_catalog));
-	if (!remote_catalog.empty() && result.schemas->Count() == 0) {
-		throw BinderException("Remote catalog \"%s\" not found", remote_catalog);
-	}
 	result.tables = ExecuteCommandInternal(context, QuackTableSet::GetLoadQuery(remote_catalog));
 	return result;
 }
@@ -127,7 +124,7 @@ optional_ptr<CatalogEntry> QuackCatalog::CreateSchema(CatalogTransaction transac
 	auto &quack_transaction = QuackTransaction::Get(transaction);
 	auto remote_info = info.Copy();
 	if (!remote_catalog.empty()) {
-		remote_info->SetCatalog(Identifier(remote_catalog));
+		remote_info->SetCatalog(Identifier());
 	}
 	// create schema remotely
 	quack_transaction.Query(remote_info->ToString());
@@ -189,9 +186,6 @@ void QuackCatalog::DropSchema(ClientContext &context, DropInfo &info) {
 }
 
 bool QuackCatalog::SupportsPushdown(const TableRef &ref) {
-	if (!remote_catalog.empty()) {
-		return false;
-	}
 	if (ref.type != TableReferenceType::TABLE_FUNCTION) {
 		return true;
 	}

@@ -219,10 +219,10 @@ static string BuildPushdownQuery(const QuackScanBindData &bind_data, const Table
 	// 		query = "SELECT " + StringUtil::Join(selected_columns, ", ") + " ";
 	// 	}
 	// }
-	auto table_name = StringUtil::Format("%s", SQLIdentifier(bind_data.table_name));
+	auto table_name =
+	    StringUtil::Format("%s.%s", SQLIdentifier(bind_data.schema_name), SQLIdentifier(bind_data.table_name));
 	if (!bind_data.catalog_name.empty()) {
-		table_name = StringUtil::Format("%s.%s.%s", SQLIdentifier(bind_data.catalog_name),
-		                                SQLIdentifier(bind_data.schema_name), table_name);
+		table_name = StringUtil::Format("%s.%s", SQLIdentifier(bind_data.catalog_name), table_name);
 	}
 	query += StringUtil::Format("FROM %s", table_name);
 	//

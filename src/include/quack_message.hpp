@@ -335,12 +335,10 @@ class SendDataRequestMessage : public QuackMessage {
 public:
 	static constexpr MessageType TYPE = MessageType::SEND_DATA_REQUEST;
 
-	explicit SendDataRequestMessage(string connection_id_p, string catalog_name_p, string schema_name_p,
-	                                string table_name_p, vector<unique_ptr<DataChunkWrapper>> chunks_p,
-	                                hugeint_t query_uuid_p)
-	    : QuackMessage(TYPE, std::move(connection_id_p)), catalog_name(std::move(catalog_name_p)),
-	      schema_name(std::move(schema_name_p)), table_name(std::move(table_name_p)), chunks(std::move(chunks_p)),
-	      query_uuid(query_uuid_p) {
+	explicit SendDataRequestMessage(string connection_id_p, string schema_name_p, string table_name_p,
+	                                vector<unique_ptr<DataChunkWrapper>> chunks_p, hugeint_t query_uuid_p)
+	    : QuackMessage(TYPE, std::move(connection_id_p)), schema_name(std::move(schema_name_p)),
+	      table_name(std::move(table_name_p)), chunks(std::move(chunks_p)), query_uuid(query_uuid_p) {
 	}
 
 	void Serialize(Serializer &serializer) const override;
@@ -375,9 +373,6 @@ public:
 	const string &SchemaName() const {
 		return schema_name;
 	}
-	const string &CatalogName() const {
-		return catalog_name;
-	}
 	const string &TableName() const {
 		return table_name;
 	}
@@ -402,7 +397,6 @@ protected:
 	}
 
 private:
-	string catalog_name;
 	string schema_name;
 	string table_name;
 	vector<unique_ptr<DataChunkWrapper>> chunks;

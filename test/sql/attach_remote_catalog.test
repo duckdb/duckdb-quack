@@ -61,6 +61,11 @@ from rpc_remote.shared.v1;
 ----
 46	47
 
+statement error
+create view rpc_remote.shared.created_view as from rpc_remote.shared.tbl;
+----
+CREATE VIEW is not supported with REMOTE_CATALOG
+
 statement ok
 create table rpc_remote.shared.created as select 48 as id;
 

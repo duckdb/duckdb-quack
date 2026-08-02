@@ -8,11 +8,11 @@ QuackViewCatalogEntry::QuackViewCatalogEntry(Catalog &catalog_p, SchemaCatalogEn
 }
 
 string QuackViewCatalogEntry::CreateViewSQL(const string &catalog_name, const string &schema_name,
-                                            const string &view_name, const string &remote_catalog) {
+                                            const string &view_name, const string &server_catalog) {
 	//! This SQL will always be "FROM quack_query({catalog}, 'FROM {view_name}');"
 	auto remote_sql = StringUtil::Format("FROM %s.%s", SQLIdentifier(schema_name), SQLIdentifier(view_name));
-	if (!remote_catalog.empty()) {
-		remote_sql = StringUtil::Format("FROM %s.%s.%s", SQLIdentifier(remote_catalog), SQLIdentifier(schema_name),
+	if (!server_catalog.empty()) {
+		remote_sql = StringUtil::Format("FROM %s.%s.%s", SQLIdentifier(server_catalog), SQLIdentifier(schema_name),
 		                                SQLIdentifier(view_name));
 	}
 	return StringUtil::Format("FROM quack_query_by_name(%s, %s)", SQLString(catalog_name), SQLString(remote_sql));

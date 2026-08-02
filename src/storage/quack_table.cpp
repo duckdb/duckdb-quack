@@ -39,6 +39,10 @@ QuackTableSet::QuackTableSet(ClientContext &context, QuackSchemaCatalogEntry &pa
 			if (info->type != CatalogType::TABLE_ENTRY) {
 				throw InternalException("Expected a CREATE TABLE");
 			}
+			if (!catalog.GetRemoteCatalog().empty()) {
+				info->SetCatalog(catalog.GetName());
+				info->SetSchema(schema.name);
+			}
 			// bind to resolve the types
 			auto binder = Binder::CreateBinder(context);
 			auto bound_info = binder->BindCreateTableInfo(std::move(info), schema);
@@ -50,9 +54,11 @@ QuackTableSet::QuackTableSet(ClientContext &context, QuackSchemaCatalogEntry &pa
 			// we don't actually care what the view contains server-side, we just treat it like an opaque object we can
 			// query
 			CreateViewInfo info(schema, Identifier(view_name));
+			auto server_catalog = catalog.GetRemoteCatalog().empty()
+			                          ? schema.GetInfo()->GetQualifiedName().Catalog().GetIdentifierName()
+			                          : string();
 			info.sql = QuackViewCatalogEntry::CreateViewSQL(catalog.GetName().GetIdentifierName(),
-			                                                schema.name.GetIdentifierName(), view_name,
-			                                                catalog.GetRemoteCatalog());
+			                                                schema.name.GetIdentifierName(), view_name, server_catalog);
 			info.query = CreateViewInfo::ParseSelect(info.sql);
 
 			// bind to resolve the types
@@ -88,7 +94,9 @@ TableFunction QuackTableCatalogEntry::GetScanFunction(ClientContext &context, un
 	bind_data->client_connection = quack_catalog.GetClientConnection();
 	bind_data->table_name = name.GetIdentifierName();
 	bind_data->schema_name = schema.name.GetIdentifierName();
-	bind_data->catalog_name = quack_catalog.GetRemoteCatalog();
+	if (quack_catalog.GetRemoteCatalog().empty()) {
+		bind_data->catalog_name = schema.GetInfo()->GetQualifiedName().Catalog().GetIdentifierName();
+	}
 	for (auto &col : GetColumns().Physical()) {
 		bind_data->column_names.emplace_back(col.Name());
 		bind_data->column_types.push_back(col.Type());
