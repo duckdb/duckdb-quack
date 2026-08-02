@@ -30,6 +30,9 @@ QuackCatalog::QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri, C
     : Catalog(db_p), remote_catalog(std::move(remote_catalog_p)) {
 	// connect to the server
 	client_connection = QuackClient::ConnectToServer(context, server_uri, token, std::move(client_id), remote_catalog);
+	// The server resolves identifiers case-insensitively and returns the stored spelling. Use that canonical
+	// value for system-catalog discovery, whose result strings retain their original case.
+	remote_catalog = client_connection->RemoteCatalog();
 
 	// load the entire catalog up-front
 	auto load_info = LoadCatalog(context);

@@ -31,11 +31,43 @@ attach ':memory:' as catalog_b;
 statement ok quack_db:quack_server_con
 attach ':memory:' as "catalog-with-dash";
 
+# A schema name is not a valid REMOTE_CATALOG unless it also names an attached catalog.
+statement ok quack_db:quack_server_con
+create schema schema_only;
+
+# Catalog lookup is case-insensitive but must retain the catalog's stored spelling for discovery.
+statement ok quack_db:quack_server_con
+attach ':memory:' as "MixedCase";
+
+statement ok quack_db:quack_server_con
+create table "MixedCase".main.tbl as values(61);
+
+# A schema and an attached catalog can have the same identifier. REMOTE_CATALOG must choose the catalog.
+statement ok quack_db:quack_server_con
+create schema ambiguous;
+
+statement ok quack_db:quack_server_con
+attach ':memory:' as ambiguous;
+
+statement ok quack_db:quack_server_con
+create table ambiguous.main.tbl as values(71);
+
 statement ok
 create secret (type quack, token 'asdf')
 
 statement ok
 attach {server} as rpc_remote (remote_catalog 'remote_db')
+
+query T
+from rpc_remote.query('select current_catalog()');
+----
+remote_db
+
+# query() rejects commands without columns, but those commands must not permanently move the server session.
+statement error
+from rpc_remote.query('use catalog_b');
+----
+Query did not return any columns
 
 query T
 from rpc_remote.query('select current_catalog()');
@@ -135,8 +167,53 @@ from quoted.query('select current_catalog()');
 catalog-with-dash
 
 statement error
+attach {server} as schema_only_remote (remote_catalog 'schema_only')
+----
+Failed to select remote catalog "schema_only": catalog is not attached
+
+statement ok
+attach {server} as mixed_case (remote_catalog 'mixedcase');
+
+query I
+from mixed_case.main.tbl;
+----
+61
+
+statement ok
+attach {server} as ambiguous_remote (remote_catalog 'ambiguous');
+
+query I
+from ambiguous_remote.main.tbl;
+----
+71
+
+# Authorization callbacks retain their two-argument signature, but can now recover the pinned catalog by
+# connection id. The same SQL is allowed in catalog_a and denied in catalog_b.
+statement ok quack_db:quack_server_con
+create macro catalog_a_only(sid, sql) as (
+    select exists (
+        select 1 from quack_active_connections() connections
+        where connections.connection_id = sid and connections.remote_catalog = 'catalog_a'
+    )
+);
+
+statement ok quack_db:quack_server_con
+set quack_authorization_function = 'catalog_a_only';
+
+statement ok
+attach {server} as authorized_a (remote_catalog 'catalog_a');
+
+statement error
+attach {server} as denied_b (remote_catalog 'catalog_b');
+----
+Authorization failed
+
+statement ok quack_db:quack_server_con
+reset global quack_authorization_function;
+
+statement error
 attach {server} as missing (remote_catalog 'missing')
 ----
-Failed to select remote catalog "missing"
+Failed to select remote catalog "missing": catalog is not attached
 
 include test/template/quack_teardown.test_template

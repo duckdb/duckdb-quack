@@ -260,6 +260,11 @@
         "id": 3,
         "name": "quack_version",
         "type": "idx_t"
+      },
+      {
+        "id": 4,
+        "name": "remote_catalog",
+        "type": "string"
       }
     ]
   },

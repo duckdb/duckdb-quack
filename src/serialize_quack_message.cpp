@@ -45,6 +45,7 @@ void ConnectionResponseMessage::Serialize(Serializer &serializer) const {
 	serializer.WritePropertyWithDefault<string>(1, "server_duckdb_version", server_duckdb_version);
 	serializer.WritePropertyWithDefault<string>(2, "server_platform", server_platform);
 	serializer.WritePropertyWithDefault<idx_t>(3, "quack_version", quack_version);
+	serializer.WritePropertyWithDefault<string>(4, "remote_catalog", remote_catalog);
 }
 
 unique_ptr<ConnectionResponseMessage> ConnectionResponseMessage::Deserialize(Deserializer &deserializer) {
@@ -52,6 +53,7 @@ unique_ptr<ConnectionResponseMessage> ConnectionResponseMessage::Deserialize(Des
 	deserializer.ReadPropertyWithDefault<string>(1, "server_duckdb_version", result->server_duckdb_version);
 	deserializer.ReadPropertyWithDefault<string>(2, "server_platform", result->server_platform);
 	deserializer.ReadPropertyWithDefault<idx_t>(3, "quack_version", result->quack_version);
+	deserializer.ReadPropertyWithDefault<string>(4, "remote_catalog", result->remote_catalog);
 	return result;
 }
 

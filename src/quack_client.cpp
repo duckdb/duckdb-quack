@@ -161,9 +161,9 @@ unique_ptr<QuackClient> QuackClient::GetClient(ClientContext &context, const Qua
 }
 
 QuackClientConnection::QuackClientConnection(unique_ptr<QuackClient> client_p, QuackUri uri_p, string connection_id_p,
-                                             idx_t max_connections_cached_p)
+                                             idx_t max_connections_cached_p, string remote_catalog_p)
     : uri(std::move(uri_p)), connection_id(std::move(connection_id_p)),
-      max_connections_cached(max_connections_cached_p) {
+      remote_catalog(std::move(remote_catalog_p)), max_connections_cached(max_connections_cached_p) {
 	if (client_p) {
 		StoreClient(std::move(client_p));
 	}
@@ -238,7 +238,8 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 	// Cache at most one client per async send slot: pending SEND_DATA tasks can check out far more
 	// clients than ever POST concurrently, and each cached client pins a server connection slot.
 	idx_t pool_size = MaxValue<idx_t>(1, (idx_t)TaskScheduler::GetScheduler(context).NumberOfAsyncThreads());
-	return make_shared_ptr<QuackClientConnection>(std::move(client), uri, std::move(connection_id), pool_size);
+	return make_shared_ptr<QuackClientConnection>(std::move(client), uri, std::move(connection_id), pool_size,
+	                                              connection_request_response->RemoteCatalog());
 }
 
 unique_ptr<QuackClientWrapper> QuackClientConnection::GetClient(ClientContext &context) const {

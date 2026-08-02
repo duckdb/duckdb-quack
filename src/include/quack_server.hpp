@@ -73,6 +73,8 @@ struct QuackConnection {
 	//! Current query UUID
 	hugeint_t query_uuid;
 	string session_id;
+	//! Canonical remote catalog selected during the handshake. Empty for an unpinned connection.
+	string remote_catalog;
 
 	//! Stable per-client reconnect key: HMAC-SHA256(server_hmac_key, client_id). Intentionally excludes
 	//! session_id so it stays identical across (re)connections for the same client_id. Empty if no client_id.
@@ -89,6 +91,7 @@ struct QuackConnectionSnapshot {
 	string server_id;
 	string session_id;
 	string client_id_hash;
+	string remote_catalog;
 	string sql_query;
 	QuackQueryState query_state = QuackQueryState::IDLE;
 	timestamp_t query_started_at {0};

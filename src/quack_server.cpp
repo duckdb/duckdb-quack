@@ -3,8 +3,12 @@
 #include "duckdb/common/types/blob.hpp"
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/client_data.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/database_manager.hpp"
+#include "duckdb/main/attached_database.hpp"
+#include "duckdb/catalog/catalog_search_path.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/storage/temporary_file_manager.hpp"
 #include "duckdb/common/serializer/binary_deserializer.hpp"
@@ -103,12 +107,39 @@ QuackConnection::~QuackConnection() {
 	duckdb_query_result.reset();
 }
 
+//! Restore the connection's pinned catalog without parsing a USE statement. Looking the catalog up through
+//! DatabaseManager ensures a schema-only name cannot be mistaken for a catalog and preserves its stored casing.
+static bool RestoreRemoteCatalog(QuackConnection &connection, ErrorData &error) {
+	if (connection.remote_catalog.empty()) {
+		return true;
+	}
+	auto &context = *connection.duckdb_connection->context;
+	auto database = DatabaseManager::Get(context).GetDatabase(context, Identifier(connection.remote_catalog));
+	if (!database) {
+		error = ErrorData(ExceptionType::INVALID_INPUT,
+		                  StringUtil::Format("Failed to select remote catalog \"%s\": catalog is not attached",
+		                                     connection.remote_catalog));
+		return false;
+	}
+	connection.remote_catalog = database->GetName().GetIdentifierName();
+	ClientData::Get(context).catalog_search_path->Set(
+	    CatalogSearchEntry(database->GetName(), Identifier(database->GetCatalog().GetDefaultSchema())),
+	    CatalogSetPathType::SET_DIRECTLY);
+	return true;
+}
+
 //! Background thread: runs the INSERT that drains `stream` via scan_data_from_quack_client, holding
 //! the connection lock for the statement's duration (one transactional statement -> atomic).
 static void RunInsertStatement(QuackConnection &connection, shared_ptr<QuackDataStream> stream, string stream_id,
                                string schema_name, string table_name) {
 	try {
 		unique_lock<mutex> lock(connection.lock);
+		ErrorData catalog_error;
+		if (!RestoreRemoteCatalog(connection, catalog_error)) {
+			stream->SetError(std::move(catalog_error));
+			stream->Finish();
+			return;
+		}
 		auto target = StringUtil::Format("%s.%s", SQLIdentifier(schema_name), SQLIdentifier(table_name));
 		auto sql = StringUtil::Format("INSERT INTO %s SELECT * FROM scan_data_from_quack_client(%s)", target,
 		                              SQLString(stream_id));
@@ -158,6 +189,7 @@ vector<QuackConnectionSnapshot> QuackServer::GetActiveConnectionSnap() {
 		QuackConnectionSnapshot snapshot;
 		snapshot.session_id = conn->session_id;
 		snapshot.client_id_hash = conn->client_id_hash;
+		snapshot.remote_catalog = conn->remote_catalog;
 		snapshot.sql_query = conn->sql_query;
 		snapshot.query_state = conn->query_state;
 		snapshot.query_started_at = conn->query_started_at;
@@ -186,11 +218,8 @@ string QuackServer::CreateNewConnection(const string &session_id, const string &
 	new_connection->duckdb_connection = make_uniq<Connection>(*db);
 	new_connection->duckdb_connection->context->config.enable_progress_bar = false;
 	if (!remote_catalog.empty()) {
-		auto result = new_connection->duckdb_connection->Query("USE " + SQLIdentifier(remote_catalog));
-		if (result->HasError()) {
-			auto use_error = result->GetErrorObject();
-			error = ErrorData(use_error.Type(), StringUtil::Format("Failed to select remote catalog \"%s\": %s",
-			                                                       remote_catalog, use_error.RawMessage()));
+		new_connection->remote_catalog = remote_catalog;
+		if (!RestoreRemoteCatalog(*new_connection, error)) {
 			return string();
 		}
 	}
@@ -443,7 +472,9 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		if (connection_id.empty()) {
 			return make_uniq<ErrorResponse>(std::move(connection_error));
 		}
-		return make_uniq<ConnectionResponseMessage>(std::move(connection_id));
+		auto connection = GetConnection(connection_id);
+		D_ASSERT(connection);
+		return make_uniq<ConnectionResponseMessage>(std::move(connection_id), connection->remote_catalog);
 	}
 	case MessageType::DISCONNECT_MESSAGE: {
 		auto &connection = *connection_p;
@@ -473,6 +504,12 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		unique_ptr<QueryResult> stale_result;
 		std::unique_lock<std::mutex> lock(connection.lock);
 		stale_result = std::move(connection.duckdb_query_result);
+		ErrorData catalog_error;
+		if (!RestoreRemoteCatalog(connection, catalog_error)) {
+			connection.sql_query = "";
+			connection.query_state = QuackQueryState::QUACK_ERROR;
+			return make_uniq<ErrorResponse>(std::move(catalog_error));
+		}
 		connection.sql_query = prepare_request_message.Query();
 		connection.query_state = QuackQueryState::ACTIVE;
 		connection.query_started_at = Timestamp::GetCurrentTimestamp();
@@ -484,7 +521,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 				auto response = make_uniq<ErrorResponse>(query_result->GetErrorObject());
 				connection.duckdb_query_result.reset();
 				connection.query_state = QuackQueryState::CANCELLED;
-				return response;
+				return std::move(response);
 			}
 			if (query_result->names.empty()) {
 				connection.sql_query = "";

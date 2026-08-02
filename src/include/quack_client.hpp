@@ -86,7 +86,7 @@ private:
 class QuackClientConnection : public enable_shared_from_this<QuackClientConnection> {
 public:
 	explicit QuackClientConnection(unique_ptr<QuackClient> client_p, QuackUri uri_p, string connection_id_p,
-	                               idx_t max_connections_cached = 1);
+	                               idx_t max_connections_cached = 1, string remote_catalog_p = {});
 	~QuackClientConnection();
 
 	void CancelQuery(hugeint_t query_uuid);
@@ -97,6 +97,9 @@ public:
 	const QuackUri &ServerURI() const {
 		return uri;
 	}
+	const string &RemoteCatalog() const {
+		return remote_catalog;
+	}
 
 	//! Get a client (either a cached one, or open a new one if required)
 	unique_ptr<QuackClientWrapper> GetClient(ClientContext &context) const;
@@ -106,6 +109,7 @@ public:
 private:
 	QuackUri uri;
 	string connection_id;
+	string remote_catalog;
 	mutable mutex lock;
 	//! Bounds cached_clients: each cached client holds a persistent socket that pins a server
 	//! connection slot, so an unbounded cache would let one attach starve the server's budget.

@@ -183,9 +183,9 @@ ConnectionRequestMessage::ConnectionRequestMessage(const string &auth_string_p, 
       max_supported_quack_version(QUACK_VERSION) {
 }
 
-ConnectionResponseMessage::ConnectionResponseMessage(string connection_id_p)
+ConnectionResponseMessage::ConnectionResponseMessage(string connection_id_p, string remote_catalog_p)
     : QuackMessage(TYPE, std::move(connection_id_p)), server_duckdb_version(DuckDB::LibraryVersion()),
-      server_platform(DuckDB::Platform()), quack_version(QUACK_VERSION) {
+      server_platform(DuckDB::Platform()), quack_version(QUACK_VERSION), remote_catalog(std::move(remote_catalog_p)) {
 }
 
 unique_ptr<QuackMessage> QuackMessage::FromMemoryStream(MemoryStream &read_stream) {

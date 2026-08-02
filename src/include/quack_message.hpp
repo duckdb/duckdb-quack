@@ -257,7 +257,7 @@ class ConnectionResponseMessage : public QuackMessage {
 public:
 	static constexpr MessageType TYPE = MessageType::CONNECTION_RESPONSE;
 
-	explicit ConnectionResponseMessage(string connection_id_p);
+	explicit ConnectionResponseMessage(string connection_id_p, string remote_catalog_p = {});
 
 protected:
 	ConnectionResponseMessage() : QuackMessage(TYPE) {
@@ -273,6 +273,9 @@ public:
 	idx_t QuackVersion() const {
 		return quack_version;
 	}
+	const string &RemoteCatalog() const {
+		return remote_catalog;
+	}
 
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<ConnectionResponseMessage> Deserialize(Deserializer &deserializer);
@@ -281,6 +284,7 @@ private:
 	string server_duckdb_version;
 	string server_platform;
 	idx_t quack_version;
+	string remote_catalog;
 };
 
 class FetchRequestMessage : public QuackMessage {
