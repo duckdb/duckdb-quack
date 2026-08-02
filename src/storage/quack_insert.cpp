@@ -177,9 +177,9 @@ static void SendChunks(ClientContext &context, const QuackInsert &insert, QuackI
 		wrappers.push_back(make_uniq<DataChunkWrapper>(*chunk));
 	}
 
-	auto send_msg =
-	    make_uniq<SendDataRequestMessage>(quack_catalog.GetConnectionId(), tbl.schema.name.GetIdentifierName(),
-	                                      tbl.name.GetIdentifierName(), std::move(wrappers), gstate.query_uuid);
+	auto send_msg = make_uniq<SendDataRequestMessage>(quack_catalog.GetConnectionId(), quack_catalog.GetRemoteCatalog(),
+	                                                  tbl.schema.name.GetIdentifierName(), tbl.name.GetIdentifierName(),
+	                                                  std::move(wrappers), gstate.query_uuid);
 
 	switch (insert.order_mode) {
 	case AppendOrderMode::PARALLEL_ORDERED: {
@@ -222,7 +222,7 @@ static void SendDeadRange(ClientContext &context, QuackInsertGlobalState &gstate
 	auto &tbl = gstate.table;
 	auto &quack_catalog = tbl.catalog.Cast<QuackCatalog>();
 
-	auto send_msg = make_uniq<SendDataRequestMessage>(quack_catalog.GetConnectionId(),
+	auto send_msg = make_uniq<SendDataRequestMessage>(quack_catalog.GetConnectionId(), quack_catalog.GetRemoteCatalog(),
 	                                                  tbl.schema.name.GetIdentifierName(), tbl.name.GetIdentifierName(),
 	                                                  vector<unique_ptr<DataChunkWrapper>>(), gstate.query_uuid);
 	send_msg->SetDeadRange(lo, hi);

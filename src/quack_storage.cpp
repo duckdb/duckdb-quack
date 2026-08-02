@@ -103,7 +103,15 @@ static unique_ptr<Catalog> QuackAttach(optional_ptr<StorageExtensionInfo> storag
 	auto client_id_entry = attach_options.options.find("client_id");
 	auto client_id = QuackClient::ResolveClientId(
 	    context, client_id_entry != attach_options.options.end() ? &client_id_entry->second : nullptr);
-	return make_uniq<QuackCatalog>(db, QuackUri(uri, enable_ssl), context, token, std::move(client_id));
+	string remote_catalog;
+	if (attach_options.options.find("remote_catalog") != attach_options.options.end()) {
+		remote_catalog = attach_options.options["remote_catalog"].GetValue<string>();
+		if (remote_catalog.empty()) {
+			throw InvalidInputException("REMOTE_CATALOG cannot be empty");
+		}
+	}
+	return make_uniq<QuackCatalog>(db, QuackUri(uri, enable_ssl), context, token, std::move(client_id),
+	                               std::move(remote_catalog));
 }
 
 static unique_ptr<TransactionManager> QuackCreateTransactionManager(optional_ptr<StorageExtensionInfo> storage_info,

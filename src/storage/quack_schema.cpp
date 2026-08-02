@@ -28,13 +28,16 @@ void QuackSchemaSet::Reload(ClientContext &context, QuackCatalog &catalog, const
 	}
 }
 
-string QuackSchemaSet::GetLoadQuery() {
-	return R"(
+string QuackSchemaSet::GetLoadQuery(const string &remote_catalog) {
+	return StringUtil::Format(R"(
 SELECT catalog_name, schema_name
 FROM information_schema.schemata
-WHERE catalog_name NOT IN ('system', 'temp')
+WHERE %s
 ORDER BY ALL
-	)";
+	)",
+	                          remote_catalog.empty()
+	                              ? "catalog_name NOT IN ('system', 'temp')"
+	                              : StringUtil::Format("catalog_name = %s", SQLString(remote_catalog)));
 }
 
 QuackSchemaCatalogEntry::QuackSchemaCatalogEntry(Catalog &catalog_p, CreateSchemaInfo &info_p)
@@ -87,7 +90,10 @@ optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateTable(CatalogTransacti
                                                                 BoundCreateTableInfo &info) {
 	auto create_table_info = info.Base().Copy();
 	auto schema_info = GetInfo();
-	create_table_info->SetCatalog(schema_info->GetQualifiedName().Catalog());
+	auto &quack_catalog = ParentCatalog().Cast<QuackCatalog>();
+	create_table_info->SetCatalog(quack_catalog.GetRemoteCatalog().empty()
+	                                  ? schema_info->GetQualifiedName().Catalog()
+	                                  : Identifier(quack_catalog.GetRemoteCatalog()));
 	create_table_info->SetSchema(schema_info->GetQualifiedName().Schema());
 
 	auto &quack_transaction = QuackTransaction::Get(transaction);
@@ -99,7 +105,10 @@ optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateTable(CatalogTransacti
 optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateView(CatalogTransaction transaction, CreateViewInfo &info) {
 	auto create_view_info = info.Copy();
 	auto schema_info = GetInfo();
-	create_view_info->SetCatalog(schema_info->GetQualifiedName().Catalog());
+	auto &quack_catalog = ParentCatalog().Cast<QuackCatalog>();
+	create_view_info->SetCatalog(quack_catalog.GetRemoteCatalog().empty()
+	                                 ? schema_info->GetQualifiedName().Catalog()
+	                                 : Identifier(quack_catalog.GetRemoteCatalog()));
 	create_view_info->SetSchema(schema_info->GetQualifiedName().Schema());
 
 	// create the view verbatim in the serer
@@ -108,7 +117,8 @@ optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateView(CatalogTransactio
 
 	// locally, override the query with a remote procedure call to ensure the view is evaluated remotely
 	info.sql = QuackViewCatalogEntry::CreateViewSQL(ParentCatalog().GetName().GetIdentifierName(),
-	                                                name.GetIdentifierName(), info.GetViewName().GetIdentifierName());
+	                                                name.GetIdentifierName(), info.GetViewName().GetIdentifierName(),
+	                                                ParentCatalog().Cast<QuackCatalog>().GetRemoteCatalog());
 	info.query = CreateViewInfo::ParseSelect(info.sql);
 
 	auto quack_entry = make_uniq<QuackViewCatalogEntry>(catalog, *this, info);

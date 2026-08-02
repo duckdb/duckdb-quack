@@ -21,7 +21,7 @@ class QuackClientConnection;
 class QuackCatalog : public Catalog {
 public:
 	explicit QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri_p, ClientContext &context,
-	                      const string &token, string client_id = {});
+	                      const string &token, string client_id = {}, string remote_catalog = {});
 	~QuackCatalog() override;
 
 public:
@@ -75,6 +75,7 @@ public:
 	unique_ptr<ColumnDataCollection> ExecuteCommandInternal(ClientContext &context, const string &query);
 	const QuackUri &GetServerUri();
 	const string &GetConnectionId();
+	const string &GetRemoteCatalog() const;
 
 	shared_ptr<QuackClientConnection> GetClientConnection();
 
@@ -87,6 +88,7 @@ private:
 
 private:
 	shared_ptr<QuackClientConnection> client_connection;
+	string remote_catalog;
 	unique_ptr<QuackSchemaSet> schemas;
 };
 

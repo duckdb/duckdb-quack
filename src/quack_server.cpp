@@ -106,11 +106,15 @@ QuackConnection::~QuackConnection() {
 //! Background thread: runs the INSERT that drains `stream` via scan_data_from_quack_client, holding
 //! the connection lock for the statement's duration (one transactional statement -> atomic).
 static void RunInsertStatement(QuackConnection &connection, shared_ptr<QuackDataStream> stream, string stream_id,
-                               string schema_name, string table_name) {
+                               string catalog_name, string schema_name, string table_name) {
 	try {
 		unique_lock<mutex> lock(connection.lock);
-		auto sql = StringUtil::Format("INSERT INTO %s.%s SELECT * FROM scan_data_from_quack_client(%s)",
-		                              SQLIdentifier(schema_name), SQLIdentifier(table_name), SQLString(stream_id));
+		auto target = StringUtil::Format("%s.%s", SQLIdentifier(schema_name), SQLIdentifier(table_name));
+		if (!catalog_name.empty()) {
+			target = StringUtil::Format("%s.%s", SQLIdentifier(catalog_name), target);
+		}
+		auto sql = StringUtil::Format("INSERT INTO %s SELECT * FROM scan_data_from_quack_client(%s)", target,
+		                              SQLString(stream_id));
 		auto result = connection.duckdb_connection->Query(sql);
 		if (result->HasError()) {
 			stream->SetError(result->GetErrorObject());
@@ -549,9 +553,12 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 
 		// we never execute this query, but throw it at the authorization function so it can check if this user gets to
 		// insert into this table
-		auto dummy_insert_query =
-		    StringUtil::Format("INSERT INTO %s.%s VALUES (NULL)", SQLIdentifier(send_data_message.SchemaName()),
-		                       SQLIdentifier(send_data_message.TableName()));
+		auto table_name = StringUtil::Format("%s.%s", SQLIdentifier(send_data_message.SchemaName()),
+		                                     SQLIdentifier(send_data_message.TableName()));
+		if (!send_data_message.CatalogName().empty()) {
+			table_name = StringUtil::Format("%s.%s", SQLIdentifier(send_data_message.CatalogName()), table_name);
+		}
+		auto dummy_insert_query = StringUtil::Format("INSERT INTO %s VALUES (NULL)", table_name);
 
 		// TODO do not do this if there is no fun set
 		{
@@ -597,7 +604,8 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 				connection.insert.stream = stream;
 				connection.insert.stream_id = stream_id;
 				connection.insert.thread = std::thread(RunInsertStatement, std::ref(connection), stream, stream_id,
-				                                       send_data_message.SchemaName(), send_data_message.TableName());
+				                                       send_data_message.CatalogName(), send_data_message.SchemaName(),
+				                                       send_data_message.TableName());
 				// Apply any dead-range markers that arrived before the stream existed.
 				if (connection.insert.pending_marker_stream_id == stream_id) {
 					buffered_dead_ranges = std::move(connection.insert.pending_dead_ranges);

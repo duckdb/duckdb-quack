@@ -1,0 +1,72 @@
+# name: test/sql/attach_remote_catalog.test
+# description: attach a specific remote catalog
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok quack_db:quack_server_con
+create schema shared;
+
+statement ok quack_db:quack_server_con
+create table shared.tbl as values(99, 100);
+
+statement ok quack_db:quack_server_con
+attach ':memory:' as remote_db;
+
+statement ok quack_db:quack_server_con
+create schema remote_db.shared;
+
+statement ok quack_db:quack_server_con
+create table remote_db.shared.tbl as values(46, 47);
+
+statement ok quack_db:quack_server_con
+create view remote_db.shared.v1 as from remote_db.shared.tbl;
+
+statement ok
+create secret (type quack, token 'asdf')
+
+statement ok
+attach {server} as rpc_remote (remote_catalog 'remote_db')
+
+query II
+from rpc_remote.shared.tbl;
+----
+46	47
+
+query II
+from rpc_remote.shared.v1;
+----
+46	47
+
+statement ok
+create table rpc_remote.shared.created as select 48 as id;
+
+statement ok
+insert into rpc_remote.shared.created values (49);
+
+query I
+from rpc_remote.shared.created order by id;
+----
+48
+49
+
+statement ok
+from rpc_remote.query('create table remote_db.shared.refreshed as select 50 as id');
+
+statement ok
+call quack_clear_cache();
+
+query I
+from rpc_remote.shared.refreshed;
+----
+50
+
+statement ok
+detach rpc_remote;
+
+statement error
+attach {server} as missing (remote_catalog 'missing')
+----
+Remote catalog "missing" not found
+
+include test/template/quack_teardown.test_template

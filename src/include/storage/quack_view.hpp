@@ -22,7 +22,8 @@ public:
 	//! Generate SQL for querying a view from quack
 	//! This SQL will always be "FROM {catalog}.query('FROM {view_name}');"
 	//! Ensuring the view is executed remotely
-	static string CreateViewSQL(const string &catalog_name, const string &schema_name, const string &view_name);
+	static string CreateViewSQL(const string &catalog_name, const string &schema_name, const string &view_name,
+	                            const string &remote_catalog = string());
 };
 
 } // namespace duckdb

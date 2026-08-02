@@ -26,8 +26,8 @@
 namespace duckdb {
 
 QuackCatalog::QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri, ClientContext &context,
-                           const string &token, string client_id)
-    : Catalog(db_p) {
+                           const string &token, string client_id, string remote_catalog_p)
+    : Catalog(db_p), remote_catalog(std::move(remote_catalog_p)) {
 	// connect to the server
 	client_connection = QuackClient::ConnectToServer(context, server_uri, token, std::move(client_id));
 
@@ -38,8 +38,11 @@ QuackCatalog::QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri, C
 
 QuackLoadCatalogData QuackCatalog::LoadCatalog(ClientContext &context) {
 	QuackLoadCatalogData result;
-	result.schemas = ExecuteCommandInternal(context, QuackSchemaSet::GetLoadQuery());
-	result.tables = ExecuteCommandInternal(context, QuackTableSet::GetLoadQuery());
+	result.schemas = ExecuteCommandInternal(context, QuackSchemaSet::GetLoadQuery(remote_catalog));
+	if (!remote_catalog.empty() && result.schemas->Count() == 0) {
+		throw BinderException("Remote catalog \"%s\" not found", remote_catalog);
+	}
+	result.tables = ExecuteCommandInternal(context, QuackTableSet::GetLoadQuery(remote_catalog));
 	return result;
 }
 
@@ -116,6 +119,10 @@ QuackCatalog &QuackCatalog::GetQuackCatalog(ClientContext &context, Value &catal
 	return catalog.Cast<QuackCatalog>();
 }
 
+const string &QuackCatalog::GetRemoteCatalog() const {
+	return remote_catalog;
+}
+
 optional_ptr<CatalogEntry> QuackCatalog::CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) {
 	auto &quack_transaction = QuackTransaction::Get(transaction);
 	// create schema remotely
@@ -178,6 +185,9 @@ void QuackCatalog::DropSchema(ClientContext &context, DropInfo &info) {
 }
 
 bool QuackCatalog::SupportsPushdown(const TableRef &ref) {
+	if (!remote_catalog.empty()) {
+		return false;
+	}
 	if (ref.type != TableReferenceType::TABLE_FUNCTION) {
 		return true;
 	}

@@ -51,7 +51,8 @@ QuackTableSet::QuackTableSet(ClientContext &context, QuackSchemaCatalogEntry &pa
 			// query
 			CreateViewInfo info(schema, Identifier(view_name));
 			info.sql = QuackViewCatalogEntry::CreateViewSQL(catalog.GetName().GetIdentifierName(),
-			                                                schema.name.GetIdentifierName(), view_name);
+			                                                schema.name.GetIdentifierName(), view_name,
+			                                                catalog.GetRemoteCatalog());
 			info.query = CreateViewInfo::ParseSelect(info.sql);
 
 			// bind to resolve the types
@@ -66,14 +67,19 @@ QuackTableSet::QuackTableSet(QuackSchemaCatalogEntry &parent)
     : QuackCatalogSet(parent.ParentCatalog().Cast<QuackCatalog>()), schema(parent) {
 }
 
-string QuackTableSet::GetLoadQuery() {
-	return R"(
+string QuackTableSet::GetLoadQuery(const string &remote_catalog) {
+	auto filter =
+	    remote_catalog.empty() ? string() : StringUtil::Format("\nWHERE database_name = %s", SQLString(remote_catalog));
+	return StringUtil::Format(R"(
 SELECT schema_name, sql, 'table'
 FROM duckdb_tables()
+%s
 UNION ALL
 SELECT schema_name, view_name, 'view'
 FROM duckdb_views()
-	)";
+%s
+	)",
+	                          filter, filter);
 }
 
 TableFunction QuackTableCatalogEntry::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data_p) {
@@ -81,6 +87,8 @@ TableFunction QuackTableCatalogEntry::GetScanFunction(ClientContext &context, un
 	auto bind_data = make_uniq<QuackScanBindData>();
 	bind_data->client_connection = quack_catalog.GetClientConnection();
 	bind_data->table_name = name.GetIdentifierName();
+	bind_data->schema_name = schema.name.GetIdentifierName();
+	bind_data->catalog_name = quack_catalog.GetRemoteCatalog();
 	for (auto &col : GetColumns().Physical()) {
 		bind_data->column_names.emplace_back(col.Name());
 		bind_data->column_types.push_back(col.Type());

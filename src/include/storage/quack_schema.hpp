@@ -22,7 +22,7 @@ class QuackSchemaSet : public QuackCatalogSet {
 public:
 	QuackSchemaSet(ClientContext &context, QuackCatalog &catalog, const QuackLoadCatalogData &load_data);
 
-	static string GetLoadQuery();
+	static string GetLoadQuery(const string &remote_catalog);
 
 	void Reload(ClientContext &context, QuackCatalog &catalog, const QuackLoadCatalogData &load_data);
 };
