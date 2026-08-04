@@ -468,7 +468,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 				connection.query_state = QuackQueryState::CANCELLED;
 				return response;
 			}
-			if (query_result->names.empty()) {
+			if (query_result->GetNames().empty()) {
 				connection.sql_query = "";
 				auto response = make_uniq<ErrorResponse>(query_result->GetErrorObject());
 				connection.duckdb_query_result.reset();
@@ -487,8 +487,14 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		DBConfig::GetConfig(db).TryGetCurrentSetting("quack_fetch_batch_rows", max_rows_val);
 		auto max_rows_per_batch = max_rows_val.GetValue<uint64_t>();
 
-		auto names = connection.duckdb_query_result->names;
-		auto types = connection.duckdb_query_result->types;
+		// BaseQueryResult::names is now vector<Identifier>; the wire message carries plain strings, so
+		// convert each identifier to its raw name.
+		vector<string> names;
+		names.reserve(connection.duckdb_query_result->GetNames().size());
+		for (auto &col_name : connection.duckdb_query_result->GetNames()) {
+			names.push_back(col_name.GetIdentifierName());
+		}
+		auto types = connection.duckdb_query_result->GetTypes();
 
 		auto results = CreateBatch(Allocator::Get(db), connection.duckdb_query_result, max_rows_per_batch);
 		if (connection.duckdb_query_result && connection.duckdb_query_result->HasError()) {
