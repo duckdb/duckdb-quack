@@ -38,6 +38,13 @@ public:
 	//! pass context=nullptr when called off the execution thread (parameters fall back to the database).
 	virtual string PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size) = 0;
 
+	//! Best-effort teardown hint: bound the transport for subsequent (final DisconnectMessage) requests so a
+	//! gone/half-open peer cannot block the destructor for the full, possibly hour-long, request timeout.
+	//! Default no-op; the HTTPS client caps the timeout and skips retries. Not thread-safe — call on a client
+	//! that is being torn down and will issue at most one more request.
+	virtual void PrepareTeardownRequest() {
+	}
+
 	//! Encode a request (inject client_query_id when a query is active, then serialize) into `out`.
 	//! Protocol-level and lock-free; the caller owns `out` and any locking around it.
 	static void EncodeRequest(optional_ptr<ClientContext> context, QuackMessage &message, MemoryStream &out);
@@ -130,6 +137,7 @@ public:
 	~HttpsQuackClient() override;
 
 	string PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size) override;
+	void PrepareTeardownRequest() override;
 
 private:
 	unique_ptr<QuackMessage> RequestInternal(optional_ptr<ClientContext> context,
@@ -144,6 +152,9 @@ private:
 	//! Persistent keep-alive HTTP client: reused across requests so the TCP connection (and its
 	//! warm congestion window) survives between POSTs; replaced by the retry path on dead sockets.
 	unique_ptr<HTTPClient> http_client;
+	//! Set by PrepareTeardownRequest(): cap the transport timeout and drop retries so the final
+	//! best-effort DisconnectMessage cannot hang the destructor on a dead peer.
+	bool teardown_request = false;
 };
 
 } // namespace duckdb
