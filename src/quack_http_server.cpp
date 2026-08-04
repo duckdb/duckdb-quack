@@ -78,7 +78,18 @@ private:
 				auto fn = std::move(jobs.front());
 				jobs.pop_front();
 				guard.unlock();
-				fn();
+				{
+					// fn() runs one accepted socket's whole keep-alive lifetime.  When it returns (the
+					// socket closed), drop the socket refs this connection task claimed on its session(s)
+					// so the reaper can reclaim any no longer served by a live socket.  RAII so the refs
+					// are released even if fn() throws.
+					struct SocketSessionGuard {
+						~SocketSessionGuard() {
+							ReleaseCurrentSocketSessions();
+						}
+					} socket_session_guard;
+					fn();
+				}
 				guard.lock();
 				continue;
 			}
