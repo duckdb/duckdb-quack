@@ -60,9 +60,9 @@ static void QuackCancelScan(ClientContext &, TableFunctionInput &input, DataChun
 		return;
 	}
 	data.finished = true;
-	output.SetValue(0, 0, data.target_connection_id);
-	output.SetValue(1, 0, Value::BOOLEAN(data.cancelled));
-	output.SetCardinality(1);
+	output.data[0].SetValue(0, data.target_connection_id);
+	output.data[1].SetValue(0, Value::BOOLEAN(data.cancelled));
+	output.SetChildCardinality(1);
 }
 
 TableFunction QuackCancelFunction::GetFunction() {
