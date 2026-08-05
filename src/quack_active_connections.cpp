@@ -59,7 +59,8 @@ static void QuackActiveConnectionsScan(ClientContext &context, TableFunctionInpu
 		output.data[1].SetValue(row, snap.session_id);
 		output.data[2].SetValue(row, snap.sql_query);
 		output.data[3].SetValue(row, Value(QueryStateToString(snap.query_state)));
-		output.data[4].SetValue(row, snap.client_id_hash.empty() ? Value(LogicalType::VARCHAR) : Value(snap.client_id_hash));
+		output.data[4].SetValue(row,
+		                        snap.client_id_hash.empty() ? Value(LogicalType::VARCHAR) : Value(snap.client_id_hash));
 		if (snap.query_state == QuackQueryState::IDLE) {
 			output.data[5].SetValue(row, Value(LogicalType::TIMESTAMP));
 		} else {

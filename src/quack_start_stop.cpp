@@ -172,8 +172,8 @@ static void QuackServerList(ClientContext &context, TableFunctionInput &data_p, 
 			keys.emplace_back(Value(kv.first));
 			values.emplace_back(Value(kv.second));
 		}
-		output.data[5].SetValue(row,
-		                Value::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR, std::move(keys), std::move(values)));
+		output.data[5].SetValue(
+		    row, Value::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR, std::move(keys), std::move(values)));
 		row++;
 	}
 	output.SetChildCardinality(row);
