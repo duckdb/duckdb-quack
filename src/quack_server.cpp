@@ -252,6 +252,23 @@ shared_ptr<QuackConnection> QuackServer::GetConnection(const string &connection_
 	return nullptr;
 }
 
+shared_ptr<QuackConnection> QuackServer::GetConnectionForCurrentSocket(const string &connection_id) {
+	std::lock_guard<std::mutex> lock(active_connections_mutex);
+	auto it = active_connections.find(connection_id);
+	if (it == active_connections.end()) {
+		return nullptr;
+	}
+	// Claim the socket ref + refresh activity WHILE holding active_connections_mutex.  The reaper erases
+	// a session only under this same lock and only when socket_refs == 0, so bumping the ref here — rather
+	// than after GetConnection has released the lock — closes the TOCTOU where the reaper could reclaim the
+	// session in the gap and orphan the in-flight request (its next call would fail with "Invalid
+	// connection id").  ClaimSessionForCurrentSocket only touches the connection's atomics and a
+	// thread_local, so it is safe to call under the lock.
+	ClaimSessionForCurrentSocket(it->second);
+	it->second->last_active_ms = QuackSteadyNowMs();
+	return it->second;
+}
+
 string QuackServer::CreateNewConnection(const string &session_id, const string &client_id_hash) {
 	std::lock_guard<std::mutex> lock(active_connections_mutex);
 
@@ -425,14 +442,13 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
 	// these are basically all messages aside from connect request
 	shared_ptr<QuackConnection> connection;
 	if (MessageRequiresConnection(header.type)) {
-		connection = GetConnection(header.connection_id);
+		// Look up the session AND claim a socket ref for this task atomically (under the map lock), so the
+		// reaper can never reclaim it in the gap between lookup and claim while a request — including a
+		// long-running one — is in flight.  Also refreshes the session's activity time.
+		connection = GetConnectionForCurrentSocket(header.connection_id);
 		if (!connection) {
 			return make_uniq<ErrorResponse>("Invalid connection id");
 		}
-		// This socket task is serving the session: hold a socket ref (so the reaper never reclaims it
-		// while a request — including a long-running one — is in flight) and refresh its activity time.
-		ClaimSessionForCurrentSocket(connection);
-		connection->last_active_ms = QuackSteadyNowMs();
 	}
 
 	// now deserialize the actual message

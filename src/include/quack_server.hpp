@@ -123,6 +123,10 @@ public:
 	virtual void Close() {};
 
 	shared_ptr<QuackConnection> GetConnection(const string &connection_id);
+	//! Look up a session AND claim a socket ref for the current socket task in one step, under the
+	//! active_connections lock — so the reaper (which erases only under that lock, only when
+	//! socket_refs == 0) can never reclaim the session between the lookup and the claim.
+	shared_ptr<QuackConnection> GetConnectionForCurrentSocket(const string &connection_id);
 	string CreateNewConnection(const string &session_id, const string &client_id_hash = {});
 	bool DisconnectConnection(const string &session_id);
 	// TODO need something to destroy connections
