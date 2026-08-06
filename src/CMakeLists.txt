@@ -9,6 +9,7 @@ add_library(
   quack_http_server.cpp
   quack_log.cpp
   quack_message.cpp
+  quack_namegen.cpp
   quack_scan.cpp
   quack_server.cpp
   quack_start_stop.cpp

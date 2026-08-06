@@ -17,6 +17,7 @@
 #include "quack_clear_cache.hpp"
 #include "quack_extension.hpp"
 #include "quack_log.hpp"
+#include "quack_namegen.hpp"
 #include "quack_scan.hpp"
 #include "quack_startstop.hpp"
 #include "quack_storage.hpp"
@@ -142,6 +143,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(rpc_authorization);
 
 	loader.RegisterFunction(QuackParseUriFunction::GetFunction());
+	loader.RegisterFunction(GetWhoamiRandomNameFunction());
 
 	RegisterQuackSecretType(loader);
 
@@ -169,7 +171,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// whoami() identity fields — global settings so they propagate across all sessions
 	// (quack_query creates fresh server-side sessions that wouldn't see per-connection state).
-	config.AddExtensionOption("whoami_name", "Human-readable name for this node", LogicalType::VARCHAR, Value(""));
+	config.AddExtensionOption("whoami_name", "Human-readable name for this node", LogicalType::VARCHAR,
+	                          Value(GenerateWhoamiName()));
 	config.AddExtensionOption("whoami_provider", "Deployment provider (ec2, docker, local, ...)", LogicalType::VARCHAR,
 	                          Value(""));
 	config.AddExtensionOption("whoami_hostname", "Network hostname / public address", LogicalType::VARCHAR, Value(""));
