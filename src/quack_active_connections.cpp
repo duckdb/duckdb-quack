@@ -55,15 +55,16 @@ static void QuackActiveConnectionsScan(ClientContext &context, TableFunctionInpu
 
 	idx_t row = 0;
 	for (auto &snap : snapshots) {
-		output.SetValue(0, row, snap.server_id);
-		output.SetValue(1, row, snap.session_id);
-		output.SetValue(2, row, snap.sql_query);
-		output.SetValue(3, row, Value(QueryStateToString(snap.query_state)));
-		output.SetValue(4, row, snap.client_id_hash.empty() ? Value(LogicalType::VARCHAR) : Value(snap.client_id_hash));
+		output.data[0].SetValue(row, snap.server_id);
+		output.data[1].SetValue(row, snap.session_id);
+		output.data[2].SetValue(row, snap.sql_query);
+		output.data[3].SetValue(row, Value(QueryStateToString(snap.query_state)));
+		output.data[4].SetValue(row,
+		                        snap.client_id_hash.empty() ? Value(LogicalType::VARCHAR) : Value(snap.client_id_hash));
 		if (snap.query_state == QuackQueryState::IDLE) {
-			output.SetValue(5, row, Value(LogicalType::TIMESTAMP));
+			output.data[5].SetValue(row, Value(LogicalType::TIMESTAMP));
 		} else {
-			output.SetValue(5, row, Value::TIMESTAMP(snap.query_started_at));
+			output.data[5].SetValue(row, Value::TIMESTAMP(snap.query_started_at));
 		}
 		row++;
 	}
