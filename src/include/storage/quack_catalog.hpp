@@ -77,6 +77,12 @@ public:
 	const string &GetConnectionId();
 
 	shared_ptr<QuackClientConnection> GetClientConnection();
+	//! Open a FRESH server session (its own connection_id) using this catalog's server URI + credentials.
+	//! Each concurrent scan must get its own session: the server keeps a single result per connection_id,
+	//! so sharing GetClientConnection() across concurrent scans lets one scan's PREPARE clobber another's
+	//! in-flight result ("Result has been closed" / short reads).  The extra sessions are reclaimed by the
+	//! server's socket-close reaper once the scan's client sockets go away.
+	shared_ptr<QuackClientConnection> CreateClientConnection(ClientContext &context);
 
 	void Refresh(ClientContext &context);
 
@@ -87,6 +93,10 @@ private:
 
 private:
 	shared_ptr<QuackClientConnection> client_connection;
+	//! Server URI + credentials retained so CreateClientConnection() can mint fresh per-scan sessions.
+	QuackUri server_uri;
+	string token;
+	string client_id;
 	unique_ptr<QuackSchemaSet> schemas;
 };
 

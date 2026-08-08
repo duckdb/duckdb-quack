@@ -17,7 +17,41 @@
 
 #include "mbedtls_wrapper.hpp"
 
+#include <chrono>
+
 namespace duckdb {
+
+// Sessions the current HTTP connection task holds a socket ref on. Each accepted socket runs as one
+// connection task on a single worker thread for its whole keep-alive lifetime (see ElasticThreadPool),
+// so this per-socket set lives in a thread_local; it is released when the task ends (socket closed).
+static thread_local vector<shared_ptr<QuackConnection>> tls_socket_sessions;
+
+static int64_t QuackSteadyNowMs() {
+	return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+	    .count();
+}
+
+void ClaimSessionForCurrentSocket(const shared_ptr<QuackConnection> &conn) {
+	if (!conn) {
+		return;
+	}
+	for (auto &s : tls_socket_sessions) {
+		if (s == conn) {
+			return; // this socket task already holds a ref on the session
+		}
+	}
+	conn->socket_refs++;
+	tls_socket_sessions.push_back(conn);
+}
+
+void ReleaseCurrentSocketSessions() {
+	auto now = QuackSteadyNowMs();
+	for (auto &s : tls_socket_sessions) {
+		s->socket_refs--;
+		s->last_active_ms = now;
+	}
+	tls_socket_sessions.clear();
+}
 QuackConnection::QuackConnection(string session_id_p) : session_id(std::move(session_id_p)) {
 }
 
@@ -145,9 +179,53 @@ QuackServer::QuackServer(ClientContext &context_p, const QuackUri &uri_p, const 
     : db_ptr(context_p.db), uri(uri_p), token(token_p) {
 	ValidateToken(token);
 	server_hmac_key = GenerateRandomToken(*context_p.db);
+	reaper_thread = std::thread(&QuackServer::ReaperLoop, this);
 }
 
 QuackServer::~QuackServer() {
+	{
+		std::lock_guard<std::mutex> lk(reaper_mutex);
+		reaper_stop = true;
+	}
+	reaper_cv.notify_all();
+	if (reaper_thread.joinable()) {
+		reaper_thread.join();
+	}
+}
+
+void QuackServer::ReaperLoop() {
+	// Sweep interval, and the grace a session gets after its last serving socket closes before it is
+	// reclaimed — long enough for a client whose socket dropped to reconnect (retry) with the same
+	// connection id and re-claim it first.
+	static constexpr int64_t REAP_INTERVAL_MS = 5000;
+	static constexpr int64_t REAP_GRACE_MS = 30000;
+	std::unique_lock<std::mutex> lk(reaper_mutex);
+	while (!reaper_stop) {
+		reaper_cv.wait_for(lk, std::chrono::milliseconds(REAP_INTERVAL_MS), [&] { return reaper_stop; });
+		if (reaper_stop) {
+			return;
+		}
+		lk.unlock();
+		auto now = QuackSteadyNowMs();
+		// Reclaim sessions no socket is serving that have been idle past the grace.  Hold the removed
+		// connections in a local vector so their destructors (which close a DuckDB connection) run after
+		// the map lock is released, and never with reaper_mutex held.
+		vector<shared_ptr<QuackConnection>> reaped;
+		{
+			std::lock_guard<std::mutex> clk(active_connections_mutex);
+			for (auto it = active_connections.begin(); it != active_connections.end();) {
+				auto &conn = it->second;
+				if (conn->socket_refs.load() == 0 && now - conn->last_active_ms.load() > REAP_GRACE_MS) {
+					reaped.push_back(conn);
+					it = active_connections.erase(it);
+				} else {
+					++it;
+				}
+			}
+		}
+		reaped.clear();
+		lk.lock();
+	}
 }
 
 vector<QuackConnectionSnapshot> QuackServer::GetActiveConnectionSnap() {
@@ -174,6 +252,23 @@ shared_ptr<QuackConnection> QuackServer::GetConnection(const string &connection_
 	return nullptr;
 }
 
+shared_ptr<QuackConnection> QuackServer::GetConnectionForCurrentSocket(const string &connection_id) {
+	std::lock_guard<std::mutex> lock(active_connections_mutex);
+	auto it = active_connections.find(connection_id);
+	if (it == active_connections.end()) {
+		return nullptr;
+	}
+	// Claim the socket ref + refresh activity WHILE holding active_connections_mutex.  The reaper erases
+	// a session only under this same lock and only when socket_refs == 0, so bumping the ref here — rather
+	// than after GetConnection has released the lock — closes the TOCTOU where the reaper could reclaim the
+	// session in the gap and orphan the in-flight request (its next call would fail with "Invalid
+	// connection id").  ClaimSessionForCurrentSocket only touches the connection's atomics and a
+	// thread_local, so it is safe to call under the lock.
+	ClaimSessionForCurrentSocket(it->second);
+	it->second->last_active_ms = QuackSteadyNowMs();
+	return it->second;
+}
+
 string QuackServer::CreateNewConnection(const string &session_id, const string &client_id_hash) {
 	std::lock_guard<std::mutex> lock(active_connections_mutex);
 
@@ -185,9 +280,14 @@ string QuackServer::CreateNewConnection(const string &session_id, const string &
 	}
 	auto new_connection = make_shared_ptr<QuackConnection>(session_id);
 	new_connection->client_id_hash = client_id_hash;
+	new_connection->last_active_ms = QuackSteadyNowMs();
 	new_connection->duckdb_connection = make_uniq<Connection>(*db);
 	new_connection->duckdb_connection->context->config.enable_progress_bar = false;
 	// new_connection->duckdb_connection->context->config.streaming_buffer_size = 10 * 1000000; // 10 MB
+	// The socket task handling this CONNECTION_REQUEST will carry the session's subsequent requests, so
+	// claim a socket ref now — otherwise the session sits unclaimed (socket_refs == 0) from creation until
+	// its first follow-up request and could be reaped in between.
+	ClaimSessionForCurrentSocket(new_connection);
 	active_connections[session_id] = std::move(new_connection);
 	return session_id;
 }
@@ -342,7 +442,10 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
 	// these are basically all messages aside from connect request
 	shared_ptr<QuackConnection> connection;
 	if (MessageRequiresConnection(header.type)) {
-		connection = GetConnection(header.connection_id);
+		// Look up the session AND claim a socket ref for this task atomically (under the map lock), so the
+		// reaper can never reclaim it in the gap between lookup and claim while a request — including a
+		// long-running one — is in flight.  Also refreshes the session's activity time.
+		connection = GetConnectionForCurrentSocket(header.connection_id);
 		if (!connection) {
 			return make_uniq<ErrorResponse>("Invalid connection id");
 		}
@@ -353,6 +456,10 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
 
 	// process the message
 	auto response = HandleMessageInternal(*db, *received_message, connection);
+
+	if (connection) {
+		connection->last_active_ms = QuackSteadyNowMs();
+	}
 
 	if (should_log) {
 		auto duration_ms = QuackNowMillis() - start_time;

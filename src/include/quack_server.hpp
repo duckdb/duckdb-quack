@@ -1,5 +1,6 @@
 #pragma once
 
+#include <condition_variable>
 #include <thread>
 
 #include "duckdb/common/atomic.hpp"
@@ -83,6 +84,15 @@ struct QuackConnection {
 
 	//! The INSERT this connection is currently driving via a client SEND_DATA stream (one at a time).
 	QuackInsertState insert;
+
+	//! Server-side connection reclamation. socket_refs = number of live HTTP connection tasks (sockets)
+	//! currently serving this session; last_active_ms = steady-clock ms of the last request/activity. A
+	//! background reaper frees a session once no socket serves it (socket_refs == 0) and it has been idle
+	//! past a grace period, reclaiming resources for a client that vanished (crash / dropped socket)
+	//! without sending a DisconnectMessage. A long-running request keeps its socket — and thus a ref — so
+	//! it is never reaped mid-flight, and a quick reconnect re-claims the session within the grace window.
+	atomic<uint32_t> socket_refs {0};
+	atomic<int64_t> last_active_ms {0};
 };
 
 struct QuackConnectionSnapshot {
@@ -113,6 +123,10 @@ public:
 	virtual void Close() {};
 
 	shared_ptr<QuackConnection> GetConnection(const string &connection_id);
+	//! Look up a session AND claim a socket ref for the current socket task in one step, under the
+	//! active_connections lock — so the reaper (which erases only under that lock, only when
+	//! socket_refs == 0) can never reclaim the session between the lookup and the claim.
+	shared_ptr<QuackConnection> GetConnectionForCurrentSocket(const string &connection_id);
 	string CreateNewConnection(const string &session_id, const string &client_id_hash = {});
 	bool DisconnectConnection(const string &session_id);
 	// TODO need something to destroy connections
@@ -161,7 +175,23 @@ private:
 	string token;
 	//! Per-server random key that seeds the HMAC for client_id_hash.
 	string server_hmac_key;
+
+	//! Background reaper that frees sessions whose serving sockets have all closed (see
+	//! QuackConnection::socket_refs). Started in the constructor, stopped/joined in the destructor.
+	void ReaperLoop();
+	std::thread reaper_thread;
+	std::mutex reaper_mutex;
+	std::condition_variable reaper_cv;
+	bool reaper_stop = false;
 };
+
+//! Connection-reclamation hooks. Each accepted HTTP socket runs as one connection task on a single
+//! worker thread for its whole keep-alive lifetime (see ElasticThreadPool), so per-socket state lives in
+//! a thread_local. ClaimSessionForCurrentSocket records that the current task is serving `conn` (adding a
+//! socket ref); ReleaseCurrentSocketSessions is called when that task ends (its socket closed) to drop
+//! the refs this socket held, making the sessions eligible for reaping if no other socket serves them.
+void ClaimSessionForCurrentSocket(const shared_ptr<QuackConnection> &conn);
+void ReleaseCurrentSocketSessions();
 
 class HttpQuackServer : public QuackServer {
 public:

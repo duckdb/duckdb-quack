@@ -89,7 +89,10 @@ static unique_ptr<FunctionData> QuackScanBindCatalogName(ClientContext &context,
 	// TODO some of this stuff below is duplicated af
 	auto query = input.inputs[1].GetValue<string>();
 	auto bind_data = make_uniq<QuackScanBindData>();
-	bind_data->client_connection = catalog.GetClientConnection();
+	// Own session per scan (not the shared catalog connection): the server keeps a single result per
+	// connection_id, so a concurrent scan reusing the catalog's connection would clobber this one's
+	// in-flight result.  The reaper reclaims the session once this scan's client sockets close.
+	bind_data->client_connection = catalog.CreateClientConnection(context);
 	auto client_wrapper = bind_data->client_connection->GetClient(context);
 	auto &client = client_wrapper->GetClient();
 	bind_data->query_uuid = UUID::GenerateRandomUUID();

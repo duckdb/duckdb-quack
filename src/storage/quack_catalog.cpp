@@ -25,15 +25,20 @@
 
 namespace duckdb {
 
-QuackCatalog::QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri, ClientContext &context,
-                           const string &token, string client_id)
-    : Catalog(db_p) {
-	// connect to the server
-	client_connection = QuackClient::ConnectToServer(context, server_uri, token, std::move(client_id));
+QuackCatalog::QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri_p, ClientContext &context,
+                           const string &token_p, string client_id_p)
+    : Catalog(db_p), server_uri(server_uri_p), token(token_p), client_id(std::move(client_id_p)) {
+	// connect to the server (this connection loads the catalog and serves metadata/DDL); per-scan reads
+	// get their OWN sessions via CreateClientConnection so concurrent scans never share one result slot.
+	client_connection = QuackClient::ConnectToServer(context, server_uri, token, client_id);
 
 	// load the entire catalog up-front
 	auto load_info = LoadCatalog(context);
 	schemas = make_uniq<QuackSchemaSet>(context, *this, load_info);
+}
+
+shared_ptr<QuackClientConnection> QuackCatalog::CreateClientConnection(ClientContext &context) {
+	return QuackClient::ConnectToServer(context, server_uri, token, client_id);
 }
 
 QuackLoadCatalogData QuackCatalog::LoadCatalog(ClientContext &context) {
