@@ -504,7 +504,7 @@ protected:
 	}
 
 private:
-	//! Query the client is acknowledging. {0,0} means unspecified (pre-uuid clients).
+	//! Acknowledged query. {0,0} is the deserialization default. Caches need nonzero uuids, so it never matches one.
 	hugeint_t query_uuid {0, 0};
 };
 
