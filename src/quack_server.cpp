@@ -166,11 +166,6 @@ void QuackServer::DestroyCachesDetached(vector<unique_ptr<QuackResultCache>> doo
 }
 
 vector<QuackConnectionSnapshot> QuackServer::GetActiveConnectionSnap() {
-	auto db = db_ptr.lock();
-	if (db) {
-		// reap first so an expired-but-unswept cache is never reported as live
-		SweepExpiredCaches(*db);
-	}
 	vector<QuackConnectionSnapshot> result;
 	std::lock_guard<std::mutex> lock(active_connections_mutex);
 	for (auto &[id, conn] : active_connections) {
