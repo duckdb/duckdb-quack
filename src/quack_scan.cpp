@@ -378,7 +378,7 @@ static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChu
 						auto col_idx = index.GetPrimaryIndex();
 						output.data[i].Reference(response_chunk.data[col_idx]);
 					}
-					output.SetCardinality(response_chunk.size());
+					output.CheckCardinality(response_chunk.size());
 				}
 				return;
 			}

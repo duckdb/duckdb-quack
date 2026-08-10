@@ -31,7 +31,7 @@ static vector<unique_ptr<DataChunkWrapper>> CreateBatch(unique_ptr<QueryResult> 
 }
 
 QuackResultCache::~QuackResultCache() {
-	if (tail && tail->type == QueryResultType::STREAM_RESULT) {
+	if (tail && tail->GetResultType() == QueryResultType::STREAM_RESULT) {
 		try {
 			// If it's a stream we gotta close it
 			tail->Cast<StreamQueryResult>().Close();

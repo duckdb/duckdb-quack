@@ -344,6 +344,7 @@ string QuackServer::GenerateRandomToken(DatabaseInstance &db) {
 }
 
 string QuackServer::GenerateSessionId() {
+	data_t bytes[kTokenBytes];
 	{
 		std::lock_guard<std::mutex> lock(session_id_rng_mutex);
 		if (!session_id_rng) {
@@ -356,10 +357,9 @@ string QuackServer::GenerateSessionId() {
 			                                                   EncryptionTypes::EncryptionVersion::NONE);
 			session_id_rng = encryption_util->CreateEncryptionState(std::move(metadata));
 		}
+		// Generate under the mutex: the RNG state is shared across concurrent CONNECTION_REQUESTs.
+		session_id_rng->GenerateRandomData(bytes, kTokenBytes);
 	}
-
-	data_t bytes[kTokenBytes];
-	session_id_rng->GenerateRandomData(bytes, kTokenBytes);
 	return HexEncode(bytes, kTokenBytes);
 }
 
@@ -509,8 +509,12 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		auto effective_sql = (auth_result.type().id() == LogicalTypeId::VARCHAR) ? auth_result.GetValue<string>()
 		                                                                         : prepare_request_message.Query();
 
+		// Declared before `lock` so it is destroyed after the lock releases: tearing down the
+		// previous query's streaming result can block on its in-flight I/O, and must not do so
+		// while holding the session lock.
+		unique_ptr<QueryResult> stale_result;
 		std::unique_lock<std::mutex> lock(connection.lock);
-		connection.duckdb_query_result.reset();
+		stale_result = std::move(connection.duckdb_query_result);
 		// A client query displaces the old cache even if caching is now off. Internal queries (uuid 0) leave it alone
 		bool client_query = prepare_request_message.QueryUUID() != hugeint_t {0, 0};
 		if (client_query) {
@@ -532,7 +536,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 				connection.query_state = QuackQueryState::CANCELLED;
 				return response;
 			}
-			if (query_result->names.empty()) {
+			if (query_result->GetNames().empty()) {
 				connection.sql_query = "";
 				auto response = make_uniq<ErrorResponse>(query_result->GetErrorObject());
 				connection.duckdb_query_result.reset();
@@ -540,8 +544,13 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 				return make_uniq<ErrorResponse>("Query did not return any columns");
 			}
 
-			names = query_result->names;
-			types = query_result->types;
+			// BaseQueryResult::names is now vector<Identifier>; the wire message carries plain strings, so
+			// convert each identifier to its raw name.
+			names.reserve(query_result->GetNames().size());
+			for (auto &col_name : query_result->GetNames()) {
+				names.push_back(col_name.GetIdentifierName());
+			}
+			types = query_result->GetTypes();
 			if (cache_result) {
 				auto cache =
 				    make_uniq<QuackResultCache>(BufferManager::GetBufferManager(db), prepare_request_message.Query(),
@@ -736,9 +745,14 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		}
 		// Interrupt without the lock so the running query aborts, then clean up under the lock to not race ServeBatch
 		connection.duckdb_connection->Interrupt();
+		// The interrupt aborts any statement currently running under the session lock; take the
+		// lock so the state change and result handoff cannot race that statement's handler.
+		// `stale_result` is declared before `lock` so the result's (potentially blocking)
+		// teardown runs after the lock is released.
+		unique_ptr<QueryResult> stale_result;
 		std::unique_lock<std::mutex> lock(connection.lock);
 		connection.query_state = QuackQueryState::CANCELLED;
-		connection.duckdb_query_result.reset();
+		stale_result = std::move(connection.duckdb_query_result);
 		connection.ClearResultCache();
 		return make_uniq<SuccessResponse>();
 	}
