@@ -197,12 +197,13 @@ unique_ptr<SuccessResponse> SuccessResponse::Deserialize(Deserializer &deseriali
 	return result;
 }
 
-
 void AcknowledgementMessage::Serialize(Serializer &serializer) const {
+	serializer.WritePropertyWithDefault<hugeint_t>(1, "query_uuid", query_uuid, hugeint_t(0, 0));
 }
 
 unique_ptr<AcknowledgementMessage> AcknowledgementMessage::Deserialize(Deserializer &deserializer) {
 	auto result = duckdb::unique_ptr<AcknowledgementMessage>(new AcknowledgementMessage());
+	deserializer.ReadPropertyWithExplicitDefault<hugeint_t>(1, "query_uuid", result->query_uuid, hugeint_t(0, 0));
 	return result;
 }
 

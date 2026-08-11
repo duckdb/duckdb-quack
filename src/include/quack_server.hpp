@@ -1,5 +1,6 @@
 #pragma once
 
+#include <queue>
 #include <thread>
 
 #include "duckdb/common/atomic.hpp"
@@ -9,6 +10,7 @@
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/unordered_map.hpp"
 
+#include "quack_result_cache.hpp"
 #include "quack_uri.hpp"
 
 #include "httplib.hpp" // TODO forward declare
@@ -68,11 +70,31 @@ struct QuackConnection {
 	mutex lock;
 	unique_ptr<Connection> duckdb_connection;
 	unique_ptr<QueryResult> duckdb_query_result;
+	//! Replay cache of the last client query's result stream, null unless quack_enable_reconnects.
+	unique_ptr<QuackResultCache> result_cache;
+	//! The owning server's live-cache counter, handed to every cache this connection creates.
+	shared_ptr<atomic<idx_t>> live_caches;
+	//! Rows held by result_cache
+	atomic<idx_t> cached_rows {DConstants::INVALID_INDEX};
 	//! Monotonic counter assigned per FETCH batch — enables order-preserving parallel scans on
 	idx_t next_batch_index = 1;
 	//! Current query UUID
 	hugeint_t query_uuid;
 	string session_id;
+
+	void SyncCachedRows() {
+		cached_rows = result_cache ? result_cache->retained.Count() : DConstants::INVALID_INDEX;
+	}
+
+	//! The only way to drop the cache, keeps the lock-free cached_rows mirror in sync with the drop
+	void ClearResultCache() {
+		result_cache.reset();
+		SyncCachedRows();
+	}
+
+	//! True while this connection holds its slot in the server's cache-expiry queue (guarded by `lock`).
+	//! The slot outlives any one cache: the sweep re-queues it while a cache exists and releases it otherwise.
+	bool cache_in_expiry_queue = false;
 
 	//! Stable per-client reconnect key: HMAC-SHA256(server_hmac_key, client_id). Intentionally excludes
 	//! session_id so it stays identical across (re)connections for the same client_id. Empty if no client_id.
@@ -92,9 +114,22 @@ struct QuackConnectionSnapshot {
 	string sql_query;
 	QuackQueryState query_state = QuackQueryState::IDLE;
 	timestamp_t query_started_at {0};
+	//! Rows in the connection's result cache
+	optional_idx cached_rows;
 };
 
 enum class QuackServerState { UNINITIALIZED, WAITING_TO_START, RUNNING, CLOSED };
+
+struct CacheExpiryEntry {
+	timestamp_t served_at;
+	string session_id;
+};
+
+struct CacheExpiresLater {
+	bool operator()(const CacheExpiryEntry &lhs, const CacheExpiryEntry &rhs) const {
+		return lhs.served_at > rhs.served_at;
+	}
+};
 
 class QuackServer {
 public:
@@ -142,6 +177,10 @@ public:
 
 protected:
 	unique_ptr<QuackMessage> HandleMessage(MemoryStream &read_stream);
+	//! Drops caches idle past quack_result_ttl
+	void SweepExpiredCaches(DatabaseInstance &db);
+	//! Give `connection` its expiry-queue slot when its cache is created; caller must hold connection.lock.
+	void RegisterCacheForExpiry(QuackConnection &connection);
 	unique_ptr<QuackMessage> HandleMessageInternal(DatabaseInstance &db, QuackMessage &received_message,
 	                                               optional_ptr<QuackConnection> connection);
 
@@ -151,11 +190,19 @@ protected:
 	weak_ptr<DatabaseInstance> db_ptr;
 	mutex active_connections_mutex;
 	unordered_map<string, shared_ptr<QuackConnection>> active_connections;
+	shared_ptr<atomic<idx_t>> live_caches = make_shared_ptr<atomic<idx_t>>(0);
+	//! Min-heap of the expiry-queue slots, at most one per connection with a cache
+	mutex cache_expiry_mutex;
+	std::priority_queue<CacheExpiryEntry, vector<CacheExpiryEntry>, CacheExpiresLater> cache_expiry_queue;
 
 	mutex session_id_rng_mutex;
 	shared_ptr<EncryptionState> session_id_rng;
 
 	QuackUri uri;
+
+private:
+	//! Destroys reaped caches on a one-shot detached thread so no response waits on their teardown
+	void DestroyCachesDetached(vector<unique_ptr<QuackResultCache>> doomed);
 
 private:
 	string token;

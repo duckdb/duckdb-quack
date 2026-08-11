@@ -489,14 +489,23 @@ class AcknowledgementMessage : public QuackMessage {
 public:
 	static constexpr MessageType TYPE = MessageType::ACKNOWLEDGEMENT;
 
-	explicit AcknowledgementMessage(string connection_id_p) : QuackMessage(TYPE, std::move(connection_id_p)) {};
+	explicit AcknowledgementMessage(string connection_id_p, hugeint_t query_uuid_p)
+	    : QuackMessage(TYPE, std::move(connection_id_p)), query_uuid(query_uuid_p) {};
 
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<AcknowledgementMessage> Deserialize(Deserializer &deserializer);
 
+	hugeint_t QueryUUID() const {
+		return query_uuid;
+	}
+
 protected:
 	AcknowledgementMessage() : QuackMessage(TYPE) {
 	}
+
+private:
+	//! Acknowledged query. {0,0} is the deserialization default. Caches need nonzero uuids, so it never matches one.
+	hugeint_t query_uuid {0, 0};
 };
 
 class ErrorResponse : public QuackMessage {

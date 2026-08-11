@@ -142,6 +142,8 @@ struct QuackScanLocalState : public LocalTableFunctionState {
 	optional_idx fetch_claim;
 	//! The stream ended below this thread's claim; no more batches for this thread.
 	bool fetch_exhausted = false;
+	//! This thread already reported its completion to the global scanner countdown.
+	bool finish_reported = false;
 
 	queue<ChunkResult> results;
 	ColumnDataScanState scan_state;
@@ -149,9 +151,11 @@ struct QuackScanLocalState : public LocalTableFunctionState {
 
 struct QuackScanGlobalState : GlobalTableFunctionState {
 	explicit QuackScanGlobalState(vector<ColumnIndex> column_ids_p, vector<idx_t> projection_id_p,
-	                              vector<ChunkResult> results_p, bool needs_more_fetch_p, hugeint_t query_uuid_p)
+	                              vector<ChunkResult> results_p, bool needs_more_fetch_p, hugeint_t query_uuid_p,
+	                              bool reconnects_enabled_p)
 	    : max_threads(needs_more_fetch_p ? MAX_THREADS : 1), column_ids(std::move(column_ids_p)),
-	      projection_ids(std::move(projection_id_p)), query_uuid(query_uuid_p), results(std::move(results_p)) {
+	      projection_ids(std::move(projection_id_p)), query_uuid(query_uuid_p),
+	      reconnects_enabled(reconnects_enabled_p), results(std::move(results_p)) {
 	}
 	idx_t MaxThreads() const override {
 		return max_threads;
@@ -159,10 +163,13 @@ struct QuackScanGlobalState : GlobalTableFunctionState {
 	idx_t max_threads;
 	vector<ColumnIndex> column_ids;
 	vector<idx_t> projection_ids;
-	atomic<bool> ack_sent {false};
 	hugeint_t query_uuid;
 	//! FETCH read-ahead pipeline; set when the PREPARE response signals more batches to fetch.
 	shared_ptr<QuackFetcher> fetcher;
+	bool reconnects_enabled;
+	//! Number of active scanners
+	atomic<idx_t> active_scanners {0};
+	atomic<bool> ack_sent {false};
 
 	vector<ChunkResult> TryGetResults() {
 		lock_guard<mutex> guard(lock);
@@ -244,6 +251,14 @@ static string BuildPushdownQuery(const QuackScanBindData &bind_data, const Table
 	return query;
 }
 
+static bool ReconnectsEnabled(ClientContext &context) {
+	Value val;
+	if (!context.TryGetCurrentSetting("quack_enable_reconnects", val)) {
+		return false;
+	}
+	return val.GetValue<bool>();
+}
+
 unique_ptr<GlobalTableFunctionState> QuackScanInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind_data = input.bind_data->Cast<QuackScanBindData>();
 
@@ -277,7 +292,7 @@ unique_ptr<GlobalTableFunctionState> QuackScanInitGlobal(ClientContext &context,
 	}
 	// we only multithread if there is more to fetch
 	auto global_state = make_uniq<QuackScanGlobalState>(input.column_indexes, input.projection_ids, std::move(results),
-	                                                    needs_more_fetch, query_uuid);
+	                                                    needs_more_fetch, query_uuid, ReconnectsEnabled(context));
 	if (needs_more_fetch) {
 		// start pipelining FETCH requests on the ASYNC pool before the first scan call
 		global_state->fetcher = make_shared_ptr<QuackFetcher>(context, *bind_data.client_connection, query_uuid,
@@ -292,6 +307,7 @@ unique_ptr<LocalTableFunctionState> QuackScanInitLocal(ExecutionContext &context
 	auto &global_state = global_state_p->Cast<QuackScanGlobalState>();
 	auto local_state = make_uniq<QuackScanLocalState>();
 
+	global_state.active_scanners++;
 	auto results = global_state.TryGetResults();
 	for (auto &chunk : results) {
 		local_state->results.push(std::move(chunk));
@@ -299,33 +315,41 @@ unique_ptr<LocalTableFunctionState> QuackScanInitLocal(ExecutionContext &context
 	return local_state;
 }
 
-static bool ReconnectsEnabled(ClientContext &context) {
-	Value val;
-	if (!context.TryGetCurrentSetting("quack_enable_reconnects", val)) {
-		return false;
-	}
-	return val.GetValue<bool>();
-}
-
 static void SendAcknowledgement(ClientContext &context, QuackScanGlobalState &global_state,
                                 QuackScanBindData &bind_data) {
-	if (!ReconnectsEnabled(context)) {
-		return;
-	}
 	if (global_state.ack_sent.exchange(true)) {
 		return;
 	}
 	try {
 		auto client_wrapper = bind_data.client_connection->GetClient(context);
-		auto &client = client_wrapper->GetClient();
-		client.Request<SuccessResponse>(context,
-		                                make_uniq<AcknowledgementMessage>(bind_data.client_connection->ConnectionId()));
+		client_wrapper->GetClient().Request<SuccessResponse>(
+		    context,
+		    make_uniq<AcknowledgementMessage>(bind_data.client_connection->ConnectionId(), global_state.query_uuid));
 	} catch (const std::exception &e) {
 		// The query is already complete, so we swallow the failure rather than fail the query
 		DUCKDB_LOG_WARNING(
 		    context, StringUtil::Format("Quack: acknowledgement failed and was ignored (query already completed): %s",
 		                                e.what()));
 	}
+}
+
+static void FinishScan(ClientContext &context, QuackScanGlobalState &global_state, QuackScanLocalState &local_state,
+                       QuackScanBindData &bind_data) {
+	bind_data.completed = true;
+	if (local_state.finish_reported) {
+		return;
+	}
+	local_state.finish_reported = true;
+	if (global_state.active_scanners.fetch_sub(1) != 1) {
+		return;
+	}
+	if (!global_state.reconnects_enabled) {
+		return;
+	}
+	if (global_state.fetcher) {
+		global_state.fetcher->StopAndDrain();
+	}
+	SendAcknowledgement(context, global_state, bind_data);
 }
 
 static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
@@ -380,18 +404,14 @@ static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChu
 			case QuackFetchResult::FINISHED:
 				// server is done, this thread is done
 				local_state.fetch_exhausted = true;
-				bind_data.completed = true;
-				// FINISHED is only observable once the fetcher drained every in-flight FETCH,
-				// so the acknowledgement is guaranteed to be the query's last message
-				SendAcknowledgement(context, global_state, bind_data);
+				FinishScan(context, global_state, local_state, bind_data);
 				return;
 			case QuackFetchResult::BLOCKED:
 				return;
 			}
 		}
 		// we did not have anything cached and then request to the server did not yield anything - we are done
-		bind_data.completed = true;
-		SendAcknowledgement(context, global_state, bind_data);
+		FinishScan(context, global_state, local_state, bind_data);
 		break;
 	}
 }

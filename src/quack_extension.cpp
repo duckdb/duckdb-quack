@@ -212,8 +212,17 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          LogicalType::VARCHAR, Value(default_client_id), nullptr, SetScope::GLOBAL);
 
 	config.AddExtensionOption("quack_enable_reconnects",
-	                          "Send an acknowledgement to the server after a query completes", LogicalType::BOOLEAN,
-	                          Value::BOOLEAN(false));
+	                          "Enable reconnect support (clients acknowledge results, the server caches the last "
+	                          "result until acknowledged)",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(false));
+
+	config.AddExtensionOption("quack_cache_max_rows",
+	                          "Maximum rows the server retains in the result cache (0 = unlimited)",
+	                          LogicalType::UBIGINT, Value::UBIGINT(100000), nullptr, SetScope::GLOBAL);
+
+	config.AddExtensionOption("quack_result_ttl",
+	                          "Seconds an idle cached result is kept before it is dropped (0 = never)",
+	                          LogicalType::UBIGINT, Value::UBIGINT(3600), nullptr, SetScope::GLOBAL);
 
 	// Process-wide fallback anchor for whoami().uptime when whoami_started_at isn't set.
 	// Stored as BIGINT epoch-microseconds to stay TZ-invariant regardless of ICU state.
