@@ -1,0 +1,56 @@
+# name: test/sql/heartbeat_lifecycle.test
+# description: heartbeats keep idle clients alive, are observable in logs, and stop on detach
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+# Heartbeats run without a query context, so enable database-level Quack logging on both peers.
+statement ok
+CALL enable_logging('Quack');
+
+statement ok quack_db:quack_server_con
+CALL enable_logging('Quack');
+
+statement ok
+ATTACH {server} AS heartbeat_client (token 'asdf', heartbeat_timeout 1);
+
+# Remain idle for several lease periods. Only the background heartbeat can keep this session alive.
+sleep 3 seconds
+
+query I quack_db:quack_server_con
+SELECT count(*) FROM quack_active_connections();
+----
+1
+
+query I
+SELECT count(*) > 0
+FROM duckdb_logs_parsed('Quack')
+WHERE message_type = 'HEARTBEAT_REQUEST'
+  AND response_type = 'SUCCESS_RESPONSE';
+----
+true
+
+query I quack_db:quack_server_con
+SELECT count(*) > 0
+FROM duckdb_logs_parsed('Quack')
+WHERE message_type = 'HEARTBEAT_REQUEST'
+  AND response_type = 'SUCCESS_RESPONSE';
+----
+true
+
+# The connection remains usable after the idle period.
+query I
+FROM quack_query_by_name('heartbeat_client', 'SELECT 42');
+----
+42
+
+statement ok
+DETACH heartbeat_client;
+
+# Detach joins the worker and sends DISCONNECT before returning.
+query I quack_db:quack_server_con
+SELECT count(*) FROM quack_active_connections();
+----
+0
+
+include test/template/quack_teardown.test_template

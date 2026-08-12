@@ -37,10 +37,21 @@ FROM quack_query({server}, 'SELECT 42', token='asdf', heartbeat_timeout=0);
 ----
 heartbeat_timeout must be greater than zero
 
+# Values that cannot be converted safely to the heartbeat interval are rejected at configuration time.
+statement error
+FROM quack_query({server}, 'SELECT 42', token='asdf', heartbeat_timeout=18446744073709551615::UBIGINT);
+----
+heartbeat_timeout is too large
+
 # Invalid configured defaults are rejected immediately.
 statement error
 SET quack_default_heartbeat_timeout=0;
 ----
 Heartbeat timeout settings must be greater than zero
+
+statement error
+SET quack_default_heartbeat_timeout=18446744073709551615;
+----
+heartbeat_timeout is too large
 
 include test/template/quack_teardown.test_template

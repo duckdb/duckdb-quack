@@ -1,0 +1,49 @@
+# name: test/sql/heartbeat_expiry.test
+# description: the server expires and interrupts a session when its heartbeat cannot renew the lease
+# group: [sql]
+
+require quack
+
+require httpfs
+
+statement ok
+SET quack_default_client_id='';
+
+test-env QUACK_SERVER quack:localhost
+
+set ignore_error_messages
+
+# A long query occupies the only HTTP worker. The heartbeat must use another transport connection,
+# which is refused, giving the one-second lease a deterministic opportunity to expire.
+statement ok quack_db:quack_server_con
+SET quack_server_max_connections=1;
+
+statement ok quack_db:quack_server_con
+set variable actual_listen_uri = (select listen_uri from quack_serve('{QUACK_SERVER}:0', token='asdf'));
+
+set variable server <variable:quack_server_con:actual_listen_uri>
+
+statement ok
+ATTACH '{server}' AS expiring_client (token 'asdf', heartbeat_timeout 1);
+
+query I quack_db:quack_server_con
+SELECT count(*) FROM quack_active_connections();
+----
+1
+
+statement error
+FROM quack_query_by_name('expiring_client', 'SELECT sleep_ms(5000)');
+----
+Interrupt
+
+# Expiry removes the connection from the active map before interrupting its work.
+query I quack_db:quack_server_con
+SELECT count(*) FROM quack_active_connections();
+----
+0
+
+statement ok
+DETACH expiring_client;
+
+statement ok quack_db:quack_server_con
+CALL quack_stop('{server}');
