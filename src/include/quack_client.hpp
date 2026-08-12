@@ -1,9 +1,5 @@
 #pragma once
 
-#include <condition_variable>
-#include <thread>
-
-#include "duckdb/common/chrono.hpp"
 #include "duckdb/common/http_util.hpp"
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/types/value.hpp"
@@ -12,6 +8,7 @@
 
 #include "quack_message.hpp"
 #include "quack_log.hpp"
+#include "quack_periodic_worker.hpp"
 #include "quack_uri.hpp"
 
 namespace duckdb {
@@ -119,8 +116,7 @@ private:
 	friend class QuackClient;
 
 	void StartHeartbeat();
-	void StopHeartbeat();
-	void HeartbeatLoop();
+	void SendHeartbeat();
 	unique_ptr<QuackClient> TakeClient(optional_ptr<ClientContext> context) const;
 
 	DatabaseInstance &db;
@@ -134,10 +130,7 @@ private:
 	idx_t max_connections_cached;
 	mutable vector<unique_ptr<QuackClient>> cached_clients;
 
-	std::thread heartbeat_thread;
-	std::mutex heartbeat_lock;
-	std::condition_variable heartbeat_cv;
-	bool heartbeat_stopping = false;
+	QuackPeriodicWorker heartbeat;
 };
 
 struct QuackClientWrapper {

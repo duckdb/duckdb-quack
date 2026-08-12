@@ -183,39 +183,11 @@ QuackServer::QuackServer(ClientContext &context_p, const QuackUri &uri_p, const 
     : db_ptr(context_p.db), uri(uri_p), token(token_p) {
 	ValidateToken(token);
 	server_hmac_key = GenerateRandomToken(*context_p.db);
-	lease_reaper_thread = std::thread(&QuackServer::LeaseReaperLoop, this);
+	lease_reaper.Start([] { return milliseconds(LEASE_REAPER_INTERVAL_MS); }, [this] { ReapExpiredConnections(); });
 }
 
 QuackServer::~QuackServer() {
-	StopLeaseReaper();
-}
-
-void QuackServer::StopLeaseReaper() {
-	{
-		std::lock_guard<std::mutex> guard(lease_reaper_lock);
-		lease_reaper_stopping = true;
-	}
-	lease_reaper_cv.notify_one();
-	if (lease_reaper_thread.joinable()) {
-		lease_reaper_thread.join();
-	}
-}
-
-void QuackServer::LeaseReaperLoop() {
-	std::unique_lock<std::mutex> guard(lease_reaper_lock);
-	while (!lease_reaper_stopping) {
-		if (lease_reaper_cv.wait_for(guard, milliseconds(LEASE_REAPER_INTERVAL_MS),
-		                             [&] { return lease_reaper_stopping; })) {
-			break;
-		}
-		guard.unlock();
-		try {
-			ReapExpiredConnections();
-		} catch (...) {
-			// A maintenance failure must never terminate the host process.
-		}
-		guard.lock();
-	}
+	lease_reaper.Stop();
 }
 
 void QuackServer::CleanupExpiredConnection(QuackConnection &connection) {

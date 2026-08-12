@@ -1,6 +1,5 @@
 #pragma once
 
-#include <condition_variable>
 #include <thread>
 
 #include "duckdb/common/chrono.hpp"
@@ -11,6 +10,7 @@
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/unordered_map.hpp"
 
+#include "quack_periodic_worker.hpp"
 #include "quack_uri.hpp"
 
 #include "httplib.hpp" // TODO forward declare
@@ -177,17 +177,12 @@ private:
 	bool RenewConnectionLease(const string &connection_id, const shared_ptr<QuackConnection> &connection);
 	void ReapExpiredConnections();
 	static void CleanupExpiredConnection(QuackConnection &connection);
-	void LeaseReaperLoop();
-	void StopLeaseReaper();
 
 	string token;
 	//! Per-server random key that seeds the HMAC for client_id_hash.
 	string server_hmac_key;
 
-	std::thread lease_reaper_thread;
-	std::mutex lease_reaper_lock;
-	std::condition_variable lease_reaper_cv;
-	bool lease_reaper_stopping = false;
+	QuackPeriodicWorker lease_reaper;
 };
 
 class HttpQuackServer : public QuackServer {

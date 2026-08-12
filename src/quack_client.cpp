@@ -179,7 +179,7 @@ QuackClientConnection::QuackClientConnection(DatabaseInstance &db_p, unique_ptr<
 }
 
 QuackClientConnection::~QuackClientConnection() {
-	StopHeartbeat();
+	heartbeat.Stop();
 	try {
 		auto client = TakeClient(nullptr);
 		client->Request<SuccessResponse>(nullptr, make_uniq<DisconnectMessage>(connection_id));
@@ -188,39 +188,16 @@ QuackClientConnection::~QuackClientConnection() {
 }
 
 void QuackClientConnection::StartHeartbeat() {
-	D_ASSERT(!heartbeat_thread.joinable());
-	heartbeat_thread = std::thread(&QuackClientConnection::HeartbeatLoop, this);
+	auto random = make_shared_ptr<RandomEngine>();
+	heartbeat.Start([this, random] { return HeartbeatInterval(heartbeat_timeout_seconds, *random); },
+	                [this] { SendHeartbeat(); });
 }
 
-void QuackClientConnection::StopHeartbeat() {
-	{
-		std::lock_guard<std::mutex> guard(heartbeat_lock);
-		heartbeat_stopping = true;
-	}
-	heartbeat_cv.notify_one();
-	if (heartbeat_thread.joinable()) {
-		heartbeat_thread.join();
-	}
-}
-
-void QuackClientConnection::HeartbeatLoop() {
-	RandomEngine random;
-	std::unique_lock<std::mutex> guard(heartbeat_lock);
-	while (!heartbeat_stopping) {
-		if (heartbeat_cv.wait_for(guard, HeartbeatInterval(heartbeat_timeout_seconds, random),
-		                          [&] { return heartbeat_stopping; })) {
-			break;
-		}
-		guard.unlock();
-		try {
-			auto client = TakeClient(nullptr);
-			client->Request<SuccessResponse>(nullptr, make_uniq<HeartbeatRequestMessage>(connection_id));
-			StoreClient(std::move(client));
-		} catch (...) {
-			// A failed attempt is not terminal.
-		}
-		guard.lock();
-	}
+//! A failed attempt is not terminal: the worker swallows the throw and retries next interval.
+void QuackClientConnection::SendHeartbeat() {
+	auto client = TakeClient(nullptr);
+	client->Request<SuccessResponse>(nullptr, make_uniq<HeartbeatRequestMessage>(connection_id));
+	StoreClient(std::move(client));
 }
 
 void QuackClient::ValidateClientId(const string &client_id) {
