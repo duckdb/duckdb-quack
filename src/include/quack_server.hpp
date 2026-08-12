@@ -67,12 +67,12 @@ struct QuackConnection {
 	explicit QuackConnection(string session_id_p, idx_t heartbeat_timeout_seconds_p);
 	~QuackConnection();
 
-	//! Renew the logical-client lease.
-	void RenewLease();
 	//! Renew unless the timeout has already elapsed. Once expired, a lease cannot be revived.
 	bool TryRenewLease();
 	//! Atomically mark the lease expired if its timeout has elapsed.
 	bool TryExpireLease(time_point<steady_clock> now);
+	//! True if the lease timeout has elapsed, latching the expiry ("cannot be revived").
+	bool LeaseExpiredLocked(time_point<steady_clock> now) DUCKDB_REQUIRES(lease_lock);
 
 	mutex lock;
 	unique_ptr<Connection> duckdb_connection;

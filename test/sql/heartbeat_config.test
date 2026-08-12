@@ -47,7 +47,7 @@ heartbeat_timeout is too large
 statement error
 SET quack_default_heartbeat_timeout=0;
 ----
-Heartbeat timeout settings must be greater than zero
+heartbeat_timeout must be greater than zero
 
 statement error
 SET quack_default_heartbeat_timeout=18446744073709551615;

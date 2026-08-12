@@ -2,6 +2,7 @@
 
 #include "duckdb/common/serializer/binary_serializer.hpp"
 #include "duckdb/common/serializer/memory_stream.hpp"
+#include "duckdb/common/limits.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/common/types/uuid.hpp"
 #include "duckdb/common/error_data.hpp"
@@ -10,6 +11,9 @@ namespace duckdb {
 
 //! Quack wire-protocol version. Client and server agree on it during the connection handshake.
 static constexpr idx_t QUACK_VERSION = 3;
+
+//! Upper bound both peers enforce on the heartbeat lease timeout
+static constexpr idx_t MAX_HEARTBEAT_TIMEOUT_SECONDS = static_cast<idx_t>(NumericLimits<int64_t>::Maximum() / 1000);
 
 enum class MessageType : uint8_t {
 	INVALID = 0,

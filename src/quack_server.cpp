@@ -34,16 +34,17 @@ QuackConnection::QuackConnection(string session_id_p, idx_t heartbeat_timeout_se
       lease_last_renewed_at(steady_clock::now()) {
 }
 
-void QuackConnection::RenewLease() {
-	annotated_lock_guard<annotated_mutex> guard(lease_lock);
-	lease_last_renewed_at = steady_clock::now();
+bool QuackConnection::LeaseExpiredLocked(time_point<steady_clock> now) {
+	if (!lease_expired && LeaseTimeoutElapsed(lease_last_renewed_at, now, heartbeat_timeout_seconds)) {
+		lease_expired = true;
+	}
+	return lease_expired;
 }
 
 bool QuackConnection::TryRenewLease() {
 	annotated_lock_guard<annotated_mutex> guard(lease_lock);
 	auto now = steady_clock::now();
-	if (lease_expired || LeaseTimeoutElapsed(lease_last_renewed_at, now, heartbeat_timeout_seconds)) {
-		lease_expired = true;
+	if (LeaseExpiredLocked(now)) {
 		return false;
 	}
 	lease_last_renewed_at = now;
@@ -52,11 +53,7 @@ bool QuackConnection::TryRenewLease() {
 
 bool QuackConnection::TryExpireLease(time_point<steady_clock> now) {
 	annotated_lock_guard<annotated_mutex> guard(lease_lock);
-	if (lease_expired || LeaseTimeoutElapsed(lease_last_renewed_at, now, heartbeat_timeout_seconds)) {
-		lease_expired = true;
-		return true;
-	}
-	return false;
+	return LeaseExpiredLocked(now);
 }
 
 //! Finish + join + deregister a detached insert stream; returns any INSERT error. Call WITHOUT the lock.
@@ -272,8 +269,6 @@ string QuackServer::CreateNewConnection(const string &session_id, const string &
 	new_connection->client_id_hash = client_id_hash;
 	new_connection->duckdb_connection = make_uniq<Connection>(*db);
 	new_connection->duckdb_connection->context->config.enable_progress_bar = false;
-	// Start the initial lease after the server-side connection is ready, not before setup work.
-	new_connection->RenewLease();
 	// new_connection->duckdb_connection->context->config.streaming_buffer_size = 10 * 1000000; // 10 MB
 	active_connections[session_id] = std::move(new_connection);
 	return session_id;
@@ -507,8 +502,9 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			    "Unsupported Quack version - server only supports version %llu of quack", QUACK_VERSION));
 		}
 		auto heartbeat_timeout_seconds = connection_request_message.HeartbeatTimeoutSeconds();
-		if (heartbeat_timeout_seconds == 0) {
-			return make_uniq<ErrorResponse>("heartbeat_timeout must be greater than zero");
+		if (heartbeat_timeout_seconds == 0 || heartbeat_timeout_seconds > MAX_HEARTBEAT_TIMEOUT_SECONDS) {
+			return make_uniq<ErrorResponse>(StringUtil::Format(
+			    "heartbeat_timeout out of range - must be between 1 and %llu seconds", MAX_HEARTBEAT_TIMEOUT_SECONDS));
 		}
 		string session_id = GenerateSessionId();
 		auto auth_result = EvaluateAuthQuery(

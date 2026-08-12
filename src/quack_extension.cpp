@@ -35,9 +35,9 @@ namespace duckdb {
 
 static constexpr const char *QUACK_SECRET_TYPE = "quack";
 
-static void ValidatePositiveHeartbeatTimeout(ClientContext &, SetScope, Value &parameter) {
-	if (parameter.IsNull() || parameter.GetValue<idx_t>() == 0) {
-		throw InvalidInputException("Heartbeat timeout settings must be greater than zero");
+static void ValidateHeartbeatTimeoutSetting(ClientContext &, SetScope, Value &parameter) {
+	if (parameter.IsNull()) {
+		throw InvalidInputException("heartbeat_timeout cannot be null");
 	}
 	QuackClient::ValidateHeartbeatTimeout(parameter.GetValue<idx_t>());
 }
@@ -221,7 +221,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("quack_default_heartbeat_timeout",
 	                          "Heartbeat lease timeout in seconds requested by clients when ATTACH / quack_query "
 	                          "omit heartbeat_timeout",
-	                          LogicalType::UBIGINT, Value::UBIGINT(60), ValidatePositiveHeartbeatTimeout);
+	                          LogicalType::UBIGINT, Value::UBIGINT(60), ValidateHeartbeatTimeoutSetting);
 
 	config.AddExtensionOption("quack_enable_reconnects",
 	                          "Send an acknowledgement to the server after a query completes", LogicalType::BOOLEAN,

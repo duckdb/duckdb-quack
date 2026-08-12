@@ -10,8 +10,6 @@
 
 namespace duckdb {
 
-static constexpr idx_t MAX_HEARTBEAT_TIMEOUT_SECONDS = static_cast<idx_t>(NumericLimits<int64_t>::Maximum() / 1000);
-
 static milliseconds HeartbeatInterval(idx_t heartbeat_timeout_seconds, RandomEngine &random) {
 	auto interval_ms = heartbeat_timeout_seconds * 1000 / 3;
 	return milliseconds(static_cast<int64_t>(interval_ms * random.NextRandom(0.8, 1.2)));
