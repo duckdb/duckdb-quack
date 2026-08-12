@@ -274,6 +274,13 @@
   },
   {
     "class": "AcknowledgementMessage",
-    "members": []
+    "members": [
+      {
+        "id": 1,
+        "name": "query_uuid",
+        "type": "hugeint_t",
+        "default": "hugeint_t(0, 0)"
+      }
+    ]
   }
 ]

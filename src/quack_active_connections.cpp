@@ -39,9 +39,9 @@ struct QuackActiveConnectionsData : FunctionData {
 
 static unique_ptr<FunctionData> QuackActiveConnectionsBind(ClientContext &, TableFunctionBindInput &,
                                                            vector<LogicalType> &return_types, vector<string> &names) {
-	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
-	                LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::TIMESTAMP};
-	names = {"server_id", "connection_id", "query", "state", "client_id_hash", "query_started_at"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,  LogicalType::VARCHAR,
+	                LogicalType::VARCHAR, LogicalType::BIGINT,  LogicalType::TIMESTAMP};
+	names = {"server_id", "connection_id", "query", "state", "client_id_hash", "cached_rows", "query_started_at"};
 	return make_uniq<QuackActiveConnectionsData>();
 }
 
@@ -55,15 +55,19 @@ static void QuackActiveConnectionsScan(ClientContext &context, TableFunctionInpu
 
 	idx_t row = 0;
 	for (auto &snap : snapshots) {
-		output.SetValue(0, row, snap.server_id);
-		output.SetValue(1, row, snap.session_id);
-		output.SetValue(2, row, snap.sql_query);
-		output.SetValue(3, row, Value(QueryStateToString(snap.query_state)));
-		output.SetValue(4, row, snap.client_id_hash.empty() ? Value(LogicalType::VARCHAR) : Value(snap.client_id_hash));
+		output.data[0].SetValue(row, snap.server_id);
+		output.data[1].SetValue(row, snap.session_id);
+		output.data[2].SetValue(row, snap.sql_query);
+		output.data[3].SetValue(row, Value(QueryStateToString(snap.query_state)));
+		output.data[4].SetValue(row,
+		                        snap.client_id_hash.empty() ? Value(LogicalType::VARCHAR) : Value(snap.client_id_hash));
+		output.data[5].SetValue(row, snap.cached_rows.IsValid()
+		                                 ? Value::BIGINT(NumericCast<int64_t>(snap.cached_rows.GetIndex()))
+		                                 : Value(LogicalType::BIGINT));
 		if (snap.query_state == QuackQueryState::IDLE) {
-			output.SetValue(5, row, Value(LogicalType::TIMESTAMP));
+			output.data[6].SetValue(row, Value(LogicalType::TIMESTAMP));
 		} else {
-			output.SetValue(5, row, Value::TIMESTAMP(snap.query_started_at));
+			output.data[6].SetValue(row, Value::TIMESTAMP(snap.query_started_at));
 		}
 		row++;
 	}

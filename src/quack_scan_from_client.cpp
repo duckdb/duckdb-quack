@@ -119,7 +119,7 @@ static void QuackScanFromClient(ClientContext &context, TableFunctionInput &inpu
 			local_state.current_batch_index = batch_idx;
 			continue;
 		case QuackDataStream::PopBatchStatus::FINISHED:
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		case QuackDataStream::PopBatchStatus::ERRORED:
 			stream.GetError().Throw();

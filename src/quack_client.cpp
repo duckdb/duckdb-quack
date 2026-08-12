@@ -121,6 +121,19 @@ void HttpsQuackClient::EnsureHttpParams(optional_ptr<ClientContext> context) {
 	} else if (!context) {
 		http_params->logger.reset();
 	}
+	if (teardown_request) {
+		// The final DisconnectMessage is best-effort. The transport derives its timeout from
+		// http_params->timeout, which a caller may have set very high (e.g. an hour) for long-running
+		// task dispatch. Against a gone or half-open peer at teardown that would block the destructor for
+		// the whole timeout, so cap it hard and drop retries — a couple of seconds, then give up.
+		http_params->timeout = 2;
+		http_params->timeout_usec = 0;
+		http_params->retries = 0;
+	}
+}
+
+void HttpsQuackClient::PrepareTeardownRequest() {
+	teardown_request = true;
 }
 
 string HttpsQuackClient::PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size) {
@@ -178,10 +191,15 @@ QuackClientConnection::QuackClientConnection(DatabaseInstance &db_p, unique_ptr<
 
 QuackClientConnection::~QuackClientConnection() {
 	heartbeat.Stop();
-	try {
-		auto client = TakeClient(nullptr);
-		client->Request<SuccessResponse>(nullptr, make_uniq<DisconnectMessage>(connection_id));
-	} catch (...) {
+	if (!cached_clients.empty()) {
+		try {
+			auto &client = cached_clients.back();
+			// A dead peer at teardown must not block the destructor for the full request timeout (which
+			// task dispatch may have set to an hour). Bound the transport first.
+			client->PrepareTeardownRequest();
+			client->Request<SuccessResponse>(nullptr, make_uniq<DisconnectMessage>(connection_id));
+		} catch (...) {
+		}
 	}
 }
 

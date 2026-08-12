@@ -1,0 +1,127 @@
+# name: test/sql/result_ttl.test
+# description: quack_result_ttl reaps cached results idle past the TTL on any server traffic; an expired unfinished stream fails like a cancelled query; 0 disables expiry
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok quack_db:quack_server_con
+CREATE TABLE t5 AS SELECT range AS i FROM range(5);
+
+statement ok quack_db:quack_server_con
+CREATE TABLE big AS SELECT range AS i FROM range(300000);
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_enable_reconnects = true;
+
+statement ok
+CREATE SECRET (TYPE quack, TOKEN 'asdf');
+
+statement ok
+ATTACH {server} AS remote;
+
+# --- an idle cache is reaped once the TTL lapses; any inbound traffic sweeps ---
+
+query I
+SELECT i FROM remote.t5 ORDER BY i;
+----
+0
+1
+2
+3
+4
+
+query I quack_db:quack_server_con
+SELECT cached_rows FROM quack_active_connections();
+----
+5
+
+# The TTL is applied at sweep time, so lowering it makes the already-idle cache expire.
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_result_ttl = 1;
+
+sleep 2 seconds
+
+# quack_active_connections() reports without sweeping; a connect round-trip runs the sweep.
+statement ok
+ATTACH {server} AS sweeper;
+
+statement ok
+DETACH sweeper;
+
+query II quack_db:quack_server_con
+SELECT count(*), count(cached_rows) FROM quack_active_connections();
+----
+1	0
+
+# --- a cache younger than the TTL survives traffic ---
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_result_ttl = 1000;
+
+query I
+SELECT i FROM remote.t5 ORDER BY i;
+----
+0
+1
+2
+3
+4
+
+sleep 2 seconds
+
+statement ok
+CALL quack_clear_cache();
+
+query I quack_db:quack_server_con
+SELECT count(cached_rows) FROM quack_active_connections();
+----
+1
+
+# --- quack_result_ttl = 0 disables expiry entirely ---
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_result_ttl = 0;
+
+query I
+SELECT i FROM remote.t5 ORDER BY i;
+----
+0
+1
+2
+3
+4
+
+sleep 2 seconds
+
+statement ok
+CALL quack_clear_cache();
+
+query I quack_db:quack_server_con
+SELECT count(cached_rows) FROM quack_active_connections();
+----
+1
+
+# --- an expired UNFINISHED stream dies like a cancelled query, never silently truncates ---
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_result_ttl = 1;
+
+# Bind-time PREPARE serves the first batch and leaves the tail in the cache; the client then idles.
+statement ok
+PREPARE p AS SELECT sum(i) FROM quack_query({server}, 'FROM big', token=>'asdf');
+
+sleep 2 seconds
+
+# Resuming the stalled stream now fails instead of returning a truncated result.
+statement error
+EXECUTE p;
+----
+Query was interrupted
+
+statement ok
+DEALLOCATE p;
+
+statement ok
+DETACH remote;
+
+include test/template/quack_teardown.test_template
