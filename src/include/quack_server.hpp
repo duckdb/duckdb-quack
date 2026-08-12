@@ -2,6 +2,7 @@
 
 #include <thread>
 
+#include "duckdb/common/chrono.hpp"
 #include "duckdb/common/atomic.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/optional_idx.hpp"
@@ -62,8 +63,11 @@ struct QuackInsertState {
 };
 
 struct QuackConnection {
-	explicit QuackConnection(string session_id_p);
+	explicit QuackConnection(string session_id_p, idx_t heartbeat_timeout_seconds_p);
 	~QuackConnection();
+
+	//! Renew the logical-client lease.
+	void RenewLease();
 
 	mutex lock;
 	unique_ptr<Connection> duckdb_connection;
@@ -77,6 +81,13 @@ struct QuackConnection {
 	//! Stable per-client reconnect key: HMAC-SHA256(server_hmac_key, client_id). Intentionally excludes
 	//! session_id so it stays identical across (re)connections for the same client_id. Empty if no client_id.
 	string client_id_hash;
+
+	//! Heartbeat and lease variables
+	const idx_t heartbeat_timeout_seconds;
+	annotated_mutex lease_lock;
+	time_point<steady_clock> lease_last_renewed_at DUCKDB_GUARDED_BY(lease_lock);
+
+
 	string sql_query;
 	QuackQueryState query_state = QuackQueryState::IDLE;
 	timestamp_t query_started_at {0};
@@ -113,7 +124,7 @@ public:
 	virtual void Close() {};
 
 	shared_ptr<QuackConnection> GetConnection(const string &connection_id);
-	string CreateNewConnection(const string &session_id, const string &client_id_hash = {});
+	string CreateNewConnection(const string &session_id, const string &client_id_hash, idx_t heartbeat_timeout_seconds);
 	bool DisconnectConnection(const string &session_id);
 	// TODO need something to destroy connections
 
