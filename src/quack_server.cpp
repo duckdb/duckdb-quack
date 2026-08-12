@@ -18,6 +18,17 @@
 #include "mbedtls_wrapper.hpp"
 
 namespace duckdb {
+static constexpr uint64_t LEASE_REAPER_INTERVAL_MS = 100;
+
+static bool LeaseTimeoutElapsed(time_point<steady_clock> last_renewed_at, time_point<steady_clock> now,
+                                idx_t timeout_seconds) {
+	if (now <= last_renewed_at) {
+		return false;
+	}
+	auto elapsed_seconds = duration_cast<std::chrono::seconds>(now - last_renewed_at).count();
+	return static_cast<idx_t>(elapsed_seconds) >= timeout_seconds;
+}
+
 QuackConnection::QuackConnection(string session_id_p, idx_t heartbeat_timeout_seconds_p)
     : session_id(std::move(session_id_p)), heartbeat_timeout_seconds(heartbeat_timeout_seconds_p),
       lease_last_renewed_at(steady_clock::now()) {
@@ -26,6 +37,26 @@ QuackConnection::QuackConnection(string session_id_p, idx_t heartbeat_timeout_se
 void QuackConnection::RenewLease() {
 	annotated_lock_guard<annotated_mutex> guard(lease_lock);
 	lease_last_renewed_at = steady_clock::now();
+}
+
+bool QuackConnection::TryRenewLease() {
+	annotated_lock_guard<annotated_mutex> guard(lease_lock);
+	auto now = steady_clock::now();
+	if (lease_expired || LeaseTimeoutElapsed(lease_last_renewed_at, now, heartbeat_timeout_seconds)) {
+		lease_expired = true;
+		return false;
+	}
+	lease_last_renewed_at = now;
+	return true;
+}
+
+bool QuackConnection::TryExpireLease(time_point<steady_clock> now) {
+	annotated_lock_guard<annotated_mutex> guard(lease_lock);
+	if (lease_expired || LeaseTimeoutElapsed(lease_last_renewed_at, now, heartbeat_timeout_seconds)) {
+		lease_expired = true;
+		return true;
+	}
+	return false;
 }
 
 //! Finish + join + deregister a detached insert stream; returns any INSERT error. Call WITHOUT the lock.
@@ -152,9 +183,83 @@ QuackServer::QuackServer(ClientContext &context_p, const QuackUri &uri_p, const 
     : db_ptr(context_p.db), uri(uri_p), token(token_p) {
 	ValidateToken(token);
 	server_hmac_key = GenerateRandomToken(*context_p.db);
+	lease_reaper_thread = std::thread(&QuackServer::LeaseReaperLoop, this);
 }
 
 QuackServer::~QuackServer() {
+	StopLeaseReaper();
+}
+
+void QuackServer::StopLeaseReaper() {
+	{
+		std::lock_guard<std::mutex> guard(lease_reaper_lock);
+		lease_reaper_stopping = true;
+	}
+	lease_reaper_cv.notify_one();
+	if (lease_reaper_thread.joinable()) {
+		lease_reaper_thread.join();
+	}
+}
+
+void QuackServer::LeaseReaperLoop() {
+	std::unique_lock<std::mutex> guard(lease_reaper_lock);
+	while (!lease_reaper_stopping) {
+		if (lease_reaper_cv.wait_for(guard, milliseconds(LEASE_REAPER_INTERVAL_MS),
+		                             [&] { return lease_reaper_stopping; })) {
+			break;
+		}
+		guard.unlock();
+		try {
+			ReapExpiredConnections();
+		} catch (...) {
+			// A maintenance failure must never terminate the host process.
+		}
+		guard.lock();
+	}
+}
+
+void QuackServer::CleanupExpiredConnection(QuackConnection &connection) {
+	if (connection.duckdb_connection) {
+		connection.duckdb_connection->Interrupt();
+	}
+	connection.insert.Detach().AbortAndJoin("connection heartbeat lease expired");
+}
+
+void QuackServer::ReapExpiredConnections() {
+	vector<shared_ptr<QuackConnection>> expired_connections;
+	auto now = steady_clock::now();
+	{
+		std::lock_guard<std::mutex> guard(active_connections_mutex);
+		for (auto entry = active_connections.begin(); entry != active_connections.end();) {
+			if (!entry->second->TryExpireLease(now)) {
+				++entry;
+				continue;
+			}
+			expired_connections.push_back(std::move(entry->second));
+			entry = active_connections.erase(entry);
+		}
+	}
+	for (auto &connection : expired_connections) {
+		CleanupExpiredConnection(*connection);
+	}
+}
+
+bool QuackServer::RenewConnectionLease(const string &connection_id, const shared_ptr<QuackConnection> &connection) {
+	shared_ptr<QuackConnection> expired_connection;
+	{
+		std::lock_guard<std::mutex> guard(active_connections_mutex);
+		auto entry = active_connections.find(connection_id);
+		if (entry == active_connections.end() || entry->second.get() != connection.get()) {
+			return false;
+		}
+		if (connection->TryRenewLease()) {
+			return true;
+		}
+		expired_connection = std::move(entry->second);
+		active_connections.erase(entry);
+	}
+	CleanupExpiredConnection(*expired_connection);
+	return false;
 }
 
 vector<QuackConnectionSnapshot> QuackServer::GetActiveConnectionSnap() {
@@ -363,7 +468,9 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
 	auto received_message = QuackMessage::DeserializeMessage(deserializer, header);
 	if (connection) {
 		// Only supported, structurally valid messages for an existing session renew its lease.
-		connection->RenewLease();
+		if (!RenewConnectionLease(header.connection_id, connection)) {
+			return make_uniq<ErrorResponse>("Connection heartbeat lease expired");
+		}
 	}
 
 	// process the message
