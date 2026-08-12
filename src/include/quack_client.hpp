@@ -59,13 +59,17 @@ public:
 	static unique_ptr<QuackClient> GetClient(ClientContext &context, const QuackUri &uri);
 
 	static shared_ptr<QuackClientConnection> ConnectToServer(ClientContext &context, const QuackUri &uri, string token,
-	                                                         string client_id = {});
+	                                                         string client_id, idx_t heartbeat_timeout_seconds);
 
 	//! Resolve the effective client_id for a new connection
 	static string ResolveClientId(ClientContext &context, optional_ptr<const Value> explicit_value);
+	//! Resolve the requested heartbeat lease timeout for a new connection
+	static idx_t ResolveHeartbeatTimeout(ClientContext &context, optional_ptr<const Value> explicit_value);
 
 	//! Throw unless `client_id` is either empty ("no client_id") or >= 4 characters
 	static void ValidateClientId(const string &client_id);
+	//! Heartbeat leases must have a positive timeout.
+	static void ValidateHeartbeatTimeout(idx_t heartbeat_timeout_seconds);
 
 protected:
 	//! Resolve the logger for a request: the context (per-query) logger when available, else the db logger.
@@ -86,7 +90,7 @@ private:
 class QuackClientConnection : public enable_shared_from_this<QuackClientConnection> {
 public:
 	explicit QuackClientConnection(unique_ptr<QuackClient> client_p, QuackUri uri_p, string connection_id_p,
-	                               idx_t max_connections_cached = 1);
+	                               idx_t heartbeat_timeout_seconds_p, idx_t max_connections_cached = 1);
 	~QuackClientConnection();
 
 	void CancelQuery(hugeint_t query_uuid);
@@ -97,6 +101,9 @@ public:
 	const QuackUri &ServerURI() const {
 		return uri;
 	}
+	idx_t HeartbeatTimeoutSeconds() const {
+		return heartbeat_timeout_seconds;
+	}
 
 	//! Get a client (either a cached one, or open a new one if required)
 	unique_ptr<QuackClientWrapper> GetClient(ClientContext &context) const;
@@ -106,6 +113,8 @@ public:
 private:
 	QuackUri uri;
 	string connection_id;
+	//! Timeout requested by this logical client; negotiation is added with the heartbeat protocol.
+	idx_t heartbeat_timeout_seconds;
 	mutable mutex lock;
 	//! Bounds cached_clients: each cached client holds a persistent socket that pins a server
 	//! connection slot, so an unbounded cache would let one attach starve the server's budget.

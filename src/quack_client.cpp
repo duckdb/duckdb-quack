@@ -161,9 +161,9 @@ unique_ptr<QuackClient> QuackClient::GetClient(ClientContext &context, const Qua
 }
 
 QuackClientConnection::QuackClientConnection(unique_ptr<QuackClient> client_p, QuackUri uri_p, string connection_id_p,
-                                             idx_t max_connections_cached_p)
+                                             idx_t heartbeat_timeout_seconds_p, idx_t max_connections_cached_p)
     : uri(std::move(uri_p)), connection_id(std::move(connection_id_p)),
-      max_connections_cached(max_connections_cached_p) {
+      heartbeat_timeout_seconds(heartbeat_timeout_seconds_p), max_connections_cached(max_connections_cached_p) {
 	if (client_p) {
 		StoreClient(std::move(client_p));
 	}
@@ -203,11 +203,35 @@ string QuackClient::ResolveClientId(ClientContext &context, optional_ptr<const V
 	return string();
 }
 
+void QuackClient::ValidateHeartbeatTimeout(idx_t heartbeat_timeout_seconds) {
+	if (heartbeat_timeout_seconds == 0) {
+		throw InvalidInputException("heartbeat_timeout must be greater than zero");
+	}
+}
+
+idx_t QuackClient::ResolveHeartbeatTimeout(ClientContext &context, optional_ptr<const Value> explicit_value) {
+	Value timeout_value;
+	if (explicit_value) {
+		if (explicit_value->IsNull()) {
+			throw InvalidInputException("heartbeat_timeout cannot be null");
+		}
+		timeout_value = *explicit_value;
+	} else if (!context.TryGetCurrentSetting("quack_default_heartbeat_timeout", timeout_value) ||
+	           timeout_value.IsNull()) {
+		throw InternalException("quack_default_heartbeat_timeout is not registered");
+	}
+	auto timeout_seconds = timeout_value.GetValue<idx_t>();
+	ValidateHeartbeatTimeout(timeout_seconds);
+	return timeout_seconds;
+}
+
 shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &context, const QuackUri &uri,
-                                                               string token, string client_id) {
+                                                               string token, string client_id,
+                                                               idx_t heartbeat_timeout_seconds) {
 	// Single choke point for every connection path (ATTACH + quack_query), so a malformed client_id is
 	// rejected here regardless of where it came from.
 	ValidateClientId(client_id);
+	ValidateHeartbeatTimeout(heartbeat_timeout_seconds);
 	// if no token is provided fetch it from the secret manager
 	if (token.empty()) {
 		auto &secret_manager = SecretManager::Get(context);
@@ -238,7 +262,8 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 	// Cache at most one client per async send slot: pending SEND_DATA tasks can check out far more
 	// clients than ever POST concurrently, and each cached client pins a server connection slot.
 	idx_t pool_size = MaxValue<idx_t>(1, (idx_t)TaskScheduler::GetScheduler(context).NumberOfAsyncThreads());
-	return make_shared_ptr<QuackClientConnection>(std::move(client), uri, std::move(connection_id), pool_size);
+	return make_shared_ptr<QuackClientConnection>(std::move(client), uri, std::move(connection_id),
+	                                              heartbeat_timeout_seconds, pool_size);
 }
 
 unique_ptr<QuackClientWrapper> QuackClientConnection::GetClient(ClientContext &context) const {
