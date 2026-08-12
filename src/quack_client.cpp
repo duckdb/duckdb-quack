@@ -251,19 +251,21 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 
 	// submit the connection request
 	auto connection_request_response = client->Request<ConnectionResponseMessage>(
-	    context, make_uniq<ConnectionRequestMessage>(token, std::move(client_id)));
+	    context, make_uniq<ConnectionRequestMessage>(token, std::move(client_id), heartbeat_timeout_seconds));
 	// Validate the server's selected protocol version before trusting the connection (client speaks QUACK_VERSION).
 	if (connection_request_response->QuackVersion() != QUACK_VERSION) {
 		throw IOException("Incompatible Quack protocol version: server uses %llu, client supports %llu",
 		                  connection_request_response->QuackVersion(), QUACK_VERSION);
 	}
+	auto accepted_heartbeat_timeout_seconds = connection_request_response->HeartbeatTimeoutSeconds();
+	ValidateHeartbeatTimeout(accepted_heartbeat_timeout_seconds);
 	// success! we got a connection id
 	auto connection_id = connection_request_response->ConnectionId();
 	// Cache at most one client per async send slot: pending SEND_DATA tasks can check out far more
 	// clients than ever POST concurrently, and each cached client pins a server connection slot.
 	idx_t pool_size = MaxValue<idx_t>(1, (idx_t)TaskScheduler::GetScheduler(context).NumberOfAsyncThreads());
 	return make_shared_ptr<QuackClientConnection>(std::move(client), uri, std::move(connection_id),
-	                                              heartbeat_timeout_seconds, pool_size);
+	                                              accepted_heartbeat_timeout_seconds, pool_size);
 }
 
 unique_ptr<QuackClientWrapper> QuackClientConnection::GetClient(ClientContext &context) const {

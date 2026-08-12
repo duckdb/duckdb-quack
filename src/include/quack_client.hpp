@@ -113,7 +113,7 @@ public:
 private:
 	QuackUri uri;
 	string connection_id;
-	//! Timeout requested by this logical client; negotiation is added with the heartbeat protocol.
+	//! Lease timeout accepted by the server during the connection handshake.
 	idx_t heartbeat_timeout_seconds;
 	mutable mutex lock;
 	//! Bounds cached_clients: each cached client holds a persistent socket that pins a server

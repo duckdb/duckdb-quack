@@ -297,6 +297,7 @@ bool ServerSupportsMessage(MessageType type) {
 	case MessageType::CANCEL_REQUEST:
 	case MessageType::FINALIZE:
 	case MessageType::ACKNOWLEDGEMENT:
+	case MessageType::HEARTBEAT_REQUEST:
 		return true;
 	default:
 		return false;
@@ -397,7 +398,7 @@ static vector<unique_ptr<DataChunkWrapper>> CreateBatch(Allocator &allocator, un
 
 unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db, QuackMessage &received_message,
                                                             optional_ptr<QuackConnection> connection_p) {
-	if (connection_p) {
+	if (connection_p && received_message.Type() != MessageType::HEARTBEAT_REQUEST) {
 		// A message unrelated to the active insert stream means it was abandoned (client source failed, no
 		// FINALIZE) — abort it so it rolls back and releases the connection lock.
 		connection_p->insert.DetachIfUnrelated(StreamIdForMessage(received_message))
@@ -412,6 +413,10 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			return make_uniq<ErrorResponse>(StringUtil::Format(
 			    "Unsupported Quack version - server only supports version %llu of quack", QUACK_VERSION));
 		}
+		auto heartbeat_timeout_seconds = connection_request_message.HeartbeatTimeoutSeconds();
+		if (heartbeat_timeout_seconds == 0) {
+			return make_uniq<ErrorResponse>("heartbeat_timeout must be greater than zero");
+		}
 		string session_id = GenerateSessionId();
 		auto auth_result = EvaluateAuthQuery(
 		    db, StringUtil::Format("SELECT %s(?, ?, ?)", GetSettingString(db, "quack_authentication_function")),
@@ -425,7 +430,8 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		if (!connection_request_message.ClientId().empty()) {
 			client_id_hash = ComputeClientHash(server_hmac_key, connection_request_message.ClientId());
 		}
-		return make_uniq<ConnectionResponseMessage>(CreateNewConnection(session_id, client_id_hash));
+		return make_uniq<ConnectionResponseMessage>(CreateNewConnection(session_id, client_id_hash),
+		                                            heartbeat_timeout_seconds);
 	}
 	case MessageType::DISCONNECT_MESSAGE: {
 		auto &connection = *connection_p;
@@ -663,6 +669,9 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		return make_uniq<SuccessResponse>();
 	}
 	case MessageType::ACKNOWLEDGEMENT: {
+		return make_uniq<SuccessResponse>();
+	}
+	case MessageType::HEARTBEAT_REQUEST: {
 		return make_uniq<SuccessResponse>();
 	}
 	default: {

@@ -26,6 +26,7 @@ void ConnectionRequestMessage::Serialize(Serializer &serializer) const {
 	serializer.WritePropertyWithDefault<idx_t>(4, "min_supported_quack_version", min_supported_quack_version);
 	serializer.WritePropertyWithDefault<idx_t>(5, "max_supported_quack_version", max_supported_quack_version);
 	serializer.WritePropertyWithDefault<string>(6, "client_id", client_id);
+	serializer.WritePropertyWithDefault<idx_t>(7, "heartbeat_timeout_seconds", heartbeat_timeout_seconds);
 }
 
 unique_ptr<ConnectionRequestMessage> ConnectionRequestMessage::Deserialize(Deserializer &deserializer) {
@@ -36,6 +37,7 @@ unique_ptr<ConnectionRequestMessage> ConnectionRequestMessage::Deserialize(Deser
 	deserializer.ReadPropertyWithDefault<idx_t>(4, "min_supported_quack_version", result->min_supported_quack_version);
 	deserializer.ReadPropertyWithDefault<idx_t>(5, "max_supported_quack_version", result->max_supported_quack_version);
 	deserializer.ReadPropertyWithDefault<string>(6, "client_id", result->client_id);
+	deserializer.ReadPropertyWithDefault<idx_t>(7, "heartbeat_timeout_seconds", result->heartbeat_timeout_seconds);
 	return result;
 }
 
@@ -43,6 +45,7 @@ void ConnectionResponseMessage::Serialize(Serializer &serializer) const {
 	serializer.WritePropertyWithDefault<string>(1, "server_duckdb_version", server_duckdb_version);
 	serializer.WritePropertyWithDefault<string>(2, "server_platform", server_platform);
 	serializer.WritePropertyWithDefault<idx_t>(3, "quack_version", quack_version);
+	serializer.WritePropertyWithDefault<idx_t>(4, "heartbeat_timeout_seconds", heartbeat_timeout_seconds);
 }
 
 unique_ptr<ConnectionResponseMessage> ConnectionResponseMessage::Deserialize(Deserializer &deserializer) {
@@ -50,6 +53,7 @@ unique_ptr<ConnectionResponseMessage> ConnectionResponseMessage::Deserialize(Des
 	deserializer.ReadPropertyWithDefault<string>(1, "server_duckdb_version", result->server_duckdb_version);
 	deserializer.ReadPropertyWithDefault<string>(2, "server_platform", result->server_platform);
 	deserializer.ReadPropertyWithDefault<idx_t>(3, "quack_version", result->quack_version);
+	deserializer.ReadPropertyWithDefault<idx_t>(4, "heartbeat_timeout_seconds", result->heartbeat_timeout_seconds);
 	return result;
 }
 
@@ -103,6 +107,14 @@ unique_ptr<FinalizeMessage> FinalizeMessage::Deserialize(Deserializer &deseriali
 	deserializer.ReadProperty<hugeint_t>(1, "query_uuid", result->query_uuid);
 	deserializer.ReadPropertyWithExplicitDefault<optional_idx>(2, "min_batch_watermark", result->min_batch_watermark,
 	                                                           optional_idx());
+	return result;
+}
+
+void HeartbeatRequestMessage::Serialize(Serializer &serializer) const {
+}
+
+unique_ptr<HeartbeatRequestMessage> HeartbeatRequestMessage::Deserialize(Deserializer &deserializer) {
+	auto result = duckdb::unique_ptr<HeartbeatRequestMessage>(new HeartbeatRequestMessage());
 	return result;
 }
 
