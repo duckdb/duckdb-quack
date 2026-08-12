@@ -18,6 +18,7 @@
 #include "include/storage/quack_catalog.hpp"
 #include "quack_active_connections.hpp"
 #include "quack_clear_cache.hpp"
+#include "quack_client.hpp"
 #include "quack_extension.hpp"
 #include "quack_log.hpp"
 #include "quack_scan.hpp"
@@ -38,6 +39,7 @@ static void ValidatePositiveHeartbeatTimeout(ClientContext &, SetScope, Value &p
 	if (parameter.IsNull() || parameter.GetValue<idx_t>() == 0) {
 		throw InvalidInputException("Heartbeat timeout settings must be greater than zero");
 	}
+	QuackClient::ValidateHeartbeatTimeout(parameter.GetValue<idx_t>());
 }
 
 static unique_ptr<BaseSecret> CreateQuackSecretFromConfig(ClientContext &, CreateSecretInput &input) {

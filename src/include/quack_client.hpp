@@ -1,5 +1,9 @@
 #pragma once
 
+#include <condition_variable>
+#include <thread>
+
+#include "duckdb/common/chrono.hpp"
 #include "duckdb/common/http_util.hpp"
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/types/value.hpp"
@@ -89,8 +93,9 @@ private:
 
 class QuackClientConnection : public enable_shared_from_this<QuackClientConnection> {
 public:
-	explicit QuackClientConnection(unique_ptr<QuackClient> client_p, QuackUri uri_p, string connection_id_p,
-	                               idx_t heartbeat_timeout_seconds_p, idx_t max_connections_cached = 1);
+	explicit QuackClientConnection(DatabaseInstance &db_p, unique_ptr<QuackClient> client_p, QuackUri uri_p,
+	                               string connection_id_p, idx_t heartbeat_timeout_seconds_p,
+	                               idx_t max_connections_cached = 1);
 	~QuackClientConnection();
 
 	void CancelQuery(hugeint_t query_uuid);
@@ -111,6 +116,14 @@ public:
 	void StoreClient(unique_ptr<QuackClient> client_p) const;
 
 private:
+	friend class QuackClient;
+
+	void StartHeartbeat();
+	void StopHeartbeat();
+	void HeartbeatLoop();
+	unique_ptr<QuackClient> TakeClient(optional_ptr<ClientContext> context) const;
+
+	DatabaseInstance &db;
 	QuackUri uri;
 	string connection_id;
 	//! Lease timeout accepted by the server during the connection handshake.
@@ -120,6 +133,11 @@ private:
 	//! connection slot, so an unbounded cache would let one attach starve the server's budget.
 	idx_t max_connections_cached;
 	mutable vector<unique_ptr<QuackClient>> cached_clients;
+
+	std::thread heartbeat_thread;
+	std::mutex heartbeat_lock;
+	std::condition_variable heartbeat_cv;
+	bool heartbeat_stopping = false;
 };
 
 struct QuackClientWrapper {

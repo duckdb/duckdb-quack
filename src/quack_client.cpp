@@ -1,4 +1,5 @@
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/common/random_engine.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
@@ -8,6 +9,13 @@
 #include "quack_uri.hpp"
 
 namespace duckdb {
+
+static constexpr idx_t MAX_HEARTBEAT_TIMEOUT_SECONDS = static_cast<idx_t>(NumericLimits<int64_t>::Maximum() / 1000);
+
+static milliseconds HeartbeatInterval(idx_t heartbeat_timeout_seconds, RandomEngine &random) {
+	auto interval_ms = heartbeat_timeout_seconds * 1000 / 3;
+	return milliseconds(static_cast<int64_t>(interval_ms * random.NextRandom(0.8, 1.2)));
+}
 
 template <class T>
 string GetUriPart(T ele) {
@@ -160,9 +168,10 @@ unique_ptr<QuackClient> QuackClient::GetClient(ClientContext &context, const Qua
 	return GetClient(*context.db, uri);
 }
 
-QuackClientConnection::QuackClientConnection(unique_ptr<QuackClient> client_p, QuackUri uri_p, string connection_id_p,
-                                             idx_t heartbeat_timeout_seconds_p, idx_t max_connections_cached_p)
-    : uri(std::move(uri_p)), connection_id(std::move(connection_id_p)),
+QuackClientConnection::QuackClientConnection(DatabaseInstance &db_p, unique_ptr<QuackClient> client_p, QuackUri uri_p,
+                                             string connection_id_p, idx_t heartbeat_timeout_seconds_p,
+                                             idx_t max_connections_cached_p)
+    : db(db_p), uri(std::move(uri_p)), connection_id(std::move(connection_id_p)),
       heartbeat_timeout_seconds(heartbeat_timeout_seconds_p), max_connections_cached(max_connections_cached_p) {
 	if (client_p) {
 		StoreClient(std::move(client_p));
@@ -170,12 +179,47 @@ QuackClientConnection::QuackClientConnection(unique_ptr<QuackClient> client_p, Q
 }
 
 QuackClientConnection::~QuackClientConnection() {
-	if (!cached_clients.empty()) {
-		try {
-			auto &client = cached_clients.back();
-			client->Request<SuccessResponse>(nullptr, make_uniq<DisconnectMessage>(connection_id));
-		} catch (...) {
+	StopHeartbeat();
+	try {
+		auto client = TakeClient(nullptr);
+		client->Request<SuccessResponse>(nullptr, make_uniq<DisconnectMessage>(connection_id));
+	} catch (...) {
+	}
+}
+
+void QuackClientConnection::StartHeartbeat() {
+	D_ASSERT(!heartbeat_thread.joinable());
+	heartbeat_thread = std::thread(&QuackClientConnection::HeartbeatLoop, this);
+}
+
+void QuackClientConnection::StopHeartbeat() {
+	{
+		std::lock_guard<std::mutex> guard(heartbeat_lock);
+		heartbeat_stopping = true;
+	}
+	heartbeat_cv.notify_one();
+	if (heartbeat_thread.joinable()) {
+		heartbeat_thread.join();
+	}
+}
+
+void QuackClientConnection::HeartbeatLoop() {
+	RandomEngine random;
+	std::unique_lock<std::mutex> guard(heartbeat_lock);
+	while (!heartbeat_stopping) {
+		if (heartbeat_cv.wait_for(guard, HeartbeatInterval(heartbeat_timeout_seconds, random),
+		                          [&] { return heartbeat_stopping; })) {
+			break;
 		}
+		guard.unlock();
+		try {
+			auto client = TakeClient(nullptr);
+			client->Request<SuccessResponse>(nullptr, make_uniq<HeartbeatRequestMessage>(connection_id));
+			StoreClient(std::move(client));
+		} catch (...) {
+			// A failed attempt is not terminal.
+		}
+		guard.lock();
 	}
 }
 
@@ -206,6 +250,9 @@ string QuackClient::ResolveClientId(ClientContext &context, optional_ptr<const V
 void QuackClient::ValidateHeartbeatTimeout(idx_t heartbeat_timeout_seconds) {
 	if (heartbeat_timeout_seconds == 0) {
 		throw InvalidInputException("heartbeat_timeout must be greater than zero");
+	}
+	if (heartbeat_timeout_seconds > MAX_HEARTBEAT_TIMEOUT_SECONDS) {
+		throw InvalidInputException("heartbeat_timeout is too large");
 	}
 }
 
@@ -264,23 +311,30 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 	// Cache at most one client per async send slot: pending SEND_DATA tasks can check out far more
 	// clients than ever POST concurrently, and each cached client pins a server connection slot.
 	idx_t pool_size = MaxValue<idx_t>(1, (idx_t)TaskScheduler::GetScheduler(context).NumberOfAsyncThreads());
-	return make_shared_ptr<QuackClientConnection>(std::move(client), uri, std::move(connection_id),
-	                                              accepted_heartbeat_timeout_seconds, pool_size);
+	auto connection = make_shared_ptr<QuackClientConnection>(
+	    *context.db, std::move(client), uri, std::move(connection_id), accepted_heartbeat_timeout_seconds, pool_size);
+	connection->StartHeartbeat();
+	return connection;
+}
+
+unique_ptr<QuackClient> QuackClientConnection::TakeClient(optional_ptr<ClientContext> context) const {
+	unique_ptr<QuackClient> result;
+	{
+		lock_guard<mutex> guard(lock);
+		if (!cached_clients.empty()) {
+			result = std::move(cached_clients.back());
+			cached_clients.pop_back();
+		}
+	}
+	if (!result) {
+		result = QuackClient::GetClient(db, uri);
+	}
+	result->SetRequestLogger(context ? context->logger : nullptr);
+	return result;
 }
 
 unique_ptr<QuackClientWrapper> QuackClientConnection::GetClient(ClientContext &context) const {
-	lock_guard<mutex> guard(lock);
-	unique_ptr<QuackClient> result;
-	if (!cached_clients.empty()) {
-		// use client from the cache
-		result = std::move(cached_clients.back());
-		cached_clients.pop_back();
-	} else {
-		// instantiate a new client
-		result = QuackClient::GetClient(context, uri);
-	}
-	// Stamp the checking-out query's logger so this client's POSTs (incl. off-thread async sends) are logged.
-	result->SetRequestLogger(context.logger);
+	auto result = TakeClient(context);
 	return make_uniq<QuackClientWrapper>(std::move(result), shared_from_this());
 }
 
