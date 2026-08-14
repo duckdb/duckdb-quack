@@ -62,6 +62,9 @@ MessageType EnumUtil::FromString<MessageType>(const char *value) {
 	if (StringUtil::Equals(value, "ACKNOWLEDGEMENT")) {
 		return MessageType::ACKNOWLEDGEMENT;
 	}
+	if (StringUtil::Equals(value, "HEARTBEAT_REQUEST")) {
+		return MessageType::HEARTBEAT_REQUEST;
+	}
 	if (StringUtil::Equals(value, "ERROR_RESPONSE")) {
 		return MessageType::ERROR_RESPONSE;
 	}
@@ -98,6 +101,8 @@ const char *EnumUtil::ToChars<MessageType>(MessageType value) {
 		return "FINALIZE";
 	case MessageType::ACKNOWLEDGEMENT:
 		return "ACKNOWLEDGEMENT";
+	case MessageType::HEARTBEAT_REQUEST:
+		return "HEARTBEAT_REQUEST";
 	case MessageType::ERROR_RESPONSE:
 		return "ERROR_RESPONSE";
 
@@ -152,6 +157,8 @@ unique_ptr<QuackMessage> QuackMessage::Deserialize(Deserializer &deserializer, M
 		return FinalizeMessage::Deserialize(deserializer);
 	case MessageType::ACKNOWLEDGEMENT:
 		return AcknowledgementMessage::Deserialize(deserializer);
+	case MessageType::HEARTBEAT_REQUEST:
+		return HeartbeatRequestMessage::Deserialize(deserializer);
 	case MessageType::ERROR_RESPONSE:
 		return ErrorResponse::Deserialize(deserializer);
 	default:
@@ -175,15 +182,18 @@ unique_ptr<QuackMessage> QuackMessage::DeserializeMessage(BinaryDeserializer &de
 	return result;
 }
 
-ConnectionRequestMessage::ConnectionRequestMessage(const string &auth_string_p, string client_id_p)
+ConnectionRequestMessage::ConnectionRequestMessage(const string &auth_string_p, string client_id_p,
+                                                   idx_t heartbeat_timeout_seconds_p)
     : QuackMessage(TYPE), auth_string(auth_string_p), client_id(std::move(client_id_p)),
       client_duckdb_version(DuckDB::LibraryVersion()), client_platform(DuckDB::Platform()),
-      min_supported_quack_version(QUACK_VERSION), max_supported_quack_version(QUACK_VERSION) {
+      min_supported_quack_version(QUACK_VERSION), max_supported_quack_version(QUACK_VERSION),
+      heartbeat_timeout_seconds(heartbeat_timeout_seconds_p) {
 }
 
-ConnectionResponseMessage::ConnectionResponseMessage(string connection_id_p)
+ConnectionResponseMessage::ConnectionResponseMessage(string connection_id_p, idx_t heartbeat_timeout_seconds_p)
     : QuackMessage(TYPE, std::move(connection_id_p)), server_duckdb_version(DuckDB::LibraryVersion()),
-      server_platform(DuckDB::Platform()), quack_version(QUACK_VERSION) {
+      server_platform(DuckDB::Platform()), quack_version(QUACK_VERSION),
+      heartbeat_timeout_seconds(heartbeat_timeout_seconds_p) {
 }
 
 unique_ptr<QuackMessage> QuackMessage::FromMemoryStream(MemoryStream &read_stream) {

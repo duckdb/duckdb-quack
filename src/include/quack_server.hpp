@@ -3,6 +3,7 @@
 #include <queue>
 #include <thread>
 
+#include "duckdb/common/chrono.hpp"
 #include "duckdb/common/atomic.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/optional_idx.hpp"
@@ -64,8 +65,13 @@ struct QuackInsertState {
 };
 
 struct QuackConnection {
-	explicit QuackConnection(string session_id_p);
+	explicit QuackConnection(string session_id_p, idx_t heartbeat_timeout_seconds_p);
 	~QuackConnection();
+
+	//! Renew unless the timeout has already elapsed. Once expired, a lease cannot be revived.
+	bool TryRenewLease();
+	//! True if the lease timeout has elapsed, latching the expiry ("cannot be revived").
+	bool LeaseExpiredLocked(time_point<steady_clock> now) DUCKDB_REQUIRES(lease_lock);
 
 	mutex lock;
 	unique_ptr<Connection> duckdb_connection;
@@ -99,6 +105,13 @@ struct QuackConnection {
 	//! Stable per-client reconnect key: HMAC-SHA256(server_hmac_key, client_id). Intentionally excludes
 	//! session_id so it stays identical across (re)connections for the same client_id. Empty if no client_id.
 	string client_id_hash;
+
+	//! Heartbeat and lease variables
+	const idx_t heartbeat_timeout_seconds;
+	annotated_mutex lease_lock;
+	time_point<steady_clock> lease_last_renewed_at DUCKDB_GUARDED_BY(lease_lock);
+	bool lease_expired DUCKDB_GUARDED_BY(lease_lock) = false;
+
 	string sql_query;
 	QuackQueryState query_state = QuackQueryState::IDLE;
 	timestamp_t query_started_at {0};
@@ -148,7 +161,7 @@ public:
 	virtual void Close() {};
 
 	shared_ptr<QuackConnection> GetConnection(const string &connection_id);
-	string CreateNewConnection(const string &session_id, const string &client_id_hash = {});
+	string CreateNewConnection(const string &session_id, const string &client_id_hash, idx_t heartbeat_timeout_seconds);
 	bool DisconnectConnection(const string &session_id);
 	// TODO need something to destroy connections
 
@@ -201,10 +214,11 @@ protected:
 	QuackUri uri;
 
 private:
+	bool RenewConnectionLease(const string &connection_id, const shared_ptr<QuackConnection> &connection);
+	static void CleanupExpiredConnection(QuackConnection &connection);
 	//! Destroys reaped caches on a one-shot detached thread so no response waits on their teardown
 	void DestroyCachesDetached(vector<unique_ptr<QuackResultCache>> doomed);
 
-private:
 	string token;
 	//! Per-server random key that seeds the HMAC for client_id_hash.
 	string server_hmac_key;

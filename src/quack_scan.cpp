@@ -45,7 +45,11 @@ static unique_ptr<FunctionData> QuackScanBind(ClientContext &context, TableFunct
 	auto client_id_entry = input.named_parameters.find("client_id");
 	auto client_id = QuackClient::ResolveClientId(
 	    context, client_id_entry != input.named_parameters.end() ? &client_id_entry->second : nullptr);
-	bind_data->client_connection = QuackClient::ConnectToServer(context, server_uri, token, std::move(client_id));
+	auto heartbeat_timeout_entry = input.named_parameters.find("heartbeat_timeout");
+	auto heartbeat_timeout = QuackClient::ResolveHeartbeatTimeout(
+	    context, heartbeat_timeout_entry != input.named_parameters.end() ? &heartbeat_timeout_entry->second : nullptr);
+	bind_data->client_connection =
+	    QuackClient::ConnectToServer(context, server_uri, token, std::move(client_id), heartbeat_timeout);
 	auto &client_connection = *bind_data->client_connection;
 
 	auto client_wrapper = client_connection.GetClient(context);
@@ -455,6 +459,7 @@ TableFunction QuackScanFunction::GetFunction() {
 	fun.named_parameters["disable_ssl"] = LogicalType::BOOLEAN;
 	fun.named_parameters["token"] = LogicalType::VARCHAR;
 	fun.named_parameters["client_id"] = LogicalType::VARCHAR;
+	fun.named_parameters["heartbeat_timeout"] = LogicalType::UBIGINT;
 
 	fun.projection_pushdown = true;
 	fun.get_partition_data = QuackScanGetPartitionData;

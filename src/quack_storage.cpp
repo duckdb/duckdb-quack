@@ -103,7 +103,11 @@ static unique_ptr<Catalog> QuackAttach(optional_ptr<StorageExtensionInfo> storag
 	auto client_id_entry = attach_options.options.find("client_id");
 	auto client_id = QuackClient::ResolveClientId(
 	    context, client_id_entry != attach_options.options.end() ? &client_id_entry->second : nullptr);
-	return make_uniq<QuackCatalog>(db, QuackUri(uri, enable_ssl), context, token, std::move(client_id));
+	auto heartbeat_timeout_entry = attach_options.options.find("heartbeat_timeout");
+	auto heartbeat_timeout = QuackClient::ResolveHeartbeatTimeout(
+	    context, heartbeat_timeout_entry != attach_options.options.end() ? &heartbeat_timeout_entry->second : nullptr);
+	return make_uniq<QuackCatalog>(db, QuackUri(uri, enable_ssl), context, token, std::move(client_id),
+	                               heartbeat_timeout);
 }
 
 static unique_ptr<TransactionManager> QuackCreateTransactionManager(optional_ptr<StorageExtensionInfo> storage_info,

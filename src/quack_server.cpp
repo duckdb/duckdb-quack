@@ -20,7 +20,36 @@
 #include "mbedtls_wrapper.hpp"
 
 namespace duckdb {
-QuackConnection::QuackConnection(string session_id_p) : session_id(std::move(session_id_p)) {
+
+static bool LeaseTimeoutElapsed(time_point<steady_clock> last_renewed_at, time_point<steady_clock> now,
+                                idx_t timeout_seconds) {
+	if (now <= last_renewed_at) {
+		return false;
+	}
+	auto elapsed_seconds = duration_cast<std::chrono::seconds>(now - last_renewed_at).count();
+	return static_cast<idx_t>(elapsed_seconds) >= timeout_seconds;
+}
+
+QuackConnection::QuackConnection(string session_id_p, idx_t heartbeat_timeout_seconds_p)
+    : session_id(std::move(session_id_p)), heartbeat_timeout_seconds(heartbeat_timeout_seconds_p),
+      lease_last_renewed_at(steady_clock::now()) {
+}
+
+bool QuackConnection::LeaseExpiredLocked(time_point<steady_clock> now) {
+	if (!lease_expired && LeaseTimeoutElapsed(lease_last_renewed_at, now, heartbeat_timeout_seconds)) {
+		lease_expired = true;
+	}
+	return lease_expired;
+}
+
+bool QuackConnection::TryRenewLease() {
+	annotated_lock_guard<annotated_mutex> guard(lease_lock);
+	auto now = steady_clock::now();
+	if (LeaseExpiredLocked(now)) {
+		return false;
+	}
+	lease_last_renewed_at = now;
+	return true;
 }
 
 //! Finish + join + deregister a detached insert stream; returns any INSERT error. Call WITHOUT the lock.
@@ -152,6 +181,31 @@ QuackServer::QuackServer(ClientContext &context_p, const QuackUri &uri_p, const 
 QuackServer::~QuackServer() {
 }
 
+void QuackServer::CleanupExpiredConnection(QuackConnection &connection) {
+	if (connection.duckdb_connection) {
+		connection.duckdb_connection->Interrupt();
+	}
+	connection.insert.Detach().AbortAndJoin("connection heartbeat lease expired");
+}
+
+bool QuackServer::RenewConnectionLease(const string &connection_id, const shared_ptr<QuackConnection> &connection) {
+	shared_ptr<QuackConnection> expired_connection;
+	{
+		std::lock_guard<std::mutex> guard(active_connections_mutex);
+		auto entry = active_connections.find(connection_id);
+		if (entry == active_connections.end() || entry->second.get() != connection.get()) {
+			return false;
+		}
+		if (connection->TryRenewLease()) {
+			return true;
+		}
+		expired_connection = std::move(entry->second);
+		active_connections.erase(entry);
+	}
+	CleanupExpiredConnection(*expired_connection);
+	return false;
+}
+
 void QuackServer::DestroyCachesDetached(vector<unique_ptr<QuackResultCache>> doomed) {
 	if (doomed.empty()) {
 		return;
@@ -256,7 +310,8 @@ shared_ptr<QuackConnection> QuackServer::GetConnection(const string &connection_
 	return nullptr;
 }
 
-string QuackServer::CreateNewConnection(const string &session_id, const string &client_id_hash) {
+string QuackServer::CreateNewConnection(const string &session_id, const string &client_id_hash,
+                                        idx_t heartbeat_timeout_seconds) {
 	std::lock_guard<std::mutex> lock(active_connections_mutex);
 
 	D_ASSERT(active_connections.find(session_id) == active_connections.end());
@@ -265,7 +320,7 @@ string QuackServer::CreateNewConnection(const string &session_id, const string &
 	if (!db) {
 		throw InternalException("Database was closed");
 	}
-	auto new_connection = make_shared_ptr<QuackConnection>(session_id);
+	auto new_connection = make_shared_ptr<QuackConnection>(session_id, heartbeat_timeout_seconds);
 	new_connection->client_id_hash = client_id_hash;
 	new_connection->live_caches = live_caches;
 	new_connection->duckdb_connection = make_uniq<Connection>(*db);
@@ -380,6 +435,7 @@ bool ServerSupportsMessage(MessageType type) {
 	case MessageType::CANCEL_REQUEST:
 	case MessageType::FINALIZE:
 	case MessageType::ACKNOWLEDGEMENT:
+	case MessageType::HEARTBEAT_REQUEST:
 		return true;
 	default:
 		return false;
@@ -435,6 +491,12 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
 
 	// now deserialize the actual message
 	auto received_message = QuackMessage::DeserializeMessage(deserializer, header);
+	if (connection) {
+		// Only supported, structurally valid messages for an existing session renew its lease.
+		if (!RenewConnectionLease(header.connection_id, connection)) {
+			return make_uniq<ErrorResponse>("Connection heartbeat lease expired");
+		}
+	}
 
 	// process the message
 	auto response = HandleMessageInternal(*db, *received_message, connection);
@@ -457,7 +519,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
 
 unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db, QuackMessage &received_message,
                                                             optional_ptr<QuackConnection> connection_p) {
-	if (connection_p) {
+	if (connection_p && received_message.Type() != MessageType::HEARTBEAT_REQUEST) {
 		// A message unrelated to the active insert stream means it was abandoned (client source failed, no
 		// FINALIZE) — abort it so it rolls back and releases the connection lock.
 		connection_p->insert.DetachIfUnrelated(StreamIdForMessage(received_message))
@@ -472,6 +534,11 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			return make_uniq<ErrorResponse>(StringUtil::Format(
 			    "Unsupported Quack version - server only supports version %llu of quack", QUACK_VERSION));
 		}
+		auto heartbeat_timeout_seconds = connection_request_message.HeartbeatTimeoutSeconds();
+		if (heartbeat_timeout_seconds == 0 || heartbeat_timeout_seconds > MAX_HEARTBEAT_TIMEOUT_SECONDS) {
+			return make_uniq<ErrorResponse>(StringUtil::Format(
+			    "heartbeat_timeout out of range - must be between 1 and %llu seconds", MAX_HEARTBEAT_TIMEOUT_SECONDS));
+		}
 		string session_id = GenerateSessionId();
 		auto auth_result = EvaluateAuthQuery(
 		    db, StringUtil::Format("SELECT %s(?, ?, ?)", GetSettingString(db, "quack_authentication_function")),
@@ -485,7 +552,8 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		if (!connection_request_message.ClientId().empty()) {
 			client_id_hash = ComputeClientHash(server_hmac_key, connection_request_message.ClientId());
 		}
-		return make_uniq<ConnectionResponseMessage>(CreateNewConnection(session_id, client_id_hash));
+		return make_uniq<ConnectionResponseMessage>(
+		    CreateNewConnection(session_id, client_id_hash, heartbeat_timeout_seconds), heartbeat_timeout_seconds);
 	}
 	case MessageType::DISCONNECT_MESSAGE: {
 		auto &connection = *connection_p;
@@ -770,6 +838,9 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		}
 		// The client confirmed it received the full result, the replay cache has served its purpose
 		connection.ClearResultCache();
+		return make_uniq<SuccessResponse>();
+	}
+	case MessageType::HEARTBEAT_REQUEST: {
 		return make_uniq<SuccessResponse>();
 	}
 	default: {

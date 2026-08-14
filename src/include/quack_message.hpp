@@ -2,6 +2,7 @@
 
 #include "duckdb/common/serializer/binary_serializer.hpp"
 #include "duckdb/common/serializer/memory_stream.hpp"
+#include "duckdb/common/limits.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/common/types/uuid.hpp"
 #include "duckdb/common/error_data.hpp"
@@ -9,7 +10,10 @@
 namespace duckdb {
 
 //! Quack wire-protocol version. Client and server agree on it during the connection handshake.
-static constexpr idx_t QUACK_VERSION = 2;
+static constexpr idx_t QUACK_VERSION = 3;
+
+//! Upper bound both peers enforce on the heartbeat lease timeout
+static constexpr idx_t MAX_HEARTBEAT_TIMEOUT_SECONDS = static_cast<idx_t>(NumericLimits<int64_t>::Maximum() / 1000);
 
 enum class MessageType : uint8_t {
 	INVALID = 0,
@@ -26,6 +30,7 @@ enum class MessageType : uint8_t {
 	FINALIZE = 13,
 	SEND_DATA_RESPONSE = 14,
 	ACKNOWLEDGEMENT = 15,
+	HEARTBEAT_REQUEST = 16,
 	ERROR_RESPONSE = 100
 };
 
@@ -211,7 +216,8 @@ class ConnectionRequestMessage : public QuackMessage {
 public:
 	static constexpr MessageType TYPE = MessageType::CONNECTION_REQUEST;
 
-	explicit ConnectionRequestMessage(const string &auth_string_p, string client_id_p = {});
+	explicit ConnectionRequestMessage(const string &auth_string_p, string client_id_p,
+	                                  idx_t heartbeat_timeout_seconds_p);
 
 public:
 	const string &AuthString() const {
@@ -232,6 +238,9 @@ public:
 	const idx_t MaximumSupportedQuackVersion() const {
 		return max_supported_quack_version;
 	}
+	idx_t HeartbeatTimeoutSeconds() const {
+		return heartbeat_timeout_seconds;
+	}
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<ConnectionRequestMessage> Deserialize(Deserializer &deserializer);
 
@@ -246,13 +255,14 @@ private:
 	string client_platform;
 	idx_t min_supported_quack_version;
 	idx_t max_supported_quack_version;
+	idx_t heartbeat_timeout_seconds;
 };
 
 class ConnectionResponseMessage : public QuackMessage {
 public:
 	static constexpr MessageType TYPE = MessageType::CONNECTION_RESPONSE;
 
-	explicit ConnectionResponseMessage(string connection_id_p);
+	explicit ConnectionResponseMessage(string connection_id_p, idx_t heartbeat_timeout_seconds_p);
 
 protected:
 	ConnectionResponseMessage() : QuackMessage(TYPE) {
@@ -268,6 +278,9 @@ public:
 	idx_t QuackVersion() const {
 		return quack_version;
 	}
+	idx_t HeartbeatTimeoutSeconds() const {
+		return heartbeat_timeout_seconds;
+	}
 
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<ConnectionResponseMessage> Deserialize(Deserializer &deserializer);
@@ -276,6 +289,7 @@ private:
 	string server_duckdb_version;
 	string server_platform;
 	idx_t quack_version;
+	idx_t heartbeat_timeout_seconds;
 };
 
 class FetchRequestMessage : public QuackMessage {
@@ -472,6 +486,22 @@ public:
 
 protected:
 	DisconnectMessage() : QuackMessage(TYPE) {
+	}
+};
+
+//! Renews a logical connection lease.
+class HeartbeatRequestMessage : public QuackMessage {
+public:
+	static constexpr MessageType TYPE = MessageType::HEARTBEAT_REQUEST;
+
+	explicit HeartbeatRequestMessage(string connection_id_p) : QuackMessage(TYPE, std::move(connection_id_p)) {
+	}
+
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<HeartbeatRequestMessage> Deserialize(Deserializer &deserializer);
+
+protected:
+	HeartbeatRequestMessage() : QuackMessage(TYPE) {
 	}
 };
 
