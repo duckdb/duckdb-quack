@@ -168,7 +168,7 @@ The heartbeat works as follows: A `heartbeat_timeout` is set per logical connect
 An otherwise-idle client sends a heartbeat after approximately one third of the accepted timeout,
 with jitter to avoid synchronized traffic.
 Transient heartbeat failures do not immediately invalidate a connection, the server expires it only after the accepted 
-timeout has elapsed without valid traffic. Expiry removes the session and interrupts any abandoned query or insert.
+timeout has elapsed without valid traffic.
 
 ---
 

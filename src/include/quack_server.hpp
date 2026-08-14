@@ -11,7 +11,6 @@
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/unordered_map.hpp"
 
-#include "quack_periodic_worker.hpp"
 #include "quack_result_cache.hpp"
 #include "quack_uri.hpp"
 
@@ -71,8 +70,6 @@ struct QuackConnection {
 
 	//! Renew unless the timeout has already elapsed. Once expired, a lease cannot be revived.
 	bool TryRenewLease();
-	//! Atomically mark the lease expired if its timeout has elapsed.
-	bool TryExpireLease(time_point<steady_clock> now);
 	//! True if the lease timeout has elapsed, latching the expiry ("cannot be revived").
 	bool LeaseExpiredLocked(time_point<steady_clock> now) DUCKDB_REQUIRES(lease_lock);
 
@@ -218,7 +215,6 @@ protected:
 
 private:
 	bool RenewConnectionLease(const string &connection_id, const shared_ptr<QuackConnection> &connection);
-	void ReapExpiredConnections();
 	static void CleanupExpiredConnection(QuackConnection &connection);
 	//! Destroys reaped caches on a one-shot detached thread so no response waits on their teardown
 	void DestroyCachesDetached(vector<unique_ptr<QuackResultCache>> doomed);
@@ -226,8 +222,6 @@ private:
 	string token;
 	//! Per-server random key that seeds the HMAC for client_id_hash.
 	string server_hmac_key;
-
-	QuackPeriodicWorker lease_reaper;
 };
 
 class HttpQuackServer : public QuackServer {

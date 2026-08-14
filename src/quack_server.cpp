@@ -20,7 +20,6 @@
 #include "mbedtls_wrapper.hpp"
 
 namespace duckdb {
-static constexpr uint64_t LEASE_REAPER_INTERVAL_MS = 100;
 
 static bool LeaseTimeoutElapsed(time_point<steady_clock> last_renewed_at, time_point<steady_clock> now,
                                 idx_t timeout_seconds) {
@@ -51,11 +50,6 @@ bool QuackConnection::TryRenewLease() {
 	}
 	lease_last_renewed_at = now;
 	return true;
-}
-
-bool QuackConnection::TryExpireLease(time_point<steady_clock> now) {
-	annotated_lock_guard<annotated_mutex> guard(lease_lock);
-	return LeaseExpiredLocked(now);
 }
 
 //! Finish + join + deregister a detached insert stream; returns any INSERT error. Call WITHOUT the lock.
@@ -182,11 +176,9 @@ QuackServer::QuackServer(ClientContext &context_p, const QuackUri &uri_p, const 
     : db_ptr(context_p.db), uri(uri_p), token(token_p) {
 	ValidateToken(token);
 	server_hmac_key = GenerateRandomToken(*context_p.db);
-	lease_reaper.Start([] { return milliseconds(LEASE_REAPER_INTERVAL_MS); }, [this] { ReapExpiredConnections(); });
 }
 
 QuackServer::~QuackServer() {
-	lease_reaper.Stop();
 }
 
 void QuackServer::CleanupExpiredConnection(QuackConnection &connection) {
@@ -194,25 +186,6 @@ void QuackServer::CleanupExpiredConnection(QuackConnection &connection) {
 		connection.duckdb_connection->Interrupt();
 	}
 	connection.insert.Detach().AbortAndJoin("connection heartbeat lease expired");
-}
-
-void QuackServer::ReapExpiredConnections() {
-	vector<shared_ptr<QuackConnection>> expired_connections;
-	auto now = steady_clock::now();
-	{
-		std::lock_guard<std::mutex> guard(active_connections_mutex);
-		for (auto entry = active_connections.begin(); entry != active_connections.end();) {
-			if (!entry->second->TryExpireLease(now)) {
-				++entry;
-				continue;
-			}
-			expired_connections.push_back(std::move(entry->second));
-			entry = active_connections.erase(entry);
-		}
-	}
-	for (auto &connection : expired_connections) {
-		CleanupExpiredConnection(*connection);
-	}
 }
 
 bool QuackServer::RenewConnectionLease(const string &connection_id, const shared_ptr<QuackConnection> &connection) {
