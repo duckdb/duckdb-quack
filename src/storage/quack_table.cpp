@@ -39,7 +39,16 @@ QuackTableSet::QuackTableSet(ClientContext &context, QuackSchemaCatalogEntry &pa
 			if (info->type != CatalogType::TABLE_ENTRY) {
 				throw InternalException("Expected a CREATE TABLE");
 			}
-			// bind to resolve the types
+			auto &table_info = info->Cast<CreateTableInfo>();
+			vector<unique_ptr<Constraint>> constraints;
+			for (auto &constraint : table_info.constraints) {
+				if (constraint->type != ConstraintType::FOREIGN_KEY) {
+					constraints.push_back(std::move(constraint));
+				}
+			}
+			table_info.constraints = std::move(constraints);
+
+			// The server enforces foreign keys. Binding them here would resolve them in the client catalog.
 			auto binder = Binder::CreateBinder(context);
 			auto bound_info = binder->BindCreateTableInfo(std::move(info), schema);
 			auto table = make_uniq<QuackTableCatalogEntry>(catalog, parent, bound_info->Base());
