@@ -1,0 +1,58 @@
+# name: test/sql/attach_foreign_keys.test
+# description: attach a catalog with foreign keys
+# group: [sql]
+
+require quack
+
+require httpfs
+
+statement ok con1
+create table parent(id integer primary key);
+
+statement ok con1
+create table child(id integer primary key, parent_id integer references parent(id));
+
+statement ok con1
+insert into parent values (1);
+
+statement ok con1
+insert into child values (1, 1);
+
+foreach server 'quack:localhost'
+
+statement ok con1
+call quack_serve({server}, token='asdf');
+
+statement ok con2
+attach {server} as rpc (token 'asdf');
+
+query I con2
+select id from rpc.child;
+----
+1
+
+query I con2
+select id from rpc.parent;
+----
+1
+
+statement ok con2
+insert into rpc.child values (2, 1);
+
+statement error con2
+insert into rpc.child values (3, 99);
+----
+Violates foreign key constraint
+
+query I con2
+select count(*) from rpc.child;
+----
+2
+
+statement ok con2
+detach rpc;
+
+statement ok con1
+call quack_stop({server});
+
+endloop
