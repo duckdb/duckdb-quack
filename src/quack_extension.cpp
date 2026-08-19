@@ -107,13 +107,13 @@ static void QuackIdentifyFun(ClientContext &, TableFunctionInput &, DataChunk &)
 }
 
 static unique_ptr<FunctionData> QuackIdentifyBind(ClientContext &ctx, TableFunctionBindInput &input,
-                                                  vector<LogicalType> &return_types, vector<string> &names) {
+                                                  vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto &db_config = DBConfig::GetConfig(ctx);
 	for (auto &kv : input.named_parameters) {
 		if (kv.second.IsNull()) {
 			continue;
 		}
-		db_config.SetOptionByName("whoami_" + kv.first, kv.second);
+		db_config.SetOptionByName(Identifier("whoami_" + kv.first), kv.second);
 	}
 	return_types.emplace_back(LogicalType::BOOLEAN);
 	names.emplace_back("ok");
