@@ -57,7 +57,7 @@ struct QuackScanFromClientLocalState : public LocalTableFunctionState {
 };
 
 static unique_ptr<FunctionData> QuackScanFromClientBind(ClientContext &context, TableFunctionBindInput &input,
-                                                        vector<LogicalType> &return_types, vector<string> &names) {
+                                                        vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto stream_id = input.inputs[0].GetValue<string>();
 	auto stream = QuackStreamRegistry::Get().Find(stream_id);
 	if (!stream) {
@@ -79,7 +79,7 @@ static unique_ptr<FunctionData> QuackScanFromClientBind(ClientContext &context, 
 
 	for (idx_t i = 0; i < bind_data->types.size(); i++) {
 		return_types.push_back(bind_data->types[i]);
-		names.push_back("col" + to_string(i));
+		names.push_back(Identifier("col" + to_string(i)));
 	}
 	return std::move(bind_data);
 }

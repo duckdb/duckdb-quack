@@ -346,7 +346,7 @@ static string GetSettingString(DatabaseInstance &db, const string &setting_name)
 	Value setting_val;
 	auto &config = DBConfig::GetConfig(db);
 
-	auto lookup_result = config.TryGetCurrentSetting(setting_name, setting_val);
+	auto lookup_result = config.TryGetCurrentSetting(Identifier(setting_name), setting_val);
 	D_ASSERT(lookup_result);
 	D_ASSERT(setting_val.type().id() == LogicalTypeId::VARCHAR);
 	auto setting_str = setting_val.GetValue<string>();

@@ -7,6 +7,7 @@
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
+#include "duckdb/parser/sql_statement.hpp"
 #include "duckdb/planner/operator/logical_insert.hpp"
 #include "duckdb/storage/database_size.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
@@ -154,16 +155,31 @@ unique_ptr<TableRef> QuackCatalog::RemoteExecute(ClientContext &context, unique_
 	return RemoteExecute(context, node->ToString());
 }
 
+unique_ptr<TableRef> QuackCatalog::RemoteExecute(ClientContext &context, unique_ptr<SQLStatement> statement) {
+	// a statement pushed down as a whole is DDL - it changes the catalog on the server, so the local
+	// snapshot of the remote catalog has to be reloaded once the statement has run
+	return CreateRemoteQueryRef(statement->ToString(), true);
+}
+
 unique_ptr<TableRef> QuackCatalog::RemoteExecute(ClientContext &context, const string &sql) {
+	return CreateRemoteQueryRef(sql, false);
+}
+
+unique_ptr<TableRef> QuackCatalog::CreateRemoteQueryRef(const string &sql, bool refresh_catalog) {
 	vector<unique_ptr<ParsedExpression>> args;
 	args.push_back(make_uniq<ConstantExpression>(Value(GetName())));
 	args.push_back(make_uniq<ConstantExpression>(Value(sql)));
 	auto use_transaction = make_uniq<ConstantExpression>(Value::BOOLEAN(true));
 	use_transaction->SetAlias("use_transaction");
 	args.push_back(std::move(use_transaction));
+	if (refresh_catalog) {
+		auto refresh = make_uniq<ConstantExpression>(Value::BOOLEAN(true));
+		refresh->SetAlias("refresh_catalog");
+		args.push_back(std::move(refresh));
+	}
 	auto func_ref = make_uniq<TableFunctionRef>();
 	func_ref->function = make_uniq<FunctionExpression>("quack_query_by_name", std::move(args));
-	return func_ref;
+	return std::move(func_ref);
 }
 
 bool QuackCatalog::InMemory() {
