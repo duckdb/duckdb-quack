@@ -1,0 +1,360 @@
+# name: test/remote_pushdown/remote_pushdown_ddl.test
+# description: CREATE/DROP/ALTER pushdown for remote catalogs
+# group: [remote_pushdown]
+
+include test/template/quack_setup.test_template
+
+statement ok quack_db:quack_server_con
+create table t1(i int);
+
+statement ok quack_db:quack_server_con
+insert into t1 from range(10);
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+statement ok
+create table local_t(i int)
+
+statement ok
+insert into local_t values (1), (2)
+
+# --- CREATE TABLE ---
+
+# the statement is shipped whole: no local CREATE_TABLE operator, a quack query instead
+# note: EXPLAIN binds the pushed statement, and the server executes on PREPARE - so this creates t2
+query II
+explain create table rpc.t2(a int, b varchar default 'x')
+----
+physical_plan	<REGEX>:.*Quack Query.*
+
+# it really ran on the server
+query I quack_db:quack_server_con
+select count(*) from duckdb_tables() where table_name='t2'
+----
+1
+
+# and the local snapshot of the remote catalog picked it up without quack_clear_cache()
+statement ok
+insert into rpc.t2(a) values (1)
+
+query II
+select * from rpc.t2
+----
+1	x
+
+# CREATE TABLE AS over a remote table
+statement ok
+create table rpc.ctas as select i * 2 as d from rpc.t1 where i < 3
+
+query I
+select count(*) from rpc.ctas
+----
+3
+
+query I quack_db:quack_server_con
+select count(*) from ctas
+----
+3
+
+# --- CREATE VIEW ---
+
+statement ok
+create view rpc.v1 as select i * 2 as d from rpc.t1
+
+query I
+select count(*) from rpc.v1 where d >= 10
+----
+5
+
+# the view body is stored as written - it must not be constant-folded away
+statement ok
+create view rpc.v_now as select now() as t, 1 + 1 as two
+
+query I quack_db:quack_server_con
+select count(*) from duckdb_views() where view_name='v_now' and sql like '%now()%'
+----
+1
+
+statement ok
+create or replace view rpc.v1 as select i * 3 as d from rpc.t1
+
+query I
+select max(d) from rpc.v1
+----
+27
+
+# --- CREATE SCHEMA ---
+
+statement ok
+create schema rpc.s2
+
+statement ok
+create table rpc.s2.tt(a int)
+
+statement ok
+insert into rpc.s2.tt values (7)
+
+query I
+select a from rpc.s2.tt
+----
+7
+
+# --- CREATE INDEX / SEQUENCE / TYPE / MACRO ---
+
+# none of these are implemented by the quack catalog layer - they only work because they are pushed
+statement ok
+create index idx1 on rpc.t1(i)
+
+statement ok
+create sequence rpc.seq1 start 5
+
+statement ok
+create type rpc.mood as enum ('happy', 'sad')
+
+statement ok
+create macro rpc.addone(x) as x + 1
+
+query I
+select rpc.addone(41)
+----
+42
+
+# --- ALTER TABLE ---
+
+statement ok
+alter table rpc.t2 add column c int default 42
+
+statement ok
+insert into rpc.t2 values (2, 'y', 7)
+
+query III
+select * from rpc.t2 order by a
+----
+1	x	42
+2	y	7
+
+statement ok
+alter table rpc.t2 rename column c to c2
+
+query I
+select c2 from rpc.t2 where a = 2
+----
+7
+
+statement ok
+alter table rpc.t2 drop column c2
+
+query II
+select * from rpc.t2 where a = 2
+----
+2	y
+
+statement ok
+alter table rpc.t2 rename to t2_renamed
+
+query I
+select count(*) from rpc.t2_renamed
+----
+2
+
+query I quack_db:quack_server_con
+select count(*) from duckdb_tables() where table_name='t2'
+----
+0
+
+# --- nested fields and ownership ---
+
+# ADD COLUMN on a nested struct field
+statement ok
+create table rpc.nested(s struct(a int))
+
+statement ok
+alter table rpc.nested add column s.b int
+
+statement ok
+insert into rpc.nested values ({'a': 1, 'b': 2})
+
+query I
+select s.b from rpc.nested
+----
+2
+
+statement ok
+create table rpc.owner_t(i int)
+
+statement ok
+create sequence rpc.owned_seq
+
+statement ok
+alter sequence rpc.owned_seq owned by owner_t
+
+# the ownership really took effect on the server: the sequence now depends on the table
+statement error
+drop sequence rpc.owned_seq
+----
+<REGEX>:.*depend.*
+
+# --- the catalog is only stripped from the target name and from definition bodies ---
+
+# a definition body is rewritten, so a remote view over remote tables works
+query I
+select count(*) from rpc.v1
+----
+10
+
+# a catalog qualifier written inside a column type / default / constraint is NOT rewritten: whether a
+# CREATE or ALTER can be pushed is decided by the target catalog alone, so the server sees "rpc.mood"
+# and rejects it
+statement error
+create table rpc.typed(i int, m rpc.mood)
+----
+<REGEX>:.*mood.*
+
+statement error
+alter table rpc.nested add column m rpc.mood
+----
+<REGEX>:.*mood.*
+
+# the same applies to an owner written with a catalog qualifier
+statement error
+alter sequence rpc.owned_seq owned by rpc.owner_t
+----
+
+# --- statements that must NOT be pushed ---
+
+# temporary entries always live in the local temp catalog
+query II
+explain create temp table tmp_t(i int)
+----
+physical_plan	<!REGEX>:.*Quack Query.*
+
+statement ok
+create temp table tmp_t(i int)
+
+# a CTAS reading a local table cannot run on the server
+query II
+explain create table rpc.from_local as select * from local_t
+----
+physical_plan	<!REGEX>:.*Quack Query.*
+
+# a view over a remote table can still be created locally - its body is pushed on its own
+statement ok
+create view local_v as select * from rpc.t1 where i > 7
+
+query I
+select count(*) from local_v
+----
+2
+
+# a purely local CREATE is untouched
+query II
+explain create table local_t2(i int)
+----
+physical_plan	<!REGEX>:.*Quack Query.*
+
+# --- unqualified DDL resolves through the search path ---
+
+statement ok
+use rpc
+
+statement ok
+create table unqual(i int)
+
+query I quack_db:quack_server_con
+select count(*) from duckdb_tables() where table_name='unqual'
+----
+1
+
+statement ok
+alter table unqual add column j int
+
+statement ok
+drop table unqual
+
+query I quack_db:quack_server_con
+select count(*) from duckdb_tables() where table_name='unqual'
+----
+0
+
+statement ok
+use memory
+
+# a local table shadows the remote one: the unqualified DROP stays local
+statement ok
+drop table local_t
+
+query I
+select count(*) from rpc.t1
+----
+10
+
+# --- DROP ---
+
+statement ok
+drop macro rpc.addone
+
+statement ok
+drop type rpc.mood
+
+statement ok
+drop sequence rpc.seq1
+
+statement ok
+drop index rpc.idx1
+
+statement ok
+drop view local_v
+
+statement ok
+drop view rpc.v1
+
+statement ok
+drop view rpc.v_now
+
+statement ok
+drop table rpc.ctas
+
+statement ok
+drop table rpc.t2_renamed
+
+# dropping the owning table takes the owned sequence with it
+statement ok
+drop table rpc.owner_t
+
+query I quack_db:quack_server_con
+select count(*) from duckdb_sequences() where sequence_name='owned_seq'
+----
+0
+
+statement ok
+drop table rpc.nested
+
+statement ok
+drop table rpc.s2.tt
+
+statement ok
+drop schema rpc.s2
+
+# IF EXISTS on a missing remote entry is a no-op
+statement ok
+drop table if exists rpc.does_not_exist
+
+# without IF EXISTS the remote reports the error
+statement error
+drop table rpc.does_not_exist
+----
+<REGEX>:.*does_not_exist.*
+
+query I quack_db:quack_server_con
+select count(*) from duckdb_tables()
+----
+1
+
+query I quack_db:quack_server_con
+select count(*) from duckdb_schemas() where schema_name='s2'
+----
+0
+
+statement ok quack_db:quack_server_con
+call quack_stop('quack:localhost')

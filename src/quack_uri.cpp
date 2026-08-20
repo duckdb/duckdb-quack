@@ -93,7 +93,7 @@ ScalarFunction QuackParseUriFunction::GetFunction() {
 	                                             {"ssl", LogicalType::BOOLEAN},
 	                                             {"url", LogicalType::VARCHAR}}),
 	                        QuackUriParser);
-	// an invalid URI is reported as a runtime error
+	// parsing rejects malformed URIs at runtime, so constant folding must not treat a throw as internal
 	function.SetFallible();
 	return function;
 }

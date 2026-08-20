@@ -79,7 +79,7 @@ static unique_ptr<FunctionData> QuackScanFromClientBind(ClientContext &context, 
 
 	for (idx_t i = 0; i < bind_data->types.size(); i++) {
 		return_types.push_back(bind_data->types[i]);
-		names.emplace_back("col" + to_string(i));
+		names.push_back(Identifier("col" + to_string(i)));
 	}
 	return std::move(bind_data);
 }

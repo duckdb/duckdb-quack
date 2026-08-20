@@ -60,9 +60,8 @@ static unique_ptr<FunctionData> QuackScanBind(ClientContext &context, TableFunct
 	    context, make_uniq<PrepareRequestMessage>(client_connection.ConnectionId(), query, bind_data->query_uuid));
 
 	return_types = bind_response->Types();
-	names.clear();
-	for (auto &name : bind_response->Names()) {
-		names.emplace_back(name);
+	for (auto &col_name : bind_response->Names()) {
+		names.push_back(Identifier(col_name));
 	}
 
 	bind_data->results = std::move(bind_response->MutableResults());
@@ -86,6 +85,15 @@ static unique_ptr<FunctionData> QuackScanBindCatalogName(ClientContext &context,
 		use_transaction = BooleanValue::Get(entry->second);
 	}
 
+	bool refresh_catalog = false;
+	auto refresh_entry = input.named_parameters.find("refresh_catalog");
+	if (refresh_entry != input.named_parameters.end()) {
+		if (refresh_entry->second.IsNull()) {
+			throw InvalidInputException("refresh_catalog cannot be null");
+		}
+		refresh_catalog = BooleanValue::Get(refresh_entry->second);
+	}
+
 	auto &catalog = QuackCatalog::GetQuackCatalog(context, input.inputs[0]);
 	if (use_transaction) {
 		// start a transaction if "use_transaction" is specified
@@ -105,15 +113,20 @@ static unique_ptr<FunctionData> QuackScanBindCatalogName(ClientContext &context,
 	    make_uniq<PrepareRequestMessage>(bind_data->client_connection->ConnectionId(), query, bind_data->query_uuid));
 
 	return_types = bind_response->Types();
-	names.clear();
-	for (auto &name : bind_response->Names()) {
-		names.emplace_back(name);
+	for (auto &col_name : bind_response->Names()) {
+		names.push_back(Identifier(col_name));
 	}
 
 	// new stuff
 	bind_data->results = std::move(bind_response->MutableResults());
 	bind_data->needs_more_fetch = bind_response->NeedsMoreFetch();
 	bind_data->query_uuid = bind_response->QueryUUID();
+	if (refresh_catalog) {
+		// the query was a statement pushed down by the RemotePushdownOptimizer - the server has already
+		// executed it (PREPARE runs the query), so reload our snapshot of the remote catalog. Such a
+		// statement is always bound on its own, so no catalog entry is in use here
+		catalog.Refresh(context);
+	}
 	return bind_data;
 }
 
@@ -488,6 +501,7 @@ TableFunction QuackScanByNameFunction::GetFunction() {
 	fun.deserialize = QuackScanDeserialize;
 	fun.get_bind_info = QuackScanGetBindInfo;
 	fun.named_parameters["use_transaction"] = LogicalType::BOOLEAN;
+	fun.named_parameters["refresh_catalog"] = LogicalType::BOOLEAN;
 	// fun.filter_pushdown = true;
 	// fun.filter_prune = true;
 	return fun;

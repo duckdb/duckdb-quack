@@ -107,11 +107,16 @@ select count(*) from local_t, range(0, 10) r(n) where local_col = n
 ----
 10
 
-# range() in UNION with local: UNION stays local
+# range() in UNION with remote: range() is neutral, so the entire UNION is pushed down
 query II
 explain (select * from rpc.t1 limit 3) union all select * from range(0, 3) r(i)
 ----
-physical_plan	<REGEX>:.*Union.*
+physical_plan	<REGEX>:.*Quack Query.*
+
+query I
+select count(*) from ((select * from rpc.t1 limit 3) union all select * from range(0, 3) r(i))
+----
+6
 
 # --- Local macros ---
 

@@ -160,6 +160,14 @@ true
 # --- HTTP logging (async insert path) ---
 # The async bulk-INSERT SEND_DATA POSTs must show up in the HTTP transport log, not just the Quack log.
 
+# the insert source must be a local table: an INSERT that only reads remote tables and
+# builtin functions (e.g. range()) is pushed down to the server as a whole, so no data is sent
+statement ok
+create table local_log_src(i bigint);
+
+statement ok
+insert into local_log_src select * from range(200000);
+
 statement ok
 CALL truncate_duckdb_logs();
 
@@ -180,7 +188,7 @@ statement ok
 SET quack_send_data_flush_rows=50000;
 
 statement ok
-insert into rpc.log_t select * from range(200000) t(i);
+insert into rpc.log_t select * from local_log_src;
 
 # sanity: the insert actually produced multiple async sends
 query I
