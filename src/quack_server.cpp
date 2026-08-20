@@ -745,8 +745,16 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		}
 
 		auto stream = make_shared_ptr<QuackFetchStream>();
-		stream->buffer.SetCapacity(
-		    QuackGetUBigintSetting(db, "quack_fetch_producer_buffer_bytes", QUACK_FETCH_PRODUCER_BUFFER_BYTES_DEFAULT));
+		// One read-ahead buffer exists for each connection, so a fixed 256 MB does not suit every server.
+		// Core sizes optional operator buffers at a quarter of the memory limit, as
+		// BatchMemoryManager::SetMemorySize does. A setting of 0 still means "no limit".
+		auto producer_bytes =
+		    QuackGetUBigintSetting(db, "quack_fetch_producer_buffer_bytes", QUACK_FETCH_PRODUCER_BUFFER_BYTES_DEFAULT);
+		auto memory_cap = BufferManager::GetBufferManager(db).GetOperatorMemoryLimit() / 4;
+		if (producer_bytes > 0 && memory_cap > 0) {
+			producer_bytes = MinValue<idx_t>(producer_bytes, memory_cap);
+		}
+		stream->buffer.SetCapacity(producer_bytes);
 		// Internal catalog traffic carries uuid 0. It must never displace the client's retained result.
 		bool client_query = prepare_request_message.QueryUUID() != hugeint_t {0, 0};
 		bool retain_result = client_query && ServerCachingEnabled(db);
