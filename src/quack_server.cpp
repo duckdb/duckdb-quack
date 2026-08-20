@@ -171,6 +171,26 @@ static void AbortFetchStream(QuackConnection &connection, const string &reason) 
 	AbortDetachedFetch(connection, std::move(detached), reason);
 }
 
+//! Bring the connection's result cache up to date with what its stream is holding. Drops the cache
+//! once the result outgrows quack_cache_max_rows: too big to keep for a reconnect that may never come.
+static void SyncFetchCache(QuackConnection &connection, QuackFetchStream &stream, DatabaseInstance &db) {
+	std::unique_lock<std::mutex> lock(connection.lock);
+	auto &cache = connection.result_cache;
+	if (!cache || cache->stream.get() != &stream) {
+		return;
+	}
+	cache->last_served_at = Timestamp::GetCurrentTimestamp();
+	cache->retained_rows = stream.RetainedRows();
+	auto max_cache_rows = CacheMaxRows(db);
+	if (max_cache_rows != 0 && cache->retained_rows > max_cache_rows) {
+		// back to plain streaming: the acks release payloads again
+		stream.DropRetention();
+		connection.ClearResultCache();
+		return;
+	}
+	connection.SyncCachedRows();
+}
+
 //! Runs the client's query with the fetch collector installed, and holds the statement lock for
 //! the full duration. The query fills the stream's claim buffer in parallel.
 static void RunFetchQuery(QuackConnection &connection, shared_ptr<QuackFetchStream> stream, string sql) {
@@ -714,6 +734,10 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		AbortFetchStream(connection, "superseded by a new query");
 		{
 			std::unique_lock<std::mutex> lock(connection.lock);
+			if (prepare_request_message.QueryUUID() != hugeint_t {0, 0}) {
+				// a new client query displaces the retained one, even if caching is now off
+				connection.ClearResultCache();
+			}
 			connection.sql_query = prepare_request_message.Query();
 			connection.query_state = QuackQueryState::ACTIVE;
 			connection.query_started_at = Timestamp::GetCurrentTimestamp();
@@ -794,6 +818,18 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			stream->buffer.WaitForBatch(consumed + 1);
 		}
 		stream->prepare_batches = consumed;
+		if (retain_result) {
+			// Created for every cached client query, including one that returns no rows at all: an
+			// empty result is still a retained result, and reports 0 rather than "nothing cached".
+			{
+				std::unique_lock<std::mutex> lock(connection.lock);
+				connection.result_cache =
+				    make_uniq<QuackResultCache>(prepare_request_message.Query(), prepare_request_message.QueryUUID(),
+				                                stream, connection.live_caches);
+				RegisterCacheForExpiry(connection);
+			}
+			SyncFetchCache(connection, *stream, db);
+		}
 		// Report more unless the drain saw a CLEAN end. A wrong true costs one more FETCH. A wrong
 		// false on an errored buffer would report a truncated result as complete.
 		auto needs_more_fetch = !stream->buffer.Exhausted() || stream->buffer.HasError();
@@ -848,6 +884,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		while (true) {
 			QuackClaimPopStatus status;
 			QuackFetchPayload entry;
+			shared_ptr<MemoryStream> served_batch;
 			{
 				// One critical section for the check, the pop and the retain. A concurrent retry of the
 				// same index cannot reach FINISHED while the first serve runs.
@@ -855,19 +892,24 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 				auto retained = stream->served.find(dense_index);
 				if (retained != stream->served.end()) {
 					// already patched with the client-visible index
-					return make_uniq<QuackRawPayloadResponse>(MessageType::FETCH_RESPONSE, retained->second.payload);
+					served_batch = retained->second.payload;
+				} else {
+					status = stream->buffer.TryPopClaimed(dense_index, entry);
+					if (status == QuackClaimPopStatus::BATCH) {
+						// stamp the client-visible index, then keep the payload for a retry
+						QuackBatchIndexField::Patch(entry.payload->GetData(), entry.payload_size, entry.index_offset,
+						                            fetch_request_message.batch_index);
+						shared_ptr<MemoryStream> payload(std::move(entry.payload));
+						stream->served.emplace(dense_index, QuackFetchStream::RetainedPayload {payload, entry.rows});
+						stream->retained_rows += entry.rows;
+						served_batch = std::move(payload);
+					}
 				}
-				status = stream->buffer.TryPopClaimed(dense_index, entry);
-				if (status == QuackClaimPopStatus::BATCH) {
-					// stamp the client-visible index, then keep the payload for a retry
-					QuackBatchIndexField::Patch(entry.payload->GetData(), entry.payload_size, entry.index_offset,
-					                            fetch_request_message.batch_index);
-					shared_ptr<MemoryStream> payload(std::move(entry.payload));
-					stream->served.emplace(dense_index,
-					                       QuackFetchStream::RetainedPayload {payload, entry.rows});
-					stream->retained_rows += entry.rows;
-					return make_uniq<QuackRawPayloadResponse>(MessageType::FETCH_RESPONSE, std::move(payload));
-				}
+			}
+			if (served_batch) {
+				// outside serve_lock: the cache is guarded by the connection's state lock
+				SyncFetchCache(connection, *stream, db);
+				return make_uniq<QuackRawPayloadResponse>(MessageType::FETCH_RESPONSE, std::move(served_batch));
 			}
 			if (status == QuackClaimPopStatus::ERRORED) {
 				return make_uniq<ErrorResponse>(stream->buffer.GetError());
@@ -1014,6 +1056,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		// lock so the state change cannot race that statement's handler.
 		std::unique_lock<std::mutex> lock(connection.lock);
 		connection.query_state = QuackQueryState::CANCELLED;
+		connection.ClearResultCache();
 		return make_uniq<SuccessResponse>();
 	}
 	case MessageType::ACKNOWLEDGEMENT: {
@@ -1029,6 +1072,9 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			                                acknowledgement_message.QueryUUID(), cache->query_uuid);
 		}
 		// The client confirmed it received the full result, the replay cache has served its purpose
+		if (cache->stream) {
+			cache->stream->DropRetention();
+		}
 		connection.ClearResultCache();
 		return make_uniq<SuccessResponse>();
 	}
