@@ -25,8 +25,7 @@ QuackInsert::QuackInsert(PhysicalPlan &physical_plan, LogicalOperator &op, Schem
 //===--------------------------------------------------------------------===//
 // Sink interface
 //===--------------------------------------------------------------------===//
-// The shared rebalancer does the work. This operator only supplies the send emitter, exactly as
-// QuackFetchCollector supplies the fetch emitter on the server.
+// The shared rebalancer does the work. This operator only supplies the send emitter.
 unique_ptr<GlobalSinkState> QuackInsert::GetGlobalSinkState(ClientContext &context) const {
 	optional_ptr<QuackTableCatalogEntry> table_entry;
 	if (table) {
@@ -64,8 +63,7 @@ SinkCombineResultType QuackInsert::Combine(ExecutionContext &context, OperatorSi
 
 SinkFinalizeType QuackInsert::Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
                                        OperatorSinkFinalizeInput &input) const {
-	// Releases everything still shelved, across threads. FINALIZE then carries the batch count, so
-	// the server can prove the dense stream arrived complete before it commits.
+	// FINALIZE then carries the batch count, so the server can check the stream is complete.
 	return QuackRebalancerFinalize(pipeline, event, context, input.global_state.Cast<QuackRebalancerGlobalState>());
 }
 
@@ -94,9 +92,9 @@ InsertionOrderPreservingMap<string> QuackInsert::ParamsToString() const {
 }
 
 // The order strategy, chosen at plan time. It mirrors core's plan_insert.cpp:
-//  - preserve_insertion_order off -> UNORDERED: a dense stamp in arrival order.
+//  - no preserve_insertion_order -> UNORDERED.
 //  - preserve order, and the source has an executor batch index -> PARALLEL_ORDERED.
-//  - preserve order, and no batch index -> SERIAL_ORDERED: one producer, all settled.
+//  - preserve order, and no batch index -> SERIAL_ORDERED.
 static void ConfigureOrdering(ClientContext &context, QuackInsert &insert, PhysicalOperator &source) {
 	if (!PhysicalPlanGenerator::PreserveInsertionOrder(context, source)) {
 		insert.order_mode = AppendOrderMode::UNORDERED;

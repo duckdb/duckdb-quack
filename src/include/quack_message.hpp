@@ -392,13 +392,9 @@ private:
 	optional_idx total_batches;
 };
 
-// Streams one dense batch of insert data to the server, keyed by (connection_id, query_uuid).
-// batch_index is always dense (1,2,3,...). Batches travel in parallel and arrive in any order; the
-// server puts them back in order by index. `ordered` says if the receiving INSERT must keep that
-// order. The answer is a SendDataResponseMessage or an ErrorResponse.
-// Send side: SendDataPayloadWriter builds the payload step by step, so this class serializes only a
-// message that is fully in memory (the server receive path and the tests).
-// batch_index goes on the wire as the fixed patchable field (QuackBatchIndexField), and it is LAST.
+// One dense batch of insert data, keyed by (connection_id, query_uuid). Batches arrive in any
+// order, and the server puts them back in order by index. `ordered` says if the INSERT must keep
+// that order.
 class SendDataRequestMessage : public QuackMessage {
 public:
 	static constexpr MessageType TYPE = MessageType::SEND_DATA_REQUEST;
@@ -448,13 +444,12 @@ protected:
 private:
 	string schema_name;
 	string table_name;
-	//! Receive side: the chunks of the batch, after the decode.
+	//! The chunks of the batch, after the decode.
 	vector<unique_ptr<DataChunkWrapper>> chunks;
 	hugeint_t query_uuid;
-	//! True if the receiving INSERT must keep the stream order. It is the same on every message of
-	//! one stream, because the sink sets it once.
+	//! True if the INSERT must keep the stream order. It is equal on every message of one stream.
 	bool ordered = false;
-	//! The dense batch index (1,2,3,...). The client stamper writes it in stream order.
+	//! The dense batch index (1,2,3,...).
 	optional_idx batch_index;
 };
 
@@ -522,8 +517,7 @@ protected:
 	}
 };
 
-//! Builds SEND_DATA_REQUEST payloads on the producing thread of the client INSERT. It is the
-//! counterpart of FetchResponsePayloadWriter, for the opposite direction.
+//! Builds SEND_DATA_REQUEST payloads, as FetchResponsePayloadWriter does for the fetch answer.
 class SendDataPayloadWriter : public QuackChunkPayloadWriter {
 public:
 	SendDataPayloadWriter(ClientContext &context, string connection_id, const string &schema_name,
@@ -600,8 +594,7 @@ public:
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<FinalizeMessage> Deserialize(Deserializer &deserializer);
 
-	//! The dense batches the client sent. The server closes the stream against this count, so a
-	//! short stream fails instead of inserting less data than the client sent.
+	//! The dense batches the client sent. A short stream then fails, and inserts nothing.
 	void SetTotalBatches(optional_idx total_batches_p) {
 		total_batches = total_batches_p;
 	}

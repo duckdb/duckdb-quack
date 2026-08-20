@@ -58,8 +58,7 @@ bool QuackConnection::TryRenewLease() {
 }
 
 //! Finish + join + deregister a detached insert stream; returns any INSERT error. Call WITHOUT the lock.
-//! A valid `total_batches` puts teeth on the close: a short stream errors instead of inserting less
-//! data than the client sent.
+//! A valid `total_batches` makes a short stream fail, instead of inserting less data.
 ErrorData DetachedInsertStream::FinishAndJoin(optional_idx total_batches) {
 	ErrorData error;
 	if (!stream) {
@@ -939,9 +938,8 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			}
 		}
 
-		// The stream and its INSERT thread start on the first message, keyed by query_uuid. Batches
-		// arrive in any order, so ANY message can be the one that creates them: every message carries
-		// its dense index and the order flag.
+		// The stream and its INSERT thread start on the first message. Batches arrive in any order,
+		// so any message can be the one that creates them.
 		auto stream_id =
 		    QuackInsertStreamRegistry::MakeId(send_data_message.ConnectionId(), send_data_message.QueryUUID());
 		auto &incoming_chunks = send_data_message.Chunks();
@@ -979,7 +977,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			owned_chunks.push_back(std::move(owned));
 		}
 
-		// The claim buffer drops a duplicate index, so a transport retry of the SAME batch is safe.
+		// The claim buffer drops a duplicate index, so a retry of the same batch is safe.
 		stream->buffer.PushBatch(send_data_message.BatchIndex().GetIndex(), std::move(owned_chunks));
 
 		if (stream->buffer.HasError()) {

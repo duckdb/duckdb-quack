@@ -17,8 +17,7 @@ namespace duckdb {
 //===--------------------------------------------------------------------===//
 // Async send task
 //===--------------------------------------------------------------------===//
-// Does the SEND_DATA POST on an async-pool thread. The producing thread serialized the payload
-// already, so this task only sends the bytes and reads the answer.
+// Sends one serialized payload on an async-pool thread, and reads the answer.
 class QuackSendDataTask : public AsyncTask {
 public:
 	QuackSendDataTask(unique_ptr<QuackClientWrapper> client_wrapper_p, unique_ptr<MemoryStream> payload_p,
@@ -31,15 +30,14 @@ public:
 
 	void Execute() override {
 		if (debug_delay_ms > 0) {
-			// DEBUG SETTING: make the send order random, to stress out-of-order arrival on the server
+			// DEBUG SETTING: make the send order random.
 			RandomEngine random;
 			ThreadUtil::SleepMs(random.NextRandomInteger(0, NumericCast<uint32_t>(debug_delay_ms)));
 		}
 		auto &client = client_wrapper->GetClient();
 		auto start_time = QuackNowMillis();
-		// context=nullptr: this runs off the execution thread, so it must not touch ClientContext.
-		// The payload names its batch index, so an HTTP retry sends the SAME batch again and the
-		// server's claim buffer drops the duplicate.
+		// context=nullptr: this thread must not touch ClientContext.
+		// The payload holds its batch index, so a retry sends the same batch again.
 		auto response_body = client.PostRaw(nullptr, payload->GetData(), payload_size);
 		auto duration_ms = QuackNowMillis() - start_time;
 
@@ -49,8 +47,7 @@ public:
 		if (response->Type() == MessageType::ERROR_RESPONSE) {
 			error = response->Cast<ErrorResponse>().ErrorMessage();
 		}
-		// Log through the context logger taken on the producer thread, so an async SEND_DATA entry
-		// carries the query's connection, transaction and query id. The pool thread has no context.
+		// The pool thread has no context, so log through the producer's logger.
 		client.LogRequest(Logger::Get(logger), MessageType::SEND_DATA_REQUEST, connection_id, client_query_id, string(),
 		                  duration_ms, response->Type(), error);
 
@@ -79,15 +76,14 @@ private:
 struct QuackPreparedSendData : public QuackPreparedBatch {
 	unique_ptr<MemoryStream> payload;
 	idx_t payload_size = 0;
-	//! Where the fixed-width batch-index field starts: the patch target.
+	//! Where the batch-index field starts. The stamp writes here.
 	idx_t index_offset = 0;
-	//! Taken at encode time, for the async request log. The POST runs with no ClientContext.
+	//! Taken at encode time. The POST has no ClientContext.
 	string connection_id;
 	optional_idx client_query_id;
 };
 
-//! The accumulation buffer IS the wire message, so a cut costs no second serialization and no
-//! columnar copy. The stager merges small chunks, to keep the per-chunk framing off the wire.
+//! The buffer is the wire message, so a cut needs no second serialization.
 class QuackSendDataFragmentBuilder : public QuackFragmentBuilder {
 public:
 	QuackSendDataFragmentBuilder(ClientContext &context, QuackTableCatalogEntry &table, hugeint_t query_uuid,
@@ -131,9 +127,8 @@ private:
 //===--------------------------------------------------------------------===//
 // Send-data emitter
 //===--------------------------------------------------------------------===//
-// Sends each dense batch as one SEND_DATA_REQUEST. The payload was serialized as the chunks
-// arrived, with a placeholder index, so a release costs an 8-byte patch. Finish drains the queue,
-// then FINALIZE carries the batch count, and the server proves the stream is complete.
+// Sends one dense batch as one SEND_DATA_REQUEST. The payload is serialized already, so a release
+// costs an 8-byte patch. Finish drains the sends, then FINALIZE carries the batch count.
 class QuackSendDataEmitter : public QuackBatchEmitter {
 public:
 	QuackSendDataEmitter(ClientContext &context, QuackTableCatalogEntry &table_p, hugeint_t query_uuid_p,
@@ -144,7 +139,7 @@ public:
 	}
 
 	~QuackSendDataEmitter() override {
-		// Finish never runs on an error path. Drain quietly, so a POST cannot outlive the operator.
+		// Finish does not run on an error path. Drain quietly, so no POST outlives the operator.
 		if (queue) {
 			try {
 				queue->Close();
@@ -157,8 +152,7 @@ public:
 		return make_uniq<QuackSendDataFragmentBuilder>(context, table, query_uuid, ordered, size_hint);
 	}
 
-	//! Always true: the async queue never refuses work. It holds the producer thread instead, in
-	//! ApplyBackpressure. The fetch side parks the task on buffer capacity; see the PR notes.
+	//! Always true: the queue does not refuse work. ApplyBackpressure holds the producer thread.
 	bool TryEmitPrepared(ClientContext &context, idx_t dense_index, unique_ptr<QuackPreparedBatch> &batch,
 	                     optional_ptr<const InterruptState> interrupt) override {
 		auto prepared = unique_ptr_cast<QuackPreparedBatch, QuackPreparedSendData>(std::move(batch));
@@ -168,8 +162,7 @@ public:
 		auto &quack_catalog = table.catalog.Cast<QuackCatalog>();
 		auto payload_size = prepared->payload_size;
 
-		// DEBUG SETTING: send the same stamped batch a second time, to imitate a transport retry.
-		// The receiver keys on the dense index, so the duplicate must change nothing.
+		// DEBUG SETTING: send the same batch again, to imitate a retry. The receiver must drop it.
 		unique_ptr<MemoryStream> duplicate;
 		if (debug_duplicate_sends) {
 			duplicate = make_uniq<MemoryStream>(Allocator::DefaultAllocator(), NextPowerOfTwo(payload_size));
@@ -195,8 +188,7 @@ public:
 	}
 
 	void Finish(ClientContext &context, idx_t total_batches) override {
-		// Drain every send before FINALIZE. A push lands on the server before its answer, so the
-		// server has all the batches before the count arrives.
+		// Drain every send before FINALIZE, so the server has all the batches before the count.
 		queue->Close();
 		queue.reset();
 
@@ -214,7 +206,7 @@ private:
 	bool ordered;
 	idx_t debug_delay_ms;
 	bool debug_duplicate_sends;
-	//! The shared upload queue: regular threads register payloads, async-pool threads POST them.
+	//! Regular threads register payloads. Async-pool threads POST them.
 	unique_ptr<ManagedAsyncTaskQueue> queue;
 };
 

@@ -12,7 +12,7 @@
 
 namespace duckdb {
 
-//! The wait on the unordered path. Any published batch, or the end of the stream, wakes it.
+//! The wait on the unordered path. Any batch, or the end of the stream, wakes it.
 class QuackWaitForAnyBatchTask : public AsyncTask {
 public:
 	explicit QuackWaitForAnyBatchTask(shared_ptr<QuackInsertStream> stream_p) : stream(std::move(stream_p)) {
@@ -104,12 +104,11 @@ enum class QuackScanBatchResult : uint8_t {
 	BATCH,
 	//! The stream ended, so this thread is done.
 	FINISHED,
-	//! No batch is ready. The scan yielded through input.async_result, and it runs again later.
+	//! No batch is ready. The scan yielded, and it runs again later.
 	BLOCKED
 };
 
-// The ordered path: claim, then wait. A thread claims the next dense index and waits for THAT batch
-// only. There is no shared cursor, and the downstream batch insert puts the claims back in order.
+// The ordered path: a thread claims the next dense index, and waits for that batch only.
 static QuackScanBatchResult QuackScanOrderedBatch(ClientContext &context, TableFunctionInput &input,
                                                   QuackScanFromClientLocalState &local_state,
                                                   QuackChunkClaimBuffer &buffer) {
@@ -138,7 +137,7 @@ static QuackScanBatchResult QuackScanOrderedBatch(ClientContext &context, TableF
 				input.async_result = AsyncResultType::BLOCKED;
 				return QuackScanBatchResult::BLOCKED;
 			}
-			// The synchronous fallback (async_threads=0): a bounded inline wait, then retry.
+			// The synchronous fallback (async_threads=0): wait inline, then retry.
 			buffer.WaitForBatch(local_state.claim.GetIndex());
 			if (context.IsInterrupted()) {
 				throw InterruptException();
@@ -149,7 +148,7 @@ static QuackScanBatchResult QuackScanOrderedBatch(ClientContext &context, TableF
 	}
 }
 
-// The unordered path: pop any batch that is ready. Arrival jitter then costs no wait.
+// The unordered path: pop any batch that is ready.
 static QuackScanBatchResult QuackScanAnyBatch(ClientContext &context, TableFunctionInput &input,
                                               QuackScanFromClientLocalState &local_state,
                                               const shared_ptr<QuackInsertStream> &stream) {
@@ -172,7 +171,7 @@ static QuackScanBatchResult QuackScanAnyBatch(ClientContext &context, TableFunct
 				input.async_result = std::move(res);
 				return QuackScanBatchResult::BLOCKED;
 			}
-			// The synchronous fallback (async_threads=0): run the wait inline, then retry.
+			// The synchronous fallback (async_threads=0): wait inline, then retry.
 			res.ExecuteTasksSynchronously();
 			if (context.IsInterrupted()) {
 				throw InterruptException();

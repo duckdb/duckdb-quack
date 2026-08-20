@@ -15,9 +15,8 @@
 
 namespace duckdb {
 
-//! Server state for one client INSERT stream. The SEND_DATA handler fills the claim buffer, and
-//! scan_data_from_quack_client drains it. The schema and the order mode are fixed at creation. It is
-//! the mirror of QuackFetchStream, for the opposite direction.
+//! Server state for one client INSERT stream. The SEND_DATA handler fills the buffer, and
+//! scan_data_from_quack_client drains it. It is the mirror of QuackFetchStream.
 struct QuackInsertStream {
 	QuackInsertStream(vector<LogicalType> types_p, bool ordered_p) : types(std::move(types_p)), ordered(ordered_p) {
 	}
@@ -28,8 +27,8 @@ struct QuackInsertStream {
 	QuackChunkClaimBuffer buffer;
 };
 
-//! Maps a stream id to its stream, so the scan function can find it. It is process-global, because
-//! the scan runs in a different ClientContext than the request handler.
+//! Maps a stream id to its stream. It is process-global, because the scan has a different
+//! ClientContext than the request handler.
 class QuackInsertStreamRegistry {
 public:
 	static QuackInsertStreamRegistry &Get() {
