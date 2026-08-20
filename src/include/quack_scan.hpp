@@ -1,5 +1,6 @@
 #pragma once
 
+#include "duckdb/parser/qualified_name.hpp"
 #include "quack_uri.hpp"
 #include "quack_client.hpp"
 
@@ -8,9 +9,11 @@ namespace duckdb {
 struct QuackScanBindData : FunctionData {
 	bool Equals(const FunctionData &other_p) const override {
 		auto &other = other_p.Cast<QuackScanBindData>();
+		// compare the whole path, not QualifiedName::operator== - that only looks at Catalog()/Schema()/Name(),
+		// which skips the components in between once a nested schema path is deeper than three
 		return other.client_connection->ConnectionId() == client_connection->ConnectionId() &&
 		       other.client_connection->ServerURI() == client_connection->ServerURI() &&
-		       other.qualified_table_name == qualified_table_name && other.column_names == column_names &&
+		       other.qualified_table_name.Path() == qualified_table_name.Path() && other.column_names == column_names &&
 		       other.column_types == column_types;
 	}
 	unique_ptr<FunctionData> Copy() const override {
@@ -22,10 +25,10 @@ struct QuackScanBindData : FunctionData {
 		return std::move(result);
 	}
 
-	//! The table to scan, qualified and quoted the way the remote server sees it (e.g. "s1"."child"."t").
-	//! Empty when this scan does not read a catalog table but the result of a query
-	string qualified_table_name;
-	vector<string> column_names;
+	//! The table to scan, qualified the way the remote server sees it (e.g. s1.child.t). Empty when this
+	//! scan does not read a catalog table but the result of a query
+	QualifiedName qualified_table_name;
+	vector<Identifier> column_names;
 	vector<LogicalType> column_types;
 	vector<unique_ptr<DataChunkWrapper>> results;
 	shared_ptr<QuackClientConnection> client_connection;

@@ -85,7 +85,7 @@ TableFunction QuackTableCatalogEntry::GetScanFunction(ClientContext &context, un
 	auto bind_data = make_uniq<QuackScanBindData>();
 	bind_data->client_connection = quack_catalog.GetClientConnection();
 	// the scan runs on the server: refer to the table the way the server sees it
-	bind_data->qualified_table_name = schema.Cast<QuackSchemaCatalogEntry>().GetRemoteName(name).ToString();
+	bind_data->qualified_table_name = schema.Cast<QuackSchemaCatalogEntry>().GetRemoteName(name);
 	for (auto &col : GetColumns().Physical()) {
 		bind_data->column_names.emplace_back(col.Name());
 		bind_data->column_types.push_back(col.Type());
