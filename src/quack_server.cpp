@@ -302,6 +302,10 @@ void QuackServer::CleanupExpiredConnection(QuackConnection &connection) {
 		connection.duckdb_connection->Interrupt();
 	}
 	connection.insert.Detach().AbortAndJoin("connection heartbeat lease expired");
+	// Interrupt() alone cannot wake a producer parked on the buffer's capacity, and it holds the
+	// connection lock until it does. Abort and join it here, not in ~QuackConnection, so the
+	// connection is fully quiet before the handler that expired it moves on.
+	AbortFetchStream(connection, "connection heartbeat lease expired");
 }
 
 bool QuackServer::RenewConnectionLease(const string &connection_id, const shared_ptr<QuackConnection> &connection) {
