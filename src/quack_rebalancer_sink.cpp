@@ -71,16 +71,18 @@ static void PushLocalFragment(ClientContext &context, QuackRebalancerGlobalState
 	lstate.last_chunk_bytes = 0;
 }
 
-// Seal and emit immediately (SERIAL_ORDERED / UNORDERED — everything is settled on arrival).
-static void EmitLocalFragment(ClientContext &context, QuackRebalancerGlobalState &gstate,
-                              QuackRebalancerLocalState &lstate) {
+// Seal + stamp this thread's builder into lstate.pending_emit (SERIAL_ORDERED / UNORDERED —
+// everything is settled on arrival). Emission is separate so a capacity-parked batch can be retried.
+static void StampLocalFragment(ClientContext &context, QuackRebalancerGlobalState &gstate,
+                               QuackRebalancerLocalState &lstate) {
 	if (!lstate.builder) {
 		return;
 	}
+	D_ASSERT(!lstate.pending_emit);
 	auto prepared = lstate.builder->Seal(context);
 	lstate.size_hint = lstate.builder->SizeBytes();
 	lstate.builder.reset();
-	gstate.core->AddSettledData(context, std::move(prepared));
+	lstate.pending_emit = gstate.core->StampSettled(std::move(prepared));
 }
 
 SinkResultType QuackRebalancerSink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) {
@@ -90,6 +92,14 @@ SinkResultType QuackRebalancerSink(ExecutionContext &context, DataChunk &chunk, 
 
 	if (gstate.order_mode != AppendOrderMode::PARALLEL_ORDERED) {
 		// SERIAL_ORDERED / UNORDERED: everything is stampable on arrival — cut at the target and emit.
+		// A capacity-parked batch is retried BEFORE the chunk is consumed, so returning BLOCKED here
+		// is safe: the executor re-invokes Sink with the same chunk once the wake fires.
+		if (lstate.pending_emit) {
+			if (!core.TryEmitStamped(context.client, *lstate.pending_emit, input.interrupt_state)) {
+				return SinkResultType::BLOCKED;
+			}
+			lstate.pending_emit.reset();
+		}
 		if (chunk.size() == 0) {
 			return SinkResultType::NEED_MORE_INPUT;
 		}
@@ -99,15 +109,29 @@ SinkResultType QuackRebalancerSink(ExecutionContext &context, DataChunk &chunk, 
 		lstate.builder->Append(context.client, chunk);
 		lstate.local_count += chunk.size();
 		if (lstate.builder->SizeBytes() >= gstate.target_bytes) {
-			EmitLocalFragment(context.client, gstate, lstate);
+			// The chunk is consumed, so we cannot yield anymore: probe the emit (no wake registered);
+			// if the buffer is full the batch stays pending and the NEXT call blocks before its chunk.
+			StampLocalFragment(context.client, gstate, lstate);
+			if (core.TryEmitStamped(context.client, *lstate.pending_emit, nullptr)) {
+				lstate.pending_emit.reset();
+			}
 		}
 		return SinkResultType::NEED_MORE_INPUT;
 	}
 
 	auto &memory_manager = core.MemoryManager();
 	auto batch_index = lstate.partition_info.batch_index.GetIndex();
+	// Retry capacity-parked emits first (chunk untouched — yielding is safe): freed client capacity
+	// is used promptly, and a still-full buffer parks this producer instead of growing memory.
+	if (core.HasParkedEmits()) {
+		if (core.ExecuteTasks(context.client, input.interrupt_state) == QuackEmitProgress::BLOCKED) {
+			return SinkResultType::BLOCKED;
+		}
+	}
 	if (lstate.processing_tasks) {
-		core.ExecuteTasks(context.client);
+		if (core.ExecuteTasks(context.client, input.interrupt_state) == QuackEmitProgress::BLOCKED) {
+			return SinkResultType::BLOCKED;
+		}
 		if (!memory_manager.IsMinimumBatchIndex(batch_index) && core.OutOfMemory(batch_index)) {
 			annotated_lock_guard<annotated_mutex> guard(memory_manager.lock);
 			if (!memory_manager.IsMinimumBatchIndex(batch_index)) {
@@ -174,6 +198,8 @@ SinkNextBatchType QuackRebalancerNextBatch(ExecutionContext &context, OperatorSi
 //===--------------------------------------------------------------------===//
 // Combine
 //===--------------------------------------------------------------------===//
+// May return BLOCKED (capacity-parked emit) and be re-invoked; every step below is a no-op on
+// re-entry once its state is consumed (builder reset, pending_emit reset, local_count zeroed).
 SinkCombineResultType QuackRebalancerCombine(ExecutionContext &context, OperatorSinkCombineInput &input) {
 	auto &gstate = input.global_state.Cast<QuackRebalancerGlobalState>();
 	auto &lstate = input.local_state.Cast<QuackRebalancerLocalState>();
@@ -181,14 +207,29 @@ SinkCombineResultType QuackRebalancerCombine(ExecutionContext &context, Operator
 
 	if (gstate.order_mode == AppendOrderMode::PARALLEL_ORDERED) {
 		if (lstate.batch_index.IsValid()) {
-			PushLocalFragment(context.client, gstate, lstate);
+			PushLocalFragment(context.client, gstate, lstate); // no-op once the builder is consumed
 		}
 		core.MemoryManager().UpdateMinBatchIndex(lstate.partition_info.min_batch_index.GetIndex());
-		core.ExecuteTasks(context.client);
+		if (core.ExecuteTasks(context.client, input.interrupt_state) == QuackEmitProgress::BLOCKED) {
+			return SinkCombineResultType::BLOCKED;
+		}
 	} else {
-		EmitLocalFragment(context.client, gstate, lstate);
+		if (lstate.pending_emit) {
+			if (!core.TryEmitStamped(context.client, *lstate.pending_emit, input.interrupt_state)) {
+				return SinkCombineResultType::BLOCKED;
+			}
+			lstate.pending_emit.reset();
+		}
+		if (lstate.builder) {
+			StampLocalFragment(context.client, gstate, lstate);
+			if (!core.TryEmitStamped(context.client, *lstate.pending_emit, input.interrupt_state)) {
+				return SinkCombineResultType::BLOCKED;
+			}
+			lstate.pending_emit.reset();
+		}
 	}
 	gstate.row_count += lstate.local_count;
+	lstate.local_count = 0;
 	return SinkCombineResultType::FINISHED;
 }
 
@@ -205,7 +246,12 @@ public:
 	}
 
 	TaskExecutionResult ExecuteTask(TaskExecutionMode mode) override {
-		gstate.core->ExecuteTasks(context);
+		// The client may be slow to drain the buffer: yield on capacity instead of parking a
+		// scheduler thread; the buffer's capacity wake reschedules this task and we re-enter here.
+		InterruptState interrupt(shared_from_this());
+		if (gstate.core->ExecuteTasks(context, interrupt) == QuackEmitProgress::BLOCKED) {
+			return TaskExecutionResult::TASK_BLOCKED;
+		}
 		event->FinishTask();
 		return TaskExecutionResult::TASK_FINISHED;
 	}
@@ -249,11 +295,11 @@ SinkFinalizeType QuackRebalancerFinalize(Pipeline &pipeline, Event &event, Clien
                                          QuackRebalancerGlobalState &gstate) {
 	auto &core = *gstate.core;
 	core.FinalizeCut(context);
-	if (core.TaskCount() <= 1) {
-		core.ExecuteTasks(context);
+	// A single batch emits here. Several batches, or one that parks on capacity, go to the event
+	// tasks: those emit in parallel, and they can yield when the delivery buffer is full.
+	if (core.TaskCount() <= 1 && core.ExecuteTasks(context) == QuackEmitProgress::DONE) {
 		core.FinalizeFinish(context);
 	} else {
-		// several stamped batches remain: emit them in parallel before closing the stream
 		event.InsertEvent(make_shared_ptr<QuackEmitRemainingEvent>(gstate, pipeline, context));
 	}
 	return SinkFinalizeType::READY;

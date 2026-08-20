@@ -71,6 +71,9 @@ public:
 	optional_idx batch_index;
 	//! PARALLEL_ORDERED: over budget — help emit queued batches instead of sinking.
 	bool processing_tasks = false;
+	//! SERIAL_ORDERED / UNORDERED: a stamped batch parked on delivery capacity; retried (same index,
+	//! same payload) at the top of the next Sink call or in Combine before anything else runs.
+	unique_ptr<QuackEmitTask> pending_emit;
 };
 
 //! Build the shared global state + core for a rebalancing sink: reads quack_target_batch_bytes /

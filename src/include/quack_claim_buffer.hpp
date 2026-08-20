@@ -4,7 +4,9 @@
 #include "duckdb/common/multi_file/multi_file_read_ahead.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/optional_idx.hpp"
+#include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
+#include "duckdb/parallel/interrupt.hpp"
 
 #include <chrono>
 #include <condition_variable>
@@ -18,6 +20,12 @@ enum class QuackClaimPopStatus : uint8_t {
 	EMPTY,
 	FINISHED,
 	ERRORED,
+};
+
+enum class QuackPushStatus : uint8_t {
+	PUSHED,      //! inserted and (if claimed) its waiter woken
+	DROPPED,     //! duplicate delivery or closed stream — the batch is consumed, nothing to retry
+	NO_CAPACITY, //! not inserted; retry the same batch once capacity frees (wake via the interrupt)
 };
 
 //! Dense-index membership tracked as a contiguous prefix + sparse overflow; the sparse set stays
@@ -102,6 +110,45 @@ public:
 		}
 	}
 
+	//! Non-blocking PushBatch for yieldable producers. NO_CAPACITY leaves `payload` untouched so the
+	//! caller can park and retry the same batch; with `interrupt` set, the next capacity-freeing pop
+	//! (or stream close) fires it. Registration and pops share one lock — no lost wakeup.
+	QuackPushStatus TryPushBatch(idx_t batch_index, PAYLOAD &payload, idx_t bytes,
+	                             optional_ptr<const InterruptState> interrupt) {
+		shared_ptr<ReadAheadJobCompletion> waiter;
+		{
+			annotated_unique_lock<annotated_mutex> guard(lock);
+			if (finished || errored) {
+				return QuackPushStatus::DROPPED;
+			}
+			if (Seen(batch_index)) {
+				// duplicate delivery (transport-level retry) — the first copy won
+				return QuackPushStatus::DROPPED;
+			}
+			if (capacity > 0 && buffered_bytes > 0 && buffered_bytes + bytes > capacity && !HeadOfStream(batch_index)) {
+				if (interrupt) {
+					capacity_waiters.push_back(*interrupt);
+				}
+				return QuackPushStatus::NO_CAPACITY;
+			}
+			RecordSeen(batch_index);
+			batches[batch_index] = Entry {std::move(payload), bytes};
+			buffered_bytes += bytes;
+			pushed_count++;
+			auto entry = waiters.find(batch_index);
+			if (entry != waiters.end()) {
+				waiter = std::move(entry->second);
+				waiters.erase(entry);
+			}
+		}
+		cv.notify_all();
+		if (waiter) {
+			// wakes exactly the scan task parked on this batch index
+			waiter->FinishIOTask();
+		}
+		return QuackPushStatus::PUSHED;
+	}
+
 	//! Register a per-claim wake event; nullptr when the claim is already poppable (caller retries).
 	shared_ptr<ReadAheadJobCompletion> RegisterWaiter(idx_t claim) {
 		annotated_lock_guard<annotated_mutex> guard(lock);
@@ -121,44 +168,53 @@ public:
 
 	//! Pop the claimed batch if present. FINISHED means the stream ended and the claim can never arrive.
 	PopStatus TryPopClaimed(idx_t claim, PAYLOAD &payload_out) {
-		annotated_lock_guard<annotated_mutex> guard(lock);
-		if (errored) {
-			return PopStatus::ERRORED;
+		vector<InterruptState> capacity_wakes;
+		PopStatus status;
+		{
+			annotated_lock_guard<annotated_mutex> guard(lock);
+			if (errored) {
+				return PopStatus::ERRORED;
+			}
+			auto entry = batches.find(claim);
+			if (entry != batches.end()) {
+				payload_out = std::move(entry->second.payload);
+				buffered_bytes -= entry->second.bytes;
+				batches.erase(entry);
+				capacity_wakes = TakeCapacityWaiters();
+				status = PopStatus::BATCH;
+			} else if (finished) {
+				// Indices are dense and Finish() runs after the last push, so an absent claim can never arrive.
+				return PopStatus::FINISHED;
+			} else {
+				return PopStatus::EMPTY;
+			}
 		}
-		auto entry = batches.find(claim);
-		if (entry != batches.end()) {
-			payload_out = std::move(entry->second.payload);
-			buffered_bytes -= entry->second.bytes;
-			batches.erase(entry);
-			cv.notify_all(); // pushers may be waiting on capacity
-			return PopStatus::BATCH;
-		}
-		// Indices are dense and Finish() runs after the last push, so an absent claim can never arrive.
-		if (finished) {
-			return PopStatus::FINISHED;
-		}
-		return PopStatus::EMPTY;
+		cv.notify_all(); // pushers may be waiting on capacity
+		WakeCapacity(capacity_wakes);
+		return status;
 	}
 
 	//! Pop the lowest available batch regardless of claims (unordered consumption).
 	PopStatus TryPopAny(idx_t &batch_index_out, PAYLOAD &payload_out) {
-		annotated_lock_guard<annotated_mutex> guard(lock);
-		if (errored) {
-			return PopStatus::ERRORED;
-		}
-		if (!batches.empty()) {
+		vector<InterruptState> capacity_wakes;
+		{
+			annotated_lock_guard<annotated_mutex> guard(lock);
+			if (errored) {
+				return PopStatus::ERRORED;
+			}
+			if (batches.empty()) {
+				return finished ? PopStatus::FINISHED : PopStatus::EMPTY;
+			}
 			auto entry = batches.begin();
 			batch_index_out = entry->first;
 			payload_out = std::move(entry->second.payload);
 			buffered_bytes -= entry->second.bytes;
 			batches.erase(entry);
-			cv.notify_all(); // pushers may be waiting on capacity
-			return PopStatus::BATCH;
+			capacity_wakes = TakeCapacityWaiters();
 		}
-		if (finished) {
-			return PopStatus::FINISHED;
-		}
-		return PopStatus::EMPTY;
+		cv.notify_all(); // pushers may be waiting on capacity
+		WakeCapacity(capacity_wakes);
+		return PopStatus::BATCH;
 	}
 
 	//! Block until the claimed batch arrives, the stream ends, or a short timeout elapses.
@@ -185,6 +241,7 @@ public:
 	//! pushed — validates that a dense stream arrived completely.
 	void Finish(optional_idx expected_total = optional_idx()) {
 		std::map<idx_t, shared_ptr<ReadAheadJobCompletion>> drained;
+		vector<InterruptState> capacity_wakes;
 		{
 			annotated_lock_guard<annotated_mutex> guard(lock);
 			if (expected_total.IsValid() && !errored && pushed_count != expected_total.GetIndex()) {
@@ -196,16 +253,20 @@ public:
 			finished = true;
 			drained = std::move(waiters);
 			waiters.clear();
+			capacity_wakes = TakeCapacityWaiters();
 		}
 		cv.notify_all();
 		// wake every parked claimant so it observes FINISHED (or the count-mismatch error)
 		for (auto &entry : drained) {
 			entry.second->FinishIOTask();
 		}
+		// capacity-parked producers retry, observe the closed stream, and drop their batch
+		WakeCapacity(capacity_wakes);
 	}
 
 	void SetError(ErrorData error_p) {
 		std::map<idx_t, shared_ptr<ReadAheadJobCompletion>> drained;
+		vector<InterruptState> capacity_wakes;
 		{
 			annotated_lock_guard<annotated_mutex> guard(lock);
 			if (!errored) {
@@ -215,12 +276,15 @@ public:
 			finished = true;
 			drained = std::move(waiters);
 			waiters.clear();
+			capacity_wakes = TakeCapacityWaiters();
 		}
 		cv.notify_all();
 		// wake every parked claimant so it observes ERRORED
 		for (auto &entry : drained) {
 			entry.second->FinishIOTask();
 		}
+		// capacity-parked producers retry, observe the closed stream, and drop their batch
+		WakeCapacity(capacity_wakes);
 	}
 
 	bool HasError() {
@@ -261,6 +325,19 @@ private:
 		seen.Insert(batch_index);
 	}
 
+	vector<InterruptState> TakeCapacityWaiters() DUCKDB_REQUIRES(lock) {
+		auto taken = std::move(capacity_waiters);
+		capacity_waiters.clear();
+		return taken;
+	}
+
+	//! Fired outside the lock; a spurious wake just makes the producer retry and maybe re-park.
+	static void WakeCapacity(vector<InterruptState> &wakes) {
+		for (auto &state : wakes) {
+			state.Callback();
+		}
+	}
+
 private:
 	struct Entry {
 		PAYLOAD payload;
@@ -276,6 +353,8 @@ private:
 	idx_t capacity DUCKDB_GUARDED_BY(lock) = 0;
 	//! batch_index -> wake event for the parked claimant; publishing that index fires exactly this one.
 	std::map<idx_t, shared_ptr<ReadAheadJobCompletion>> waiters DUCKDB_GUARDED_BY(lock);
+	//! Tasks parked by TryPushBatch on capacity; all fired on any capacity-freeing pop or stream close.
+	vector<InterruptState> capacity_waiters DUCKDB_GUARDED_BY(lock);
 	//! Batches ever pushed, checked against Finish(expected_total); dedupe keeps retries from inflating it.
 	idx_t pushed_count DUCKDB_GUARDED_BY(lock) = 0;
 	//! Push dedupe.

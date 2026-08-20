@@ -1,9 +1,11 @@
 #pragma once
 
 #include "duckdb/common/allocator.hpp"
+#include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/execution/operator/persistent/batch_memory_manager.hpp"
 #include "duckdb/execution/operator/persistent/batch_task_manager.hpp"
+#include "duckdb/parallel/interrupt.hpp"
 
 namespace duckdb {
 
@@ -64,17 +66,25 @@ private:
 };
 
 //! Emits dense batches: OpenFragment accumulates chunks in emit-ready form on the producing thread
-//! (before the dense index is known); EmitPrepared stamps + sends at release time, concurrently and
-//! out of dense order (receivers reassemble by index). Finish runs once, after all EmitPrepared.
+//! (before the dense index is known); TryEmitPrepared stamps + sends at release time, concurrently
+//! and out of dense order (receivers reassemble by index). Finish runs once, after all emits.
 class QuackBatchEmitter {
 public:
 	virtual ~QuackBatchEmitter() = default;
 	//! size_hint: the previous sealed fragment's size (0 for a thread's first fragment), so
 	//! implementations can pre-reserve capacity and avoid growth copies while accumulating.
 	virtual unique_ptr<QuackFragmentBuilder> OpenFragment(ClientContext &context, idx_t size_hint) = 0;
-	virtual void EmitPrepared(ClientContext &context, idx_t dense_index, unique_ptr<QuackPreparedBatch> batch) = 0;
+	//! false = the delivery target is at capacity and `batch` was NOT consumed (retry the same batch
+	//! later); with `interrupt` set, capacity freeing fires it. Emitters that cannot capacity-block
+	//! consume the batch and always return true.
+	virtual bool TryEmitPrepared(ClientContext &context, idx_t dense_index, unique_ptr<QuackPreparedBatch> &batch,
+	                             optional_ptr<const InterruptState> interrupt) = 0;
 	virtual void Finish(ClientContext &context, idx_t total_batches) = 0;
 };
+
+//! Progress of an emit drain: BLOCKED means a batch is parked on delivery capacity and remains
+//! queued; the caller yields (interrupt registered) or guarantees a later interrupt-carrying drain.
+enum class QuackEmitProgress : uint8_t { DONE, BLOCKED };
 
 //! A stamped batch waiting to be emitted; emission runs outside the stamping lock, on any thread.
 struct QuackEmitTask {
@@ -104,12 +114,22 @@ public:
 	//! ever come from its owning thread, in order), then stamp + emit the settled prefix.
 	void AddPendingFragment(ClientContext &context, idx_t executor_batch, idx_t min_batch_index, idx_t memory_usage,
 	                        unique_ptr<QuackPreparedBatch> prepared);
-	//! SERIAL_ORDERED / UNORDERED: a sealed fragment that is stampable immediately; stamped and emitted inline.
-	void AddSettledData(ClientContext &context, unique_ptr<QuackPreparedBatch> prepared);
+	//! SERIAL_ORDERED / UNORDERED: stamp a sealed fragment with the next dense index. Emission is the
+	//! caller's job (TryEmitStamped) so a capacity-parked batch can be retried without re-stamping.
+	unique_ptr<QuackEmitTask> StampSettled(unique_ptr<QuackPreparedBatch> prepared) {
+		return make_uniq<QuackEmitTask>(next_dense++, 0, std::move(prepared));
+	}
+	//! Emit one already-stamped batch; false = parked on delivery capacity (task keeps the batch).
+	bool TryEmitStamped(ClientContext &context, QuackEmitTask &task, optional_ptr<const InterruptState> interrupt);
 
-	//! Emit one stamped batch if any is queued; returns false when the queue is empty.
-	bool ExecuteTask(ClientContext &context);
-	void ExecuteTasks(ClientContext &context);
+	//! Drain queued emit tasks (capacity-parked retries first, then the settled queue). A null
+	//! interrupt probes: a capacity-parked batch is shelved for a later interrupt-carrying drain.
+	QuackEmitProgress ExecuteTasks(ClientContext &context, optional_ptr<const InterruptState> interrupt = nullptr);
+	//! A capacity-parked emit is waiting for a retry.
+	bool HasParkedEmits() {
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		return !parked_tasks.empty();
+	}
 
 	//! Over the pending-bytes budget and not the minimum batch: stop sinking, help emit, maybe block.
 	bool OutOfMemory(idx_t batch_index);
@@ -118,7 +138,8 @@ public:
 	void FinalizeCut(ClientContext &context);
 	//! Stamped batches still queued for emission — lets Finalize decide inline drain vs parallel event.
 	idx_t TaskCount() {
-		return task_manager.TaskCount();
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		return task_manager.TaskCount() + parked_tasks.size();
 	}
 	//! After the last EmitBatch returned: verify accounting and let the emitter close the stream.
 	void FinalizeFinish(ClientContext &context);
@@ -152,6 +173,9 @@ private:
 	std::map<idx_t, vector<Fragment>> raw_batches DUCKDB_GUARDED_BY(lock);
 	//! The next dense index to hand out; stamping order defines the stream order.
 	atomic<idx_t> next_dense {1};
+	//! Emit tasks that hit delivery capacity mid-drain; retried lowest-index-first (the head of the
+	//! stream is always admitted, so retrying in index order guarantees progress).
+	std::map<idx_t, unique_ptr<QuackEmitTask>> parked_tasks DUCKDB_GUARDED_BY(lock);
 	//! Test/ops override: >0 also treats this many pending bytes as out-of-memory.
 	idx_t buffer_bytes_override;
 	unique_ptr<QuackBatchEmitter> emitter;

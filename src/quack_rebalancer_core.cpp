@@ -24,11 +24,14 @@ void QuackRebalancerCore::AddPendingFragment(ClientContext &context, idx_t execu
 		annotated_lock_guard<annotated_mutex> guard(memory_manager.lock);
 		memory_manager.UnblockTasks();
 	}
+	// Probe drain (mid-Sink, the chunk is already consumed — cannot yield here): a capacity-parked
+	// batch is shelved and finished by the next interrupt-carrying drain (Sink top, Combine, Finalize).
 	ExecuteTasks(context);
 }
 
-void QuackRebalancerCore::AddSettledData(ClientContext &context, unique_ptr<QuackPreparedBatch> prepared) {
-	emitter->EmitPrepared(context, next_dense++, std::move(prepared));
+bool QuackRebalancerCore::TryEmitStamped(ClientContext &context, QuackEmitTask &task,
+                                         optional_ptr<const InterruptState> interrupt) {
+	return emitter->TryEmitPrepared(context, task.dense_index, task.prepared, interrupt);
 }
 
 void QuackRebalancerCore::ReleaseSettled(idx_t min_exclusive) {
@@ -45,23 +48,36 @@ void QuackRebalancerCore::ReleaseSettled(idx_t min_exclusive) {
 	}
 }
 
-bool QuackRebalancerCore::ExecuteTask(ClientContext &context) {
-	auto task = task_manager.GetTask();
-	if (!task) {
-		return false;
-	}
-	auto memory_usage = task->memory_usage;
-	emitter->EmitPrepared(context, task->dense_index, std::move(task->prepared));
-	if (memory_usage > 0) {
-		memory_manager.ReduceUnflushedMemory(memory_usage);
-		annotated_lock_guard<annotated_mutex> guard(memory_manager.lock);
-		memory_manager.UnblockTasks();
-	}
-	return true;
-}
-
-void QuackRebalancerCore::ExecuteTasks(ClientContext &context) {
-	while (ExecuteTask(context)) {
+QuackEmitProgress QuackRebalancerCore::ExecuteTasks(ClientContext &context,
+                                                    optional_ptr<const InterruptState> interrupt) {
+	while (true) {
+		// Capacity-parked retries first, lowest index first: the head of the stream is always
+		// admitted, so index order guarantees the drain makes progress once capacity frees.
+		unique_ptr<QuackEmitTask> task;
+		{
+			annotated_lock_guard<annotated_mutex> guard(lock);
+			if (!parked_tasks.empty()) {
+				task = std::move(parked_tasks.begin()->second);
+				parked_tasks.erase(parked_tasks.begin());
+			}
+		}
+		if (!task) {
+			task = task_manager.GetTask();
+		}
+		if (!task) {
+			return QuackEmitProgress::DONE;
+		}
+		if (!TryEmitStamped(context, *task, interrupt)) {
+			annotated_lock_guard<annotated_mutex> guard(lock);
+			parked_tasks.emplace(task->dense_index, std::move(task));
+			return QuackEmitProgress::BLOCKED;
+		}
+		auto memory_usage = task->memory_usage;
+		if (memory_usage > 0) {
+			memory_manager.ReduceUnflushedMemory(memory_usage);
+			annotated_lock_guard<annotated_mutex> guard(memory_manager.lock);
+			memory_manager.UnblockTasks();
+		}
 	}
 }
 
@@ -78,7 +94,7 @@ void QuackRebalancerCore::FinalizeCut(ClientContext &context) {
 }
 
 void QuackRebalancerCore::FinalizeFinish(ClientContext &context) {
-	if (task_manager.TaskCount() != 0) {
+	if (TaskCount() != 0) {
 		throw InternalException("Unemitted batches remain in QuackRebalancerCore::FinalizeFinish");
 	}
 	memory_manager.FinalCheck();
