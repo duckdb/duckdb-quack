@@ -154,8 +154,8 @@ public:
 			throw InternalException("client context expired in QuackFetchCollector::GetResult");
 		}
 		auto collection = make_uniq<ColumnDataCollection>(Allocator::DefaultAllocator(), types);
-		return make_uniq<MaterializedQueryResult>(statement_type, properties, IdentifiersToStrings(names),
-		                                          std::move(collection), context->GetClientProperties());
+		return make_uniq<MaterializedQueryResult>(statement_type, properties, names, std::move(collection),
+		                                          context->GetClientProperties());
 	}
 
 	bool ParallelSink() const override {

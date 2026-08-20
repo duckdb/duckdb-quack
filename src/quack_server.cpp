@@ -198,12 +198,18 @@ static void RunFetchQuery(QuackConnection &connection, shared_ptr<QuackFetchStre
 		} else if (!stream->Bound()) {
 			// No collector claimed the stream, because no statement returned a result. Send the last
 			// statement's Success/Count result, as the protocol always has. No columns is an error.
-			if (result->names.empty()) {
+			if (result->GetNames().empty()) {
 				stream->buffer.SetError(ErrorData(ExceptionType::INVALID_INPUT, "Query did not return any columns"));
 				stream->buffer.Finish();
 				return;
 			}
-			stream->SignalBound(result->types, result->names);
+			// BaseQueryResult::names is a vector<Identifier>; the stream carries plain strings.
+			vector<string> result_names;
+			result_names.reserve(result->GetNames().size());
+			for (auto &col_name : result->GetNames()) {
+				result_names.push_back(col_name.GetIdentifierName());
+			}
+			stream->SignalBound(result->GetTypes(), std::move(result_names));
 			unique_ptr<FetchResponsePayloadWriter> writer;
 			idx_t rows = 0;
 			while (auto chunk = result->Fetch()) {
