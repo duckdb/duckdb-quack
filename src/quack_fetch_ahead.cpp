@@ -46,8 +46,7 @@ private:
 		auto &client = client_wrapper->GetClient();
 		auto start_time = QuackNowMillis();
 		// context=nullptr: called off the execution thread, must not touch ClientContext.
-		// This task's payload names its batch index, so an HTTP-level retry of this POST asks the
-		// server for the SAME batch again instead of popping the next one.
+		// The payload names its batch index, so an HTTP retry asks for the SAME batch again.
 		auto response_body = client.PostRaw(nullptr, payload->GetData(), payload_size);
 		auto duration_ms = QuackNowMillis() - start_time;
 
@@ -78,7 +77,7 @@ private:
 		}
 		bool pushed = false;
 		if (wrappers.empty()) {
-			// terminal response: this request's index lies beyond the stream's total
+			// terminal response: this index is above the stream's total
 			auto total = fetch_response.TotalBatches();
 			if (total.IsValid()) {
 				fetcher.expected_total = total.GetIndex();
@@ -112,9 +111,8 @@ private:
 private:
 	QuackFetcher &fetcher;
 	unique_ptr<QuackClientWrapper> client_wrapper;
-	//! The client-visible batch index this task requests; fixed at registration.
 	idx_t request_index;
-	//! This task's encoded FETCH request (index + ack baked in); identical across HTTP retries.
+	//! The encoded request. It holds the index and the ack, and it does not change on a retry.
 	unique_ptr<MemoryStream> payload;
 	idx_t payload_size;
 };
@@ -152,7 +150,7 @@ QuackFetcher::QuackFetcher(ClientContext &context, QuackClientConnection &connec
 	this->query_uuid = query_uuid;
 	connection_id = connection.ConnectionId();
 	logger = context.logger;
-	// Captured once: async tasks read it concurrently for request logging, and it is per-query state.
+	// Read once: the async tasks read it together, and it belongs to this query.
 	if (context.transaction.HasActiveTransaction()) {
 		auto raw_query_id = context.transaction.GetActiveQuery();
 		if (raw_query_id != DConstants::INVALID_INDEX) {
@@ -230,8 +228,8 @@ void QuackFetcher::TopUp(ClientContext &context) {
 			client = std::move(idle_clients.back());
 			idle_clients.pop_back();
 		}
-		// Each task requests one explicit index, assigned in dense order; its payload is encoded once
-		// here (with the current ack) and never changes, so HTTP retries are idempotent.
+		// Each task asks for one index, in dense order. Its payload is encoded once here, with the
+		// current ack, and it does not change. An HTTP retry is therefore safe.
 		auto request_index = next_request++;
 		FetchRequestMessage fetch_msg(connection_id, query_uuid, request_index, CurrentAck());
 		auto request_payload = make_uniq<MemoryStream>();
@@ -273,8 +271,8 @@ void QuackFetcher::FinishTask(unique_ptr<QuackClientWrapper> client, bool pushed
 		--outstanding;
 	}
 	if (--in_flight == 0 && no_more_fetches) {
-		// Clean end of stream: validate against the server's announced total (the buffer counted its
-		// own pushes), so lost batches fail loudly. Error/cancel paths never reach here with a total.
+		// A clean end: check the buffer's push count against the total the server announced, so a
+		// lost batch fails. An error or a cancel never reaches this point with a total.
 		auto expected = expected_total.load();
 		buffer->Finish(expected == DConstants::INVALID_INDEX ? optional_idx() : optional_idx(expected));
 	}

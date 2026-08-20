@@ -207,8 +207,7 @@ SET preserve_insertion_order=true;
 # Async FETCH POSTs run on ASYNC-pool threads via PostRaw(nullptr, ...); the logger stamped at
 # client checkout must make them visible in the HTTP transport log, not just the Quack log.
 
-# small fetch batches so one scan makes many async FETCH round-trips: the producer cuts small
-# dense batches, and the PREPARE response inlines only the first ones
+# small batches, so one scan makes many async FETCH round trips
 statement ok quack_db:quack_server_con
 set global quack_prepare_inline_rows=2048;
 
@@ -218,8 +217,8 @@ set global quack_target_batch_bytes=65536;
 statement ok
 CALL truncate_duckdb_logs();
 
-# hash() keeps the batches incompressible — they are cut on SERIALIZED bytes, and plain range()
-# would compress into a single batch that gets fully inlined into the PREPARE response (no FETCHes)
+# hash() makes the batches hard to compress. They are cut on SERIALIZED bytes, so a plain range()
+# would give one batch, PREPARE would inline it, and no FETCH would run.
 query I
 select count(*) from quack_query({server}, 'select hash(range) h from range(50000)')
 ----

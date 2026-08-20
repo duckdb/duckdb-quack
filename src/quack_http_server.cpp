@@ -233,8 +233,8 @@ HttpQuackServer::HttpQuackServer(ClientContext &context_p, const QuackUri &uri_p
 		auto response = HandleMessage(stream);
 		auto raw = response->RawPayload();
 		if (raw) {
-			// Pre-serialized response (fetch data batches): hand the payload to httplib without
-			// re-serializing or copying; the shared_ptr keeps the buffer alive until it is written out.
+			// The payload is already serialized: give it to httplib with no copy. The shared_ptr
+			// keeps the buffer alive until httplib writes it out.
 			auto data = const_char_ptr_cast(raw->GetData());
 			auto size = raw->GetPosition();
 			shared_ptr<QuackMessage> owned(std::move(response));

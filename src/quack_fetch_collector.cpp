@@ -16,13 +16,13 @@ namespace duckdb {
 //===--------------------------------------------------------------------===//
 // Fetch-buffer emitter
 //===--------------------------------------------------------------------===//
-//! A fragment serialized into a FETCH_RESPONSE payload, awaiting its dense index.
+//! A fragment serialized into a FETCH_RESPONSE payload. It has no dense index yet.
 struct QuackPreparedFetchBatch : public QuackPreparedBatch {
 	QuackFetchPayload entry;
 };
 
-//! Streams one fragment straight into a FETCH_RESPONSE payload — the accumulation buffer IS the wire
-//! response, so the FETCH handler replies with patched bytes instead of serializing on the reply thread.
+//! The accumulation buffer IS the wire response, so the FETCH handler patches 8 bytes and replies.
+//! It serializes nothing on the reply thread.
 class QuackFetchFragmentBuilder : public QuackFragmentBuilder {
 public:
 	QuackFetchFragmentBuilder(ClientContext &context, idx_t size_hint)
@@ -59,8 +59,8 @@ private:
 	idx_t rows = 0;
 };
 
-// Stamps each dense batch's index into its sealed payload and publishes it into the stream's claim
-// buffer. A full buffer parks the producing task instead of the thread — backpressure into the executor.
+// Stamps the dense index into the sealed payload, then publishes it. A full buffer parks the
+// producing task, not the thread.
 class QuackFetchBufferEmitter : public QuackBatchEmitter {
 public:
 	QuackFetchBufferEmitter(shared_ptr<QuackFetchStream> stream_p, idx_t debug_delay_ms_p)
@@ -71,12 +71,12 @@ public:
 		return make_uniq<QuackFetchFragmentBuilder>(context, size_hint);
 	}
 
-	//! NO_CAPACITY leaves the batch with the caller for a retry (the patch below is idempotent — a
-	//! retry re-stamps the same index); DROPPED/PUSHED both consume it.
+	//! NO_CAPACITY leaves the batch with the caller. A retry stamps the same index again, which is
+	//! safe. DROPPED and PUSHED both consume the batch.
 	bool TryEmitPrepared(ClientContext &context, idx_t dense_index, unique_ptr<QuackPreparedBatch> &batch,
 	                     optional_ptr<const InterruptState> interrupt) override {
 		if (debug_delay_ms > 0) {
-			// DEBUG SETTING: randomize publish order to stress head-of-stream admission
+			// DEBUG SETTING: make the publish order random, to stress head-of-stream admission
 			RandomEngine random;
 			ThreadUtil::SleepMs(random.NextRandomInteger(0, NumericCast<uint32_t>(debug_delay_ms)));
 		}
@@ -91,9 +91,9 @@ public:
 	}
 
 	void Finish(ClientContext &context, idx_t total_batches) override {
-		// Deliberately NOT finishing the buffer: the claimed statement can sit mid-way through a
-		// multi-statement query, and the client must not see the stream end while later statements run.
-		// RunFetchQuery closes the stream once the WHOLE query returned, validated against this total.
+		// Do NOT finish the buffer here. The claimed statement can sit in the middle of a
+		// multi-statement query, and the client must not see the stream end while more statements run.
+		// RunFetchQuery closes the stream, and it checks the count against this total.
 		stream->announced_total = total_batches;
 	}
 
@@ -105,8 +105,7 @@ private:
 //===--------------------------------------------------------------------===//
 // Fetch collector operator
 //===--------------------------------------------------------------------===//
-// Result collector producing the client-facing dense batch stream via the shared rebalancer sink;
-// the statement's own result is empty — the data's real exit is the stream's claim buffer.
+// The data leaves through the stream's claim buffer, so the statement's own result stays empty.
 class QuackFetchCollector : public PhysicalResultCollector {
 public:
 	QuackFetchCollector(PhysicalPlan &physical_plan, PreparedStatementData &data, shared_ptr<QuackFetchStream> stream_p,
@@ -148,7 +147,7 @@ public:
 	}
 
 	unique_ptr<QueryResult> GetResult(GlobalSinkState &state) const override {
-		// the data left through the stream's claim buffer; the statement's own result is empty
+		// the data left through the claim buffer
 		auto &gstate = state.Cast<QuackRebalancerGlobalState>();
 		auto context = gstate.client_context.lock();
 		if (!context) {
@@ -163,8 +162,8 @@ public:
 		return order_mode != AppendOrderMode::SERIAL_ORDERED;
 	}
 
-	//! Request executor batch indices only for PARALLEL_ORDERED, so the executor's assertion never fires
-	//! for sources that don't supply a batch index.
+	//! Ask for batch indices only in PARALLEL_ORDERED mode. A source that supplies none would then
+	//! fail an assertion in the executor.
 	OperatorPartitionInfo RequiredPartitionInfo() const override {
 		return order_mode == AppendOrderMode::PARALLEL_ORDERED ? OperatorPartitionInfo(/*batch_index=*/true)
 		                                                       : OperatorPartitionInfo();
@@ -177,8 +176,8 @@ public:
 
 unique_ptr<PhysicalOperator> MakeQuackFetchCollector(ClientContext &context, PreparedStatementData &data,
                                                      shared_ptr<QuackFetchStream> stream) {
-	// The stream carries the FIRST result-returning statement of the (possibly multi-statement) query,
-	// matching how core picks the head of a result chain; everything else keeps the default collector.
+	// The stream carries the FIRST statement that returns a result, as core does for a result chain.
+	// Every other statement keeps the default collector.
 	if (data.properties.return_type != StatementReturnType::QUERY_RESULT || stream->Bound()) {
 		return PhysicalResultCollector::GetResultCollector(context, data);
 	}

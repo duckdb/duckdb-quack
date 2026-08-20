@@ -4,8 +4,8 @@
 
 include test/template/quack_setup.test_template
 
-# One-batch PREPARE drain + small batches of a scrambled (incompressible but deterministic) column
-# force a genuinely multi-FETCH parallel scan, engaging the exactly-once ACK machinery.
+# A one-batch PREPARE drain and small batches of a scrambled column make a parallel scan that needs
+# many FETCHes. This is what puts the exactly-once ACK machinery to work.
 statement ok quack_db:quack_server_con
 SET GLOBAL quack_prepare_inline_rows = 1;
 
@@ -28,7 +28,7 @@ statement ok
 CALL enable_logging('Quack');
 
 # --- reconnects disabled: full parallel consumption completes and NO ACK is sent ---
-# CTAS forces a full transfer: aggregates would be pushed down whole (one-row result, no FETCH)
+# CTAS moves all the data. An aggregate would be pushed down and give one row, with no FETCH.
 statement ok
 CREATE OR REPLACE TABLE local_1 AS SELECT i, r FROM remote.big;
 
@@ -37,7 +37,7 @@ SELECT count(*), sum(r) FROM local_1;
 ----
 300000	147413745176582
 
-# sanity: the scan above really was multi-FETCH (guards the batching config against drift)
+# make sure the scan above really used more than one FETCH
 query I
 SELECT count(*) > 1 FROM duckdb_logs_parsed('Quack') WHERE message_type = 'FETCH_REQUEST';
 ----

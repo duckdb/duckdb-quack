@@ -4,8 +4,8 @@
 
 include test/template/quack_setup.test_template
 
-# After the client abandons the scan, the producer fills the tiny buffer and parks on its capacity
-# wait holding the connection lock; CANCEL must abort the stream or later statements hang.
+# The client stops the scan. The producer then fills the small buffer and parks, and it holds the
+# connection lock. CANCEL must abort the stream, or the next statement waits for ever.
 statement ok quack_db:quack_server_con
 SET GLOBAL quack_fetch_producer_buffer_bytes = 262144;
 
@@ -27,13 +27,12 @@ ATTACH {server} AS remote (TOKEN 'asdf');
 statement ok
 ATTACH {server} AS remote2 (TOKEN 'asdf');
 
-# abandon a large scan after one row: fetching stops, the producer keeps going until it parks
+# stop a large scan after one row: the producer continues until it parks
 query I
 SELECT count(*) FROM (SELECT * FROM quack_query_by_name('remote', 'SELECT i, pad FROM big') LIMIT 1);
 ----
 1
 
-# give the producer time to fill the buffer and park
 statement ok
 SELECT sleep_ms(200);
 
@@ -49,7 +48,7 @@ SET VARIABLE conn_id = (
 statement ok
 FROM quack_cancel('remote2', getvariable('conn_id'));
 
-# without the abort in CANCEL, this INSERT blocks forever on the connection lock
+# without the abort in CANCEL, this INSERT waits for ever on the connection lock
 statement ok
 INSERT INTO remote.sink_t VALUES (1);
 

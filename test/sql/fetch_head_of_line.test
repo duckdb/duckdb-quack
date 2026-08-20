@@ -4,9 +4,9 @@
 
 include test/template/quack_setup.test_template
 
-# The stall shape: jittered emitters fill the small (8-batch) buffer with LATER batches while the
-# head batch's emitter lags; the head then blocks on capacity while the client waits for exactly it.
-# Head-of-stream admission must let it through — without it this test hangs.
+# The emitters run at different speeds. The slow ones fill the small buffer with LATER batches, and
+# the head batch then finds no capacity while the client waits for it. Head-of-stream admission must
+# let the head in. Without it, this test waits for ever.
 statement ok quack_db:quack_server_con
 SET GLOBAL quack_fetch_producer_buffer_bytes = 524288;
 
@@ -22,7 +22,7 @@ SET GLOBAL quack_debug_emit_delay_ms = 5;
 statement ok quack_db:quack_server_con
 CREATE TABLE big AS SELECT range AS i, hash(range) AS pad FROM range(200000);
 
-# single consuming scan thread + a read-ahead window of 1: the client only ever waits on one index
+# one scan thread and a read-ahead window of 1: the client waits on one index only
 statement ok
 SET threads = 1;
 

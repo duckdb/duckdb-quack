@@ -6,8 +6,8 @@ require parquet
 
 include test/template/quack_setup.test_template
 
-# hash() pads the rows with incompressible bytes: batches are cut on SERIALIZED size, and plain
-# sequential integers would fit one batch that is fully inlined into PREPARE — no FETCH at all
+# hash() makes the rows hard to compress. Batches are cut on SERIALIZED size, so plain integers
+# would fit one batch, PREPARE would inline it, and no FETCH would run.
 statement ok quack_db:quack_server_con
 create table big as select range i, hash(range) pad from range(100000);
 
@@ -25,7 +25,7 @@ create view big_pq as select i, pad from '{TEST_DIR}/fetch_ord.parquet';
 statement ok
 attach {server} as rpc (token 'asdf')
 
-# small batches + a one-batch PREPARE drain => many FETCH round-trips through the read-ahead pipeline.
+# small batches and a one-batch PREPARE drain give many FETCH round trips
 # Set AFTER the attach: the catalog enumeration itself is otherwise truncated to one chunk and
 # loses the views (pre-existing ExecuteCommandInternal FIXME).
 statement ok quack_db:quack_server_con
@@ -34,7 +34,7 @@ set global quack_prepare_inline_rows=1;
 statement ok quack_db:quack_server_con
 set global quack_target_batch_bytes=65536;
 
-# sanity: this shape really produces multiple FETCHes (guards the batching config against drift)
+# make sure this shape really produces more than one FETCH
 statement ok
 CALL enable_logging('Quack');
 

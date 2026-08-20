@@ -10,22 +10,20 @@ QuackRebalancerCore::QuackRebalancerCore(ClientContext &context, idx_t buffer_by
 
 void QuackRebalancerCore::AddPendingFragment(ClientContext &context, idx_t executor_batch, idx_t min_batch_index,
                                              idx_t memory_usage, unique_ptr<QuackPreparedBatch> prepared) {
-	// The fragment arrives already emit-ready (built on the producing thread as chunks arrived) —
-	// settling releases ready bytes, not work.
 	{
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		raw_batches[executor_batch].emplace_back(memory_usage, std::move(prepared));
 	}
-	// The min batch's already-pushed fragments are a settled prefix of the dense stream (future
-	// fragments simply get later indices), so the frontier always includes them — regardless of caller.
+	// The min batch's pushed fragments are a settled prefix: later fragments only get later indices.
+	// The frontier therefore always includes them, whichever thread calls.
 	ReleaseSettled(min_batch_index + 1);
-	// Blocked producers can help emit; also drain here so stamped batches hit the wire immediately.
+	// blocked producers can help to emit
 	{
 		annotated_lock_guard<annotated_mutex> guard(memory_manager.lock);
 		memory_manager.UnblockTasks();
 	}
-	// Probe drain (mid-Sink, the chunk is already consumed — cannot yield here): a capacity-parked
-	// batch is shelved and finished by the next interrupt-carrying drain (Sink top, Combine, Finalize).
+	// A probe only: the chunk is already consumed, so this call cannot yield. A parked batch waits
+	// for the next drain that carries an interrupt (the top of Sink, Combine, or Finalize).
 	ExecuteTasks(context);
 }
 
@@ -51,8 +49,8 @@ void QuackRebalancerCore::ReleaseSettled(idx_t min_exclusive) {
 QuackEmitProgress QuackRebalancerCore::ExecuteTasks(ClientContext &context,
                                                     optional_ptr<const InterruptState> interrupt) {
 	while (true) {
-		// Capacity-parked retries first, lowest index first: the head of the stream is always
-		// admitted, so index order guarantees the drain makes progress once capacity frees.
+		// Parked retries first, lowest index first. The head of the stream always gets in, so index
+		// order makes progress certain after capacity frees.
 		unique_ptr<QuackEmitTask> task;
 		{
 			annotated_lock_guard<annotated_mutex> guard(lock);

@@ -62,15 +62,14 @@ struct QuackInsertState {
 	shared_ptr<QuackDataStream> StreamForDeadRangeOrBuffer(const string &sid, idx_t lo, idx_t hi);
 };
 
-//! The fetch-collector stream the connection's active query fills (one at a time): the query runs on a
-//! background thread with a rebalancing result collector; FETCH handlers drain the stream's buffer.
+//! The stream the connection's active query fills, one at a time. The query runs on a background
+//! thread with a rebalancing result collector, and the FETCH handlers drain the stream's buffer.
 struct QuackFetchState {
 	mutex lock;
 	shared_ptr<QuackFetchStream> stream;
 	std::thread thread;
 	hugeint_t uuid = 0;
-	//! Abort tombstone: late FETCHes for this uuid get the failure deterministically without keeping
-	//! the stream (and its buffered payloads) alive.
+	//! A late FETCH for this uuid gets this error. The stream and its payloads can then go away.
 	ErrorData abort_error;
 };
 
@@ -93,7 +92,6 @@ struct QuackConnection {
 
 	//! The INSERT this connection is currently driving via a client SEND_DATA stream (one at a time).
 	QuackInsertState insert;
-	//! The client-facing query result this connection is currently producing.
 	QuackFetchState fetch;
 };
 

@@ -49,14 +49,13 @@ public:
 	void StopAndDrain();
 
 private:
-	//! Register fetch tasks until in-flight + buffered batches reach `depth`. Each task names its batch
-	//! and carries its own encoded payload, so a transport retry re-asks for the SAME batch (idempotent).
+	//! Register fetch tasks until the batches in flight and in the buffer reach `depth`. Each task
+	//! names its batch and holds its own payload, so a transport retry asks for the SAME batch.
 	void TopUp(ClientContext &context);
 	//! Account one popped batch and refill the pipeline.
 	void BatchConsumed(ClientContext &context);
-	//! Record a received index and advance the contiguous-received watermark (the ack).
 	void RecordReceived(idx_t index);
-	//! Highest index with all of 1..ack received; the server may drop retained batches <= it.
+	//! The highest index for which all of 1..ack arrived. The server can drop the batches below it.
 	idx_t CurrentAck();
 	//! Return a checked-out client to the idle stack.
 	void ReturnClient(unique_ptr<QuackClientWrapper> client);
@@ -81,17 +80,16 @@ private:
 	//! In-flight fetches + buffered batches not yet popped; bounded by depth.
 	atomic<idx_t> outstanding {0};
 	atomic<idx_t> in_flight {0};
-	//! Next client-visible batch index to request; requests are issued in dense order, matching the
-	//! scan threads' claim sequence.
+	//! The next index to request. Requests go out in dense order, as the scan threads claim them.
 	atomic<idx_t> next_request {1};
-	//! Received indices; the contiguous prefix is the ack watermark sent to the server.
+	//! The contiguous prefix of these is the ack the client sends to the server.
 	mutex ack_lock;
 	QuackDenseIndexSet acked;
 	atomic<bool> stop {false};
 	//! Set on the first empty FETCH response; no further fetches are issued.
 	atomic<bool> no_more_fetches {false};
-	//! Client-visible total announced by the terminal FETCH response (INVALID_INDEX until seen);
-	//! passed to the buffer's Finish so a short stream errors instead of truncating silently.
+	//! The total the terminal FETCH response announced, INVALID_INDEX until it arrives. Finish reads
+	//! it, so a short stream errors instead of truncating.
 	atomic<uint64_t> expected_total {DConstants::INVALID_INDEX};
 };
 

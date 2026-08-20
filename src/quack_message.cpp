@@ -199,8 +199,8 @@ unique_ptr<QuackMessage> QuackMessage::FromMemoryStream(MemoryStream &read_strea
 //===--------------------------------------------------------------------===//
 // QuackChunkPayloadWriter
 //===--------------------------------------------------------------------===//
-//! Exposes the serializer hooks to write one message incrementally: the binary format is forward-only
-//! (no size backpatching), so a message can span many calls if the field order matches exactly.
+//! Opens the serializer hooks, so one message can be written step by step. The binary format is
+//! forward-only, so this works only if the field order is exactly the same.
 class QuackChunkPayloadWriter::PayloadSerializer : public BinarySerializer {
 public:
 	PayloadSerializer(WriteStream &stream, SerializationOptions options)
@@ -211,7 +211,7 @@ public:
 		OnPropertyBegin(field_id, tag);
 	}
 
-	//! Byte-identical to a chunk-list element written via WriteValue(const DataChunkWrapper *).
+	//! The same bytes as a chunk-list element from WriteValue(const DataChunkWrapper *).
 	void WriteChunkElement(DataChunk &chunk) {
 		OnNullableBegin(true);
 		OnObjectBegin();
@@ -221,8 +221,8 @@ public:
 	}
 };
 
-//! LEB128 zero-padded to CHUNK_COUNT_VARINT_WIDTH bytes: decodes to the same value as the canonical
-//! encoding, but has a fixed width so it can be patched in place once the count is known.
+//! A LEB128 padded with zeros to a fixed width. It decodes to the same value as the short form, and
+//! a patch can write the count into it later.
 static void EncodePaddedChunkCount(uint64_t value, data_ptr_t out) {
 	D_ASSERT(value < (1ULL << (7 * QuackChunkPayloadWriter::CHUNK_COUNT_VARINT_WIDTH)));
 	for (idx_t i = 0; i < QuackChunkPayloadWriter::CHUNK_COUNT_VARINT_WIDTH; i++) {
@@ -246,7 +246,7 @@ void QuackChunkPayloadWriter::OpenMessage(const MessageHeader &header) {
 	serializer->Begin();
 	header.Serialize(*serializer);
 	serializer->End();
-	serializer->Begin(); // body object; closed by Seal
+	serializer->Begin(); // Seal closes this
 }
 
 Serializer &QuackChunkPayloadWriter::Body() {
@@ -262,8 +262,8 @@ void QuackChunkPayloadWriter::BeginChunkList(uint16_t field_id, const char *tag)
 }
 
 void QuackChunkPayloadWriter::WriteBatchIndexField(uint16_t field_id, const char *tag) {
-	// Byte-identical to WritePropertyWithDefault<string>(field_id, tag, <8 bytes>): field header,
-	// varint length 8 (one byte), then the payload — whose offset we record for later patching.
+	// The same bytes as WritePropertyWithDefault<string>(field_id, tag, <8 bytes>): the field header,
+	// the length 8 as a one-byte varint, then the payload. Record where the payload starts.
 	serializer->BeginProperty(field_id, tag);
 	data_t length_byte = 8;
 	stream->WriteData(&length_byte, 1);
@@ -302,9 +302,8 @@ QuackChunkPayloadWriter::SealedPayload QuackChunkPayloadWriter::Seal() {
 	sealed_size = result.payload_size;
 	result.payload = std::move(stream);
 #ifdef DEBUG
-	// Round-trip pin: re-serializing the decoded payload with the generated codec must reproduce the
-	// bytes — except the chunk count, which this writer pads for patchability and the generated
-	// encoder emits minimal-width, so that region is compared by value.
+	// The generated codec must decode and re-encode these bytes without a change. The chunk count is
+	// the one exception: this writer pads it and the generated encoder does not, so compare its value.
 	{
 		MemoryStream copy(result.payload_size == 0 ? 1 : NextPowerOfTwo(result.payload_size));
 		copy.WriteData(result.payload->GetData(), result.payload_size);
@@ -343,19 +342,18 @@ QuackChunkPayloadWriter::SealedPayload QuackChunkPayloadWriter::Seal() {
 //===--------------------------------------------------------------------===//
 FetchResponsePayloadWriter::FetchResponsePayloadWriter(ClientContext &context, idx_t capacity_hint)
     : QuackChunkPayloadWriter(context, capacity_hint) {
-	// Responses carry an empty connection id, matching messages serialized via ToMemoryStream.
+	// A response has an empty connection id, as ToMemoryStream writes it.
 	OpenMessage(MessageHeader(MessageType::FETCH_RESPONSE, string()));
 	BeginChunkList(1, "results");
 }
 
 void FetchResponsePayloadWriter::WriteTail() {
-	// total_batches (field 2) is only ever set on the terminal FINISHED response, which is not
-	// pre-serialized; data payloads omit it exactly like the generated default handling.
+	// Only the terminal response sets total_batches, and that response is not serialized here.
 	WriteBatchIndexField(3, "batch_index_fixed");
 }
 
-// batch_index travels as QuackBatchIndexField — a fixed-width LAST field patchable in already-encoded
-// payloads. These two methods back the generator hooks in quack_message.json.
+// batch_index is a fixed-width last field, so a patch can write it into an encoded payload. The
+// generator hooks in quack_message.json call these two methods.
 string FetchResponseMessage::EncodeBatchIndexFixed() const {
 	string bytes(8, '\0');
 	QuackBatchIndexField::Encode(batch_index.IsValid() ? batch_index.GetIndex() : QuackBatchIndexField::INVALID,

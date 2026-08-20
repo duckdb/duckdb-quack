@@ -23,13 +23,12 @@ enum class QuackClaimPopStatus : uint8_t {
 };
 
 enum class QuackPushStatus : uint8_t {
-	PUSHED,      //! inserted and (if claimed) its waiter woken
-	DROPPED,     //! duplicate delivery or closed stream — the batch is consumed, nothing to retry
-	NO_CAPACITY, //! not inserted; retry the same batch once capacity frees (wake via the interrupt)
+	PUSHED,      //! inserted, and the waiter for this index is awake
+	DROPPED,     //! a duplicate, or the stream is closed: the batch is consumed, do not retry
+	NO_CAPACITY, //! not inserted: retry the same batch after capacity frees
 };
 
-//! Dense-index membership tracked as a contiguous prefix + sparse overflow; the sparse set stays
-//! bounded by the producer's in-flight window. Caller provides the locking.
+//! Dense-index membership: a contiguous prefix plus a sparse overflow set. The caller locks.
 struct QuackDenseIndexSet {
 	bool Contains(idx_t index) const {
 		return index <= contiguous || sparse.count(index) > 0;
@@ -41,7 +40,7 @@ struct QuackDenseIndexSet {
 			++contiguous;
 		}
 	}
-	//! Highest index with all of 1..index present.
+	//! The highest index for which all of 1..index are present.
 	idx_t ContiguousMax() const {
 		return contiguous;
 	}
@@ -51,37 +50,35 @@ private:
 	std::set<idx_t> sparse;
 };
 
-//! Claim-based delivery for dense batch streams (indices from 1): each consumer claims the next index
-//! and waits for exactly that batch; unordered consumers pop any. PAYLOAD is one batch's storage.
+//! Delivery for dense batch streams, indexed from 1. Each consumer claims the next index and waits
+//! for that batch only. Unordered consumers pop any batch. PAYLOAD is the storage of one batch.
 template <class PAYLOAD>
 class QuackClaimBuffer {
 public:
 	using PopStatus = QuackClaimPopStatus;
 
-	//! Claim the next batch index to consume; each index gets exactly one claimant.
 	idx_t ClaimBatch() {
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		return next_claim++;
 	}
 
-	//! Bound the buffered bytes; PushBatch blocks while full (producer backpressure). 0 = unbounded.
+	//! Limit the buffered bytes. A full buffer holds the producer back. 0 = no limit.
 	void SetCapacity(idx_t bytes) {
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		capacity = bytes;
 	}
 
-	//! Publish a batch under its dense index. With a capacity set, `bytes` is the batch's weight and
-	//! the call blocks until it fits (at least one batch is always admitted — no self-deadlock).
+	//! Publish a batch under its dense index. The call waits until the batch fits. An empty buffer
+	//! and the head of the stream always admit one, so the producer cannot deadlock.
 	void PushBatch(idx_t batch_index, PAYLOAD payload, idx_t bytes = 0) {
 		shared_ptr<ReadAheadJobCompletion> waiter;
 		{
 			annotated_unique_lock<annotated_mutex> guard(lock);
 			if (Seen(batch_index)) {
-				// duplicate delivery (transport-level retry) — the first copy won
+				// a transport retry delivered this batch again
 				return;
 			}
-			// producer backpressure: wait until the batch fits. An empty buffer always admits one, and
-			// the head of the stream is always admitted so later batches can't starve the next pop.
+			// The head of the stream always gets in. Later batches cannot starve the next pop.
 			while (capacity > 0 && buffered_bytes > 0 && buffered_bytes + bytes > capacity && !finished && !errored &&
 			       !HeadOfStream(batch_index)) {
 				cv.wait(guard);
@@ -90,7 +87,7 @@ public:
 				return;
 			}
 			if (Seen(batch_index)) {
-				// a concurrent duplicate got in while this push waited on capacity
+				// a duplicate got in while this push waited
 				return;
 			}
 			RecordSeen(batch_index);
@@ -105,14 +102,12 @@ public:
 		}
 		cv.notify_all();
 		if (waiter) {
-			// wakes exactly the scan task parked on this batch index
 			waiter->FinishIOTask();
 		}
 	}
 
-	//! Non-blocking PushBatch for yieldable producers. NO_CAPACITY leaves `payload` untouched so the
-	//! caller can park and retry the same batch; with `interrupt` set, the next capacity-freeing pop
-	//! (or stream close) fires it. Registration and pops share one lock — no lost wakeup.
+	//! PushBatch that does not wait. NO_CAPACITY does not touch `payload`, so the caller can park and
+	//! retry the same batch. With `interrupt` set, the next pop or the stream close fires it.
 	QuackPushStatus TryPushBatch(idx_t batch_index, PAYLOAD &payload, idx_t bytes,
 	                             optional_ptr<const InterruptState> interrupt) {
 		shared_ptr<ReadAheadJobCompletion> waiter;
@@ -122,7 +117,7 @@ public:
 				return QuackPushStatus::DROPPED;
 			}
 			if (Seen(batch_index)) {
-				// duplicate delivery (transport-level retry) — the first copy won
+				// a transport retry delivered this batch again
 				return QuackPushStatus::DROPPED;
 			}
 			if (capacity > 0 && buffered_bytes > 0 && buffered_bytes + bytes > capacity && !HeadOfStream(batch_index)) {
@@ -143,17 +138,16 @@ public:
 		}
 		cv.notify_all();
 		if (waiter) {
-			// wakes exactly the scan task parked on this batch index
 			waiter->FinishIOTask();
 		}
 		return QuackPushStatus::PUSHED;
 	}
 
-	//! Register a per-claim wake event; nullptr when the claim is already poppable (caller retries).
+	//! Returns nullptr if the claim is poppable now: the caller retries the pop.
 	shared_ptr<ReadAheadJobCompletion> RegisterWaiter(idx_t claim) {
 		annotated_lock_guard<annotated_mutex> guard(lock);
-		// Checked under the same lock PushBatch inserts with, so a concurrent publish either
-		// makes us retry the pop here or finds the registered waiter — no lost wakeup.
+		// One lock guards this check and the insert. A publish either makes the caller retry the pop,
+		// or it finds this waiter. No wakeup is lost.
 		if (batches.find(claim) != batches.end() || finished || errored) {
 			return nullptr;
 		}
@@ -166,7 +160,7 @@ public:
 		return completion;
 	}
 
-	//! Pop the claimed batch if present. FINISHED means the stream ended and the claim can never arrive.
+	//! FINISHED means the stream ended and the claim cannot arrive.
 	PopStatus TryPopClaimed(idx_t claim, PAYLOAD &payload_out) {
 		vector<InterruptState> capacity_wakes;
 		PopStatus status;
@@ -183,7 +177,7 @@ public:
 				capacity_wakes = TakeCapacityWaiters();
 				status = PopStatus::BATCH;
 			} else if (finished) {
-				// Indices are dense and Finish() runs after the last push, so an absent claim can never arrive.
+				// Indices are dense and Finish() runs after the last push.
 				return PopStatus::FINISHED;
 			} else {
 				return PopStatus::EMPTY;
@@ -194,7 +188,6 @@ public:
 		return status;
 	}
 
-	//! Pop the lowest available batch regardless of claims (unordered consumption).
 	PopStatus TryPopAny(idx_t &batch_index_out, PAYLOAD &payload_out) {
 		vector<InterruptState> capacity_wakes;
 		{
@@ -217,28 +210,25 @@ public:
 		return PopStatus::BATCH;
 	}
 
-	//! Block until the claimed batch arrives, the stream ends, or a short timeout elapses.
 	void WaitForBatch(idx_t claim) {
 		annotated_unique_lock<annotated_mutex> guard(lock);
 		if (batches.find(claim) != batches.end() || finished || errored) {
 			return;
 		}
-		// Bounded wait so the consumer can re-check cancellation even if the batch never arrives.
+		// The wait has a limit, so the consumer can look for a cancel again.
 		cv.wait_for(guard, std::chrono::milliseconds(200));
 	}
 
-	//! Block until any batch is available, the stream ends, or a short timeout elapses.
 	void WaitForAny() {
 		annotated_unique_lock<annotated_mutex> guard(lock);
 		if (!batches.empty() || finished || errored) {
 			return;
 		}
-		// Bounded wait so the consumer can re-check cancellation even if no batch ever arrives.
+		// The wait has a limit, so the consumer can look for a cancel again.
 		cv.wait_for(guard, std::chrono::milliseconds(200));
 	}
 
-	//! End the stream. When expected_total is set, error out unless exactly that many batches were
-	//! pushed — validates that a dense stream arrived completely.
+	//! End the stream. With expected_total set, a different push count becomes an error.
 	void Finish(optional_idx expected_total = optional_idx()) {
 		std::map<idx_t, shared_ptr<ReadAheadJobCompletion>> drained;
 		vector<InterruptState> capacity_wakes;
@@ -256,11 +246,9 @@ public:
 			capacity_wakes = TakeCapacityWaiters();
 		}
 		cv.notify_all();
-		// wake every parked claimant so it observes FINISHED (or the count-mismatch error)
 		for (auto &entry : drained) {
 			entry.second->FinishIOTask();
 		}
-		// capacity-parked producers retry, observe the closed stream, and drop their batch
 		WakeCapacity(capacity_wakes);
 	}
 
@@ -279,11 +267,9 @@ public:
 			capacity_wakes = TakeCapacityWaiters();
 		}
 		cv.notify_all();
-		// wake every parked claimant so it observes ERRORED
 		for (auto &entry : drained) {
 			entry.second->FinishIOTask();
 		}
-		// capacity-parked producers retry, observe the closed stream, and drop their batch
 		WakeCapacity(capacity_wakes);
 	}
 
@@ -292,7 +278,7 @@ public:
 		return errored;
 	}
 
-	//! The producer closed the stream (Finish or SetError ran).
+	//! Finish() or SetError() ran.
 	bool Finished() {
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		return finished;
@@ -303,20 +289,20 @@ public:
 		return error;
 	}
 
-	//! The stream ended and every published batch has been consumed.
+	//! The stream ended and every batch left the buffer.
 	bool Exhausted() {
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		return finished && batches.empty();
 	}
 
 private:
-	//! No pending batch precedes this one, so the consumer's next pop is waiting on exactly this index;
-	//! admitting it over capacity is the only way forward, and overshoots the cap by at most one batch.
+	//! No pending batch is before this one, so the next pop waits for this index. Admit it over the
+	//! limit: that is the only way to make progress.
 	bool HeadOfStream(idx_t batch_index) const DUCKDB_REQUIRES(lock) {
 		return batches.empty() || batches.begin()->first > batch_index;
 	}
 
-	//! True when this dense index was already pushed once (whether or not it was popped since).
+	//! This index was pushed before, even if a pop removed it since.
 	bool Seen(idx_t batch_index) const DUCKDB_REQUIRES(lock) {
 		return seen.Contains(batch_index);
 	}
@@ -331,7 +317,7 @@ private:
 		return taken;
 	}
 
-	//! Fired outside the lock; a spurious wake just makes the producer retry and maybe re-park.
+	//! Fired outside the lock. An unnecessary wake only makes the producer retry.
 	static void WakeCapacity(vector<InterruptState> &wakes) {
 		for (auto &state : wakes) {
 			state.Callback();
@@ -347,27 +333,24 @@ private:
 	annotated_mutex lock;
 	std::condition_variable cv;
 	idx_t next_claim DUCKDB_GUARDED_BY(lock) = 1;
-	//! batch_index -> published batch, awaiting a consumer.
 	std::map<idx_t, Entry> batches DUCKDB_GUARDED_BY(lock);
 	idx_t buffered_bytes DUCKDB_GUARDED_BY(lock) = 0;
 	idx_t capacity DUCKDB_GUARDED_BY(lock) = 0;
-	//! batch_index -> wake event for the parked claimant; publishing that index fires exactly this one.
+	//! A publish of one index fires the waiter for that index only.
 	std::map<idx_t, shared_ptr<ReadAheadJobCompletion>> waiters DUCKDB_GUARDED_BY(lock);
-	//! Tasks parked by TryPushBatch on capacity; all fired on any capacity-freeing pop or stream close.
+	//! Parked by TryPushBatch. A pop that frees bytes, or a stream close, fires all of them.
 	vector<InterruptState> capacity_waiters DUCKDB_GUARDED_BY(lock);
-	//! Batches ever pushed, checked against Finish(expected_total); dedupe keeps retries from inflating it.
+	//! Checked against Finish(expected_total). Dedupe keeps retries out of this count.
 	idx_t pushed_count DUCKDB_GUARDED_BY(lock) = 0;
-	//! Push dedupe.
 	QuackDenseIndexSet seen DUCKDB_GUARDED_BY(lock);
 	bool finished DUCKDB_GUARDED_BY(lock) = false;
 	bool errored DUCKDB_GUARDED_BY(lock) = false;
 	ErrorData error DUCKDB_GUARDED_BY(lock);
 };
 
-//! One batch stored as owned chunks — the client fetch buffer and the server insert stream.
+//! One batch as owned chunks: the client fetch buffer and the server insert stream.
 using QuackChunkBatch = vector<unique_ptr<DataChunk>>;
 using QuackChunkClaimBuffer = QuackClaimBuffer<QuackChunkBatch>;
-//! The client fetch path reads more naturally with its historical name.
 using QuackFetchBuffer = QuackChunkClaimBuffer;
 
 } // namespace duckdb
