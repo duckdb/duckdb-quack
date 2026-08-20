@@ -3,41 +3,16 @@
 #include "duckdb/common/types/interval.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/database.hpp"
-#include "duckdb/main/query_result.hpp"
-#include "duckdb/main/stream_query_result.hpp"
 
-#include "quack_message.hpp"
+#include "quack_fetch_collector.hpp"
 #include "quack_server.hpp"
 
 namespace duckdb {
 
-static vector<unique_ptr<DataChunkWrapper>> CreateBatch(unique_ptr<QueryResult> &query_result, idx_t max_rows) {
-	vector<unique_ptr<DataChunkWrapper>> results;
-	idx_t rows = 0;
-	while (rows < max_rows) {
-		auto result_chunk = query_result->Fetch();
-		if (!result_chunk && query_result->HasError()) {
-			results.clear();
-			return results;
-		}
-		if (!result_chunk || result_chunk->size() == 0) {
-			query_result.reset();
-			break;
-		}
-		rows += result_chunk->size();
-		results.push_back(make_uniq<DataChunkWrapper>(*result_chunk));
-	}
-	return results;
-}
-
 QuackResultCache::~QuackResultCache() {
-	if (tail && tail->GetResultType() == QueryResultType::STREAM_RESULT) {
-		try {
-			// If it's a stream we gotta close it
-			tail->Cast<StreamQueryResult>().Close();
-		} catch (...) {
-		}
-	}
+	// Dropping the reference only releases the retained payloads. The query behind the stream is
+	// owned by the connection's fetch state, so whoever drops a cache that is still serving must
+	// abort that stream as well -- see ExpireCacheIfStale's `still_serving`.
 	(*live_caches)--;
 }
 
@@ -70,7 +45,9 @@ int64_t ResultTtlMicros(DatabaseInstance &db) {
 	return NumericCast<int64_t>(ttl_seconds) * Interval::MICROS_PER_SEC;
 }
 
-unique_ptr<QuackResultCache> ExpireCacheIfStale(QuackConnection &connection, timestamp_t now, int64_t ttl_micros) {
+unique_ptr<QuackResultCache> ExpireCacheIfStale(QuackConnection &connection, timestamp_t now, int64_t ttl_micros,
+                                                bool &still_serving) {
+	still_serving = false;
 	auto &cache = connection.result_cache;
 	if (!cache || ttl_micros == 0) {
 		return nullptr;
@@ -79,53 +56,13 @@ unique_ptr<QuackResultCache> ExpireCacheIfStale(QuackConnection &connection, tim
 		return nullptr;
 	}
 	// an expired unfinished stream must fail loudly on later fetches instead of silently truncating
-	if (cache->query_uuid == connection.query_uuid && cache->tail) {
+	if (cache->query_uuid == connection.query_uuid && cache->stream && !cache->stream->buffer.Exhausted()) {
 		connection.query_state = QuackQueryState::CANCELLED;
+		still_serving = true;
 	}
 	auto doomed = std::move(connection.result_cache);
 	connection.ClearResultCache();
 	return doomed;
-}
-
-bool HasMoreResults(QuackConnection &connection) {
-	auto &cache = connection.result_cache;
-	if (cache && cache->query_uuid == connection.query_uuid) {
-		return cache->tail != nullptr;
-	}
-	return connection.duckdb_query_result != nullptr;
-}
-
-vector<unique_ptr<DataChunkWrapper>> ServeBatch(QuackConnection &connection, idx_t max_rows, idx_t max_cache_rows) {
-	auto cache = connection.result_cache.get();
-	if (!cache || cache->query_uuid != connection.query_uuid) {
-		return CreateBatch(connection.duckdb_query_result, max_rows);
-	}
-	cache->last_served_at = Timestamp::GetCurrentTimestamp();
-	vector<unique_ptr<DataChunkWrapper>> results;
-	idx_t rows = 0;
-	while (rows < max_rows && cache->tail) {
-		auto result_chunk = cache->tail->Fetch();
-		if (!result_chunk && cache->tail->HasError()) {
-			connection.duckdb_query_result = std::move(cache->tail);
-			connection.ClearResultCache();
-			return vector<unique_ptr<DataChunkWrapper>>();
-		}
-		if (!result_chunk || result_chunk->size() == 0) {
-			cache->tail.reset();
-			break;
-		}
-		rows += result_chunk->size();
-		// the single-argument Append keeps no append state between batches: a retained state pins the
-		// current 256KB block in the buffer manager for the whole life of the cache
-		cache->retained.Append(*result_chunk);
-		results.push_back(make_uniq<DataChunkWrapper>(*result_chunk));
-	}
-	if (max_cache_rows != 0 && cache->retained.Count() > max_cache_rows) {
-		// Too large to replay, hand the tail back to plain streaming and drop the cache
-		connection.duckdb_query_result = std::move(cache->tail);
-		connection.ClearResultCache();
-	}
-	return results;
 }
 
 } // namespace duckdb

@@ -388,29 +388,42 @@ void QuackServer::SweepExpiredCaches(DatabaseInstance &db) {
 	}
 	vector<CacheExpiryEntry> requeue;
 	vector<unique_ptr<QuackResultCache>> doomed;
+	//! Connections whose expired cache was still serving: their producer has to be aborted, which
+	//! joins a thread, so it happens after the state lock is released.
+	vector<shared_ptr<QuackConnection>> abandoned;
 	for (auto &entry : candidates) {
 		auto connection = GetConnection(entry.session_id);
 		if (!connection) {
 			// disconnected, the cache died with the connection and the slot dies here
 			continue;
 		}
-		std::unique_lock<std::mutex> lock(connection->lock, std::try_to_lock);
-		if (!lock.owns_lock()) {
-			// busy serving a request right now, by definition not idle; retry on the next sweep
-			requeue.push_back(std::move(entry));
-			continue;
+		{
+			std::unique_lock<std::mutex> lock(connection->lock, std::try_to_lock);
+			if (!lock.owns_lock()) {
+				// another handler is mutating the session state; retry on the next sweep
+				requeue.push_back(std::move(entry));
+				continue;
+			}
+			bool still_serving = false;
+			auto expired = ExpireCacheIfStale(*connection, now, ttl_micros, still_serving);
+			if (expired) {
+				doomed.push_back(std::move(expired));
+				if (still_serving) {
+					abandoned.push_back(connection);
+				}
+			}
+			if (connection->result_cache) {
+				// served (or replaced) since the snapshot was queued, keep the slot under the fresh timestamp
+				entry.served_at = connection->result_cache->last_served_at;
+				requeue.push_back(std::move(entry));
+			} else {
+				connection->cache_in_expiry_queue = false;
+			}
 		}
-		auto expired = ExpireCacheIfStale(*connection, now, ttl_micros);
-		if (expired) {
-			doomed.push_back(std::move(expired));
-		}
-		if (connection->result_cache) {
-			// served (or replaced) since the snapshot was queued, keep the slot under the fresh timestamp
-			entry.served_at = connection->result_cache->last_served_at;
-			requeue.push_back(std::move(entry));
-		} else {
-			connection->cache_in_expiry_queue = false;
-		}
+	}
+	for (auto &connection : abandoned) {
+		// Releases the query the client walked away from. A later FETCH finds this error.
+		AbortFetchStream(*connection, "Query was interrupted");
 	}
 	if (!requeue.empty()) {
 		std::lock_guard<std::mutex> lock(cache_expiry_mutex);

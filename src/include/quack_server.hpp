@@ -92,8 +92,6 @@ struct QuackConnection {
 	//! producer and the insert driver both take it; request handlers must not.
 	mutex statement_lock;
 	unique_ptr<Connection> duckdb_connection;
-	//! Only the result cache reads this now. The fetch stream carries the client's result.
-	unique_ptr<QueryResult> duckdb_query_result;
 	//! Replay cache of the last client query's result stream, null unless quack_enable_reconnects.
 	unique_ptr<QuackResultCache> result_cache;
 	//! The owning server's live-cache counter, handed to every cache this connection creates.
@@ -105,7 +103,7 @@ struct QuackConnection {
 	string session_id;
 
 	void SyncCachedRows() {
-		cached_rows = result_cache ? result_cache->retained.Count() : DConstants::INVALID_INDEX;
+		cached_rows = result_cache ? result_cache->retained_rows : DConstants::INVALID_INDEX;
 	}
 
 	//! The only way to drop the cache, keeps the lock-free cached_rows mirror in sync with the drop
