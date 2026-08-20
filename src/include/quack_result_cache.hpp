@@ -12,12 +12,9 @@ class DatabaseInstance;
 struct QuackConnection;
 struct QuackFetchStream;
 
-//! Server-side retention of a connection's last client query, so a client that loses the
-//! connection can be served the same bytes again.
-//!
-//! The fetch stream already keeps every payload it has served, keyed by dense batch index, so a
-//! transport retry gets identical bytes. This cache is that retention held open: it pins the
-//! stream past the point the client's acks would otherwise release it, and counts what it holds.
+//! Keeps a connection's last client query, so a client that reconnects can get the same bytes.
+//! The fetch stream already holds each payload it served, for a transport retry. This cache holds
+//! that retention open after the client acks, and counts what it holds.
 struct QuackResultCache {
 	QuackResultCache(string sql_p, hugeint_t query_uuid_p, shared_ptr<QuackFetchStream> stream_p,
 	                 shared_ptr<atomic<idx_t>> live_caches_p)
@@ -36,7 +33,7 @@ struct QuackResultCache {
 	string sql;
 	//! UUID the cached query is currently served under.
 	hugeint_t query_uuid;
-	//! Its own reference, so an internal query swapping the connection's stream cannot drop it.
+	//! Held here too, because an internal query can replace the connection's stream.
 	shared_ptr<QuackFetchStream> stream;
 	//! Rows in the payloads the stream is holding for this cache.
 	idx_t retained_rows = 0;
@@ -56,9 +53,8 @@ idx_t CacheMaxRows(DatabaseInstance &db);
 int64_t ResultTtlMicros(DatabaseInstance &db);
 
 //! Detaches the cache once idle past the TTL, failing an unfinished stream like a cancelled query.
-//! Returns the doomed cache (null if kept) so the caller can destroy it off the request path. The
-//! caller must abort the connection's fetch stream when `still_serving` comes back true, which
-//! releases the abandoned query behind it.
+//! Returns the cache, so the caller can destroy it off the request path. If `still_serving` is
+//! true, the caller must also abort the fetch stream. That releases the abandoned query.
 unique_ptr<QuackResultCache> ExpireCacheIfStale(QuackConnection &connection, timestamp_t now, int64_t ttl_micros,
                                                 bool &still_serving);
 

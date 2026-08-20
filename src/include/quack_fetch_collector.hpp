@@ -71,15 +71,15 @@ struct QuackFetchStream {
 	//! fails instead of truncating.
 	optional_idx announced_total;
 
-	//! A payload the stream is holding on to, so it can be served again byte for byte.
+	//! A payload the stream keeps, so it can serve the same bytes again.
 	struct RetainedPayload {
 		shared_ptr<MemoryStream> payload;
 		idx_t rows = 0;
 	};
 
 	//! Kept until the client acks them, so a transport retry gets the SAME batch again. The client's
-	//! read-ahead window bounds this map, unless a result cache is retaining the whole result: then
-	//! `retain_all` holds the acks off and the map grows to the size of the result.
+	//! read-ahead window bounds this map. With `retain_all` an ack releases nothing, and the map
+	//! grows to the size of the result.
 	mutex serve_lock;
 	std::map<idx_t, RetainedPayload> served;
 	//! Set while a result cache pins this stream. Guarded by serve_lock.
@@ -87,13 +87,13 @@ struct QuackFetchStream {
 	//! Rows in `served`. Guarded by serve_lock.
 	idx_t retained_rows = 0;
 
-	//! Hold every served payload from now on, and count what is already there.
+	//! Keep every payload from now on. An ack then releases nothing.
 	void RetainAll() {
 		lock_guard<mutex> guard(serve_lock);
 		retain_all = true;
 	}
 
-	//! Add a payload the connection served outside the FETCH handler (the PREPARE inline drain).
+	//! Add a payload that the PREPARE inline drain served, outside the FETCH handler.
 	void Retain(idx_t dense_index, shared_ptr<MemoryStream> payload, idx_t rows) {
 		lock_guard<mutex> guard(serve_lock);
 		if (!served.emplace(dense_index, RetainedPayload {std::move(payload), rows}).second) {
@@ -107,7 +107,7 @@ struct QuackFetchStream {
 		return retained_rows;
 	}
 
-	//! Stop retaining and drop what is held: the result grew past what the server will keep.
+	//! Stop retaining and drop what is held. The result grew past the cache limit.
 	void DropRetention() {
 		lock_guard<mutex> guard(serve_lock);
 		retain_all = false;

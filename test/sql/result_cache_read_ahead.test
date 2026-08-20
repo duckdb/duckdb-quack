@@ -1,5 +1,5 @@
 # name: test/sql/result_cache_read_ahead.test
-# description: result cache over a multi-batch read-ahead result: retention flows through FETCH, survives internal catalog traffic, and is released by the client's ACK
+# description: result cache over a multi-batch read-ahead result: retention through FETCH, survival of internal catalog traffic, release by the client ACK
 # group: [sql]
 
 include test/template/quack_setup.test_template
@@ -16,8 +16,8 @@ SET GLOBAL quack_cache_max_rows = 0;
 statement ok quack_db:quack_server_con
 SET GLOBAL quack_result_ttl = 0;
 
-# The other cache tests use results small enough that PREPARE inlines them whole, so they only cover
-# retention from the inline drain. Small batches force real FETCH round trips instead.
+# The other cache tests use a result that PREPARE inlines whole. They cover the inline drain only.
+# Small batches force real FETCH round trips.
 statement ok quack_db:quack_server_con
 SET GLOBAL quack_prepare_inline_rows = 1;
 
@@ -43,7 +43,7 @@ SELECT count(*), sum(r) FROM local_copy;
 ----
 200000	97656166825687
 
-# the scan really did go over many FETCHes, so the rows below came through the FETCH handler
+# the scan used many FETCHes, so the rows above came through the FETCH handler
 query I
 SELECT count(*) > 1 FROM duckdb_logs_parsed('Quack') WHERE message_type = 'FETCH_REQUEST';
 ----
@@ -55,8 +55,8 @@ SELECT max(cached_rows) FROM quack_active_connections();
 200000
 
 # --- internal catalog traffic must not displace it ---
-# quack_clear_cache re-binds the catalog over the same connection with query uuid 0. The retained
-# payloads belong to the cache, not to whatever stream the connection is serving now.
+# quack_clear_cache binds the catalog again on the same connection, with query uuid 0. The
+# payloads belong to the cache, and not to the stream the connection serves now.
 
 statement ok
 CALL quack_clear_cache();

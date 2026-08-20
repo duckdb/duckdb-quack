@@ -10,9 +10,8 @@
 namespace duckdb {
 
 QuackResultCache::~QuackResultCache() {
-	// Dropping the reference only releases the retained payloads. The query behind the stream is
-	// owned by the connection's fetch state, so whoever drops a cache that is still serving must
-	// abort that stream as well -- see ExpireCacheIfStale's `still_serving`.
+	// This releases the retained payloads only. The connection's fetch state owns the query, so a
+	// caller that drops a cache which still serves must abort that stream as well.
 	(*live_caches)--;
 }
 

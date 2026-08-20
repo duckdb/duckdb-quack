@@ -106,8 +106,8 @@ SELECT count(cached_rows) FROM quack_active_connections();
 statement ok quack_db:quack_server_con
 SET GLOBAL quack_result_ttl = 1;
 
-# Small batches, or the whole result is one batch that PREPARE inlines: the client would then never
-# FETCH, and an expired stream it never resumes proves nothing.
+# Small batches. At the default size the result is one batch, PREPARE inlines it, and the client
+# never sends a FETCH. An expired stream that nobody resumes proves nothing.
 statement ok quack_db:quack_server_con
 SET GLOBAL quack_target_batch_bytes = 65536;
 

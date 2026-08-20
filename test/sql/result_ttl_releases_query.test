@@ -16,9 +16,9 @@ SET GLOBAL quack_cache_max_rows = 0;
 statement ok quack_db:quack_server_con
 SET GLOBAL quack_result_ttl = 1;
 
-# Small batches and a small producer buffer, so the read-ahead producer parks on capacity while the
-# sort is still live. Left at their defaults the whole result fits in the buffer, the query runs to
-# completion during PREPARE, and there is no abandoned query left to release.
+# Small batches and a small producer buffer, so the producer parks while the sort is still live.
+# At the default sizes the whole result fits in the buffer. The query then completes during
+# PREPARE, and no abandoned query remains to release.
 statement ok quack_db:quack_server_con
 SET GLOBAL quack_target_batch_bytes = 65536;
 

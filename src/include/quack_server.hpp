@@ -85,11 +85,10 @@ struct QuackConnection {
 	//! True if the lease timeout has elapsed, latching the expiry ("cannot be revived").
 	bool LeaseExpiredLocked(time_point<steady_clock> now) DUCKDB_REQUIRES(lease_lock);
 
-	//! Short-held: guards the session state below (sql_query, query_state, query_started_at,
-	//! query_uuid) and the result cache. Never held across a statement.
+	//! Guards the session state below and the result cache. Never held across a statement.
 	mutex lock;
-	//! Held for a whole statement on `duckdb_connection`, which runs one at a time. The fetch
-	//! producer and the insert driver both take it; request handlers must not.
+	//! Held for a whole statement, because `duckdb_connection` runs one at a time. The fetch
+	//! producer and the insert driver take it. Request handlers must not.
 	mutex statement_lock;
 	unique_ptr<Connection> duckdb_connection;
 	//! Replay cache of the last client query's result stream, null unless quack_enable_reconnects.
