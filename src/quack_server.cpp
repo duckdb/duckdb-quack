@@ -723,6 +723,13 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		auto stream = make_shared_ptr<QuackFetchStream>();
 		stream->buffer.SetCapacity(
 		    QuackGetUBigintSetting(db, "quack_fetch_producer_buffer_bytes", QUACK_FETCH_PRODUCER_BUFFER_BYTES_DEFAULT));
+		// Internal catalog traffic carries uuid 0. It must never displace the client's retained result.
+		bool client_query = prepare_request_message.QueryUUID() != hugeint_t {0, 0};
+		bool retain_result = client_query && ServerCachingEnabled(db);
+		if (retain_result) {
+			// hold every served payload, instead of releasing it once the client acks
+			stream->RetainAll();
+		}
 		DetachedFetchStream superseded;
 		{
 			// Install under one lock. A concurrent PREPARE can install a producer after the abort
@@ -765,6 +772,11 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 				auto inline_message = QuackMessage::FromMemoryStream(payload_stream);
 				for (auto &wrapper : inline_message->Cast<FetchResponseMessage>().MutableResults()) {
 					results.push_back(std::move(wrapper));
+				}
+				if (retain_result) {
+					// These rows leave in the PREPARE response and never reach the FETCH handler, so
+					// this is the only chance to count them towards the cache.
+					stream->Retain(consumed, std::move(entry.payload), entry.rows);
 				}
 				continue;
 			}
@@ -822,8 +834,15 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		auto dense_ack = fetch_request_message.ack_index + stream->prepare_batches;
 		{
 			lock_guard<mutex> guard(stream->serve_lock);
-			// the client has everything up to the ack, and cannot ask for it again
-			stream->served.erase(stream->served.begin(), stream->served.upper_bound(dense_ack));
+			// The client has everything up to the ack and cannot ask for it again -- unless a result
+			// cache is holding the whole result open for a reconnect.
+			if (!stream->retain_all) {
+				auto last = stream->served.upper_bound(dense_ack);
+				for (auto it = stream->served.begin(); it != last; ++it) {
+					stream->retained_rows -= it->second.rows;
+				}
+				stream->served.erase(stream->served.begin(), last);
+			}
 		}
 
 		while (true) {
@@ -836,7 +855,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 				auto retained = stream->served.find(dense_index);
 				if (retained != stream->served.end()) {
 					// already patched with the client-visible index
-					return make_uniq<QuackRawPayloadResponse>(MessageType::FETCH_RESPONSE, retained->second);
+					return make_uniq<QuackRawPayloadResponse>(MessageType::FETCH_RESPONSE, retained->second.payload);
 				}
 				status = stream->buffer.TryPopClaimed(dense_index, entry);
 				if (status == QuackClaimPopStatus::BATCH) {
@@ -844,7 +863,9 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 					QuackBatchIndexField::Patch(entry.payload->GetData(), entry.payload_size, entry.index_offset,
 					                            fetch_request_message.batch_index);
 					shared_ptr<MemoryStream> payload(std::move(entry.payload));
-					stream->served.emplace(dense_index, payload);
+					stream->served.emplace(dense_index,
+					                       QuackFetchStream::RetainedPayload {payload, entry.rows});
+					stream->retained_rows += entry.rows;
 					return make_uniq<QuackRawPayloadResponse>(MessageType::FETCH_RESPONSE, std::move(payload));
 				}
 			}
