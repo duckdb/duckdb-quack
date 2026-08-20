@@ -260,6 +260,11 @@
         "id": 6,
         "name": "client_id",
         "type": "string"
+      },
+      {
+        "id": 7,
+        "name": "heartbeat_timeout_seconds",
+        "type": "idx_t"
       }
     ]
   },
@@ -280,11 +285,27 @@
         "id": 3,
         "name": "quack_version",
         "type": "idx_t"
+      },
+      {
+        "id": 4,
+        "name": "heartbeat_timeout_seconds",
+        "type": "idx_t"
       }
     ]
   },
   {
-    "class": "AcknowledgementMessage",
+    "class": "HeartbeatRequestMessage",
     "members": []
+  },
+  {
+    "class": "AcknowledgementMessage",
+    "members": [
+      {
+        "id": 1,
+        "name": "query_uuid",
+        "type": "hugeint_t",
+        "default": "hugeint_t(0, 0)"
+      }
+    ]
   }
 ]

@@ -14,6 +14,7 @@ add_library(
   quack_http_server.cpp
   quack_log.cpp
   quack_message.cpp
+  quack_result_cache.cpp
   quack_scan.cpp
   quack_scan_from_client.cpp
   quack_server.cpp

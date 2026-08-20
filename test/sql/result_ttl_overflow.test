@@ -1,0 +1,131 @@
+# name: test/sql/result_ttl_overflow.test
+# description: quack_result_ttl / quack_cache_max_rows guards: an enormous TTL means effectively never expire, neither setting may throw into the request path (server-wide DoS), and the int64 micros multiply must not wrap negative and evict caches instantly
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok quack_db:quack_server_con
+CREATE TABLE t5 AS SELECT range AS i FROM range(5);
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_enable_reconnects = true;
+
+statement ok
+CREATE SECRET (TYPE quack, TOKEN 'asdf');
+
+statement ok
+ATTACH {server} AS remote;
+
+# Cache a client result (the client never ACKs, so it stays cached server-side).
+query I
+SELECT i FROM remote.t5 ORDER BY i;
+----
+0
+1
+2
+3
+4
+
+query I quack_db:quack_server_con
+SELECT cached_rows FROM quack_active_connections();
+----
+5
+
+# --- Mode 1: a TTL above INT64_MAX must not throw on every message (server-wide DoS) ---
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_result_ttl = 18446744073709551615;
+
+# The sweep runs on every inbound message: a plain client query must still succeed, not hit a server-side 500.
+query I
+SELECT i FROM remote.t5 ORDER BY i;
+----
+0
+1
+2
+3
+4
+
+# An enormous TTL means effectively never expire: the cache is still retained.
+query I quack_db:quack_server_con
+SELECT count(cached_rows) FROM quack_active_connections();
+----
+1
+
+# --- Mode 2: a TTL that overflows the int64 microsecond multiply must not wrap negative ---
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_result_ttl = 9223372036855;
+
+# A second client's connect request runs the sweep; the young cache must not be evicted by a negative TTL.
+statement ok
+ATTACH {server} AS remote2;
+
+query I quack_db:quack_server_con
+SELECT count(cached_rows) FROM quack_active_connections();
+----
+1
+
+statement ok
+DETACH remote2;
+
+# --- Mode 3: a NULL setting is read on every message and must not throw either ---
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_result_ttl = NULL;
+
+query I
+SELECT i FROM remote.t5 ORDER BY i;
+----
+0
+1
+2
+3
+4
+
+# NULL reads as 0, so caches never expire and the result is still retained.
+query I quack_db:quack_server_con
+SELECT count(cached_rows) FROM quack_active_connections();
+----
+1
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_cache_max_rows = NULL;
+
+query I
+SELECT i FROM remote.t5 ORDER BY i;
+----
+0
+1
+2
+3
+4
+
+# NULL reads as 0 here too, which is the documented 'unlimited' retention.
+query I quack_db:quack_server_con
+SELECT count(cached_rows) FROM quack_active_connections();
+----
+1
+
+# A fresh connect still works: the pre-dispatch path was not poisoned.
+statement ok
+ATTACH {server} AS remote3;
+
+query I
+SELECT count(*) FROM remote3.t5;
+----
+5
+
+statement ok
+DETACH remote3;
+
+statement ok quack_db:quack_server_con
+RESET GLOBAL quack_cache_max_rows;
+
+statement ok quack_db:quack_server_con
+RESET GLOBAL quack_result_ttl;
+
+statement ok
+DETACH remote;
+
+include test/template/quack_teardown.test_template

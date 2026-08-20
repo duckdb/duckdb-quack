@@ -18,6 +18,7 @@
 #include "include/storage/quack_catalog.hpp"
 #include "quack_active_connections.hpp"
 #include "quack_clear_cache.hpp"
+#include "quack_client.hpp"
 #include "quack_extension.hpp"
 #include "quack_log.hpp"
 #include "quack_rebalancer_sink.hpp"
@@ -34,6 +35,13 @@
 namespace duckdb {
 
 static constexpr const char *QUACK_SECRET_TYPE = "quack";
+
+static void ValidateHeartbeatTimeoutSetting(ClientContext &, SetScope, Value &parameter) {
+	if (parameter.IsNull()) {
+		throw InvalidInputException("heartbeat_timeout cannot be null");
+	}
+	QuackClient::ValidateHeartbeatTimeout(parameter.GetValue<idx_t>());
+}
 
 static unique_ptr<BaseSecret> CreateQuackSecretFromConfig(ClientContext &, CreateSecretInput &input) {
 	auto scope = input.scope;
@@ -100,13 +108,13 @@ static void QuackIdentifyFun(ClientContext &, TableFunctionInput &, DataChunk &)
 }
 
 static unique_ptr<FunctionData> QuackIdentifyBind(ClientContext &ctx, TableFunctionBindInput &input,
-                                                  vector<LogicalType> &return_types, vector<string> &names) {
+                                                  vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto &db_config = DBConfig::GetConfig(ctx);
 	for (auto &kv : input.named_parameters) {
 		if (kv.second.IsNull()) {
 			continue;
 		}
-		db_config.SetOptionByName("whoami_" + kv.first, kv.second);
+		db_config.SetOptionByName(Identifier("whoami_" + kv.first), kv.second);
 	}
 	return_types.emplace_back(LogicalType::BOOLEAN);
 	names.emplace_back("ok");
@@ -231,10 +239,23 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "client_id used when ATTACH / quack_query omit one; precomputed at load from "
 	                          "$QUACK_CLIENT_ID (empty opts out) or a random per-instance id. Set to '' to opt out.",
 	                          LogicalType::VARCHAR, Value(default_client_id), nullptr, SetScope::GLOBAL);
+	config.AddExtensionOption("quack_default_heartbeat_timeout",
+	                          "Heartbeat lease timeout in seconds requested by clients when ATTACH / quack_query "
+	                          "omit heartbeat_timeout",
+	                          LogicalType::UBIGINT, Value::UBIGINT(60), ValidateHeartbeatTimeoutSetting);
 
 	config.AddExtensionOption("quack_enable_reconnects",
-	                          "Send an acknowledgement to the server after a query completes", LogicalType::BOOLEAN,
-	                          Value::BOOLEAN(false));
+	                          "Enable reconnect support (clients acknowledge results, the server caches the last "
+	                          "result until acknowledged)",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(false));
+
+	config.AddExtensionOption("quack_cache_max_rows",
+	                          "Maximum rows the server retains in the result cache (0 = unlimited)",
+	                          LogicalType::UBIGINT, Value::UBIGINT(100000), nullptr, SetScope::GLOBAL);
+
+	config.AddExtensionOption("quack_result_ttl",
+	                          "Seconds an idle cached result is kept before it is dropped (0 = never)",
+	                          LogicalType::UBIGINT, Value::UBIGINT(3600), nullptr, SetScope::GLOBAL);
 
 	// Process-wide fallback anchor for whoami().uptime when whoami_started_at isn't set.
 	// Stored as BIGINT epoch-microseconds to stay TZ-invariant regardless of ICU state.

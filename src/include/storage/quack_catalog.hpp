@@ -21,7 +21,7 @@ class QuackClientConnection;
 class QuackCatalog : public Catalog {
 public:
 	explicit QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri_p, ClientContext &context,
-	                      const string &token, string client_id = {});
+	                      const string &token, string client_id, idx_t heartbeat_timeout_seconds);
 	~QuackCatalog() override;
 
 public:
@@ -60,6 +60,7 @@ public:
 		switch (capability) {
 		case RemoteCapability::IS_REMOTE:
 		case RemoteCapability::EXECUTE_QUERY_NODE:
+		case RemoteCapability::EXECUTE_STATEMENT:
 		case RemoteCapability::CONNECT:
 			return true;
 		default:
@@ -67,6 +68,7 @@ public:
 		}
 	}
 	unique_ptr<TableRef> RemoteExecute(ClientContext &context, unique_ptr<QueryNode> node) override;
+	unique_ptr<TableRef> RemoteExecute(ClientContext &context, unique_ptr<SQLStatement> statement) override;
 	unique_ptr<TableRef> RemoteExecute(ClientContext &context, const string &sql) override;
 	string GetConnectDisplay() override {
 		return GetDBPath();
@@ -82,6 +84,10 @@ public:
 
 private:
 	void DropSchema(ClientContext &context, DropInfo &info) override;
+
+	//! Build the "quack_query_by_name" table function call that runs "sql" on the server. Statements pushed
+	//! down by the RemotePushdownOptimizer change the remote catalog, so they ask for a catalog refresh
+	unique_ptr<TableRef> CreateRemoteQueryRef(const string &sql, bool refresh_catalog);
 
 	QuackLoadCatalogData LoadCatalog(ClientContext &context);
 

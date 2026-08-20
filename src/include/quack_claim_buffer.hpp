@@ -155,7 +155,7 @@ public:
 		if (entry != waiters.end()) {
 			return entry->second;
 		}
-		auto completion = make_shared_ptr<ReadAheadJobCompletion>(1);
+		auto completion = make_shared_ptr<ReadAheadJobCompletion>(nullptr, 1);
 		waiters.emplace(claim, completion);
 		return completion;
 	}
