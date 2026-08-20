@@ -8,25 +8,26 @@
 #include "duckdb/parallel/async_result.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 
-#include "quack_data_stream.hpp"
+#include "quack_insert_stream.hpp"
 
 namespace duckdb {
 
-class QuackWaitForChunkTask : public AsyncTask {
+//! The wait on the unordered path. Any published batch, or the end of the stream, wakes it.
+class QuackWaitForAnyBatchTask : public AsyncTask {
 public:
-	explicit QuackWaitForChunkTask(shared_ptr<QuackDataStream> stream_p) : stream(std::move(stream_p)) {
+	explicit QuackWaitForAnyBatchTask(shared_ptr<QuackInsertStream> stream_p) : stream(std::move(stream_p)) {
 	}
 	void Execute() override {
-		stream->WaitForData();
+		stream->buffer.WaitForAny();
 	}
 
 private:
-	shared_ptr<QuackDataStream> stream;
+	shared_ptr<QuackInsertStream> stream;
 };
 
 struct QuackScanFromClientBindData : public FunctionData {
 	string stream_id;
-	shared_ptr<QuackDataStream> stream;
+	shared_ptr<QuackInsertStream> stream;
 	vector<LogicalType> types;
 
 	bool Equals(const FunctionData &other_p) const override {
@@ -50,6 +51,8 @@ struct QuackScanFromClientGlobalState : public GlobalTableFunctionState {
 };
 
 struct QuackScanFromClientLocalState : public LocalTableFunctionState {
+	//! The ordered path: this thread's claimed dense index. It survives a BLOCKED yield.
+	optional_idx claim;
 	idx_t current_batch_index = 0;
 	vector<unique_ptr<DataChunk>> batch_buffer;
 	size_t batch_pos = 0;
@@ -59,7 +62,7 @@ struct QuackScanFromClientLocalState : public LocalTableFunctionState {
 static unique_ptr<FunctionData> QuackScanFromClientBind(ClientContext &context, TableFunctionBindInput &input,
                                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto stream_id = input.inputs[0].GetValue<string>();
-	auto stream = QuackStreamRegistry::Get().Find(stream_id);
+	auto stream = QuackInsertStreamRegistry::Get().Find(stream_id);
 	if (!stream) {
 		throw InvalidInputException("scan_data_from_quack_client: no active stream '%s' (this is an internal "
 		                            "function driven by the quack server)",
@@ -68,13 +71,13 @@ static unique_ptr<FunctionData> QuackScanFromClientBind(ClientContext &context, 
 
 	// Unordered streams signal NO_ORDER so the planner picks PhysicalInsert(parallel=true) instead of
 	// PhysicalBatchInsert. Mutates a query-scoped by-value copy — never touches the global catalog entry.
-	if (!stream->IsOrdered()) {
+	if (!stream->ordered) {
 		input.table_function.order_preservation_type = OrderPreservationType::NO_ORDER;
 	}
 
 	auto bind_data = make_uniq<QuackScanFromClientBindData>();
 	bind_data->stream_id = std::move(stream_id);
-	bind_data->types = stream->Types();
+	bind_data->types = stream->types;
 	bind_data->stream = std::move(stream);
 
 	for (idx_t i = 0; i < bind_data->types.size(); i++) {
@@ -96,10 +99,94 @@ QuackScanFromClientInitLocal(ExecutionContext &context, TableFunctionInitInput &
 	return make_uniq<QuackScanFromClientLocalState>();
 }
 
+enum class QuackScanBatchResult : uint8_t {
+	//! A batch was popped into local_state.batch_buffer.
+	BATCH,
+	//! The stream ended, so this thread is done.
+	FINISHED,
+	//! No batch is ready. The scan yielded through input.async_result, and it runs again later.
+	BLOCKED
+};
+
+// The ordered path: claim, then wait. A thread claims the next dense index and waits for THAT batch
+// only. There is no shared cursor, and the downstream batch insert puts the claims back in order.
+static QuackScanBatchResult QuackScanOrderedBatch(ClientContext &context, TableFunctionInput &input,
+                                                  QuackScanFromClientLocalState &local_state,
+                                                  QuackChunkClaimBuffer &buffer) {
+	if (!local_state.claim.IsValid()) {
+		local_state.claim = optional_idx(buffer.ClaimBatch());
+	}
+	while (true) {
+		switch (buffer.TryPopClaimed(local_state.claim.GetIndex(), local_state.batch_buffer)) {
+		case QuackClaimPopStatus::BATCH:
+			local_state.current_batch_index = local_state.claim.GetIndex();
+			local_state.claim = optional_idx();
+			return QuackScanBatchResult::BATCH;
+		case QuackClaimPopStatus::FINISHED:
+			return QuackScanBatchResult::FINISHED;
+		case QuackClaimPopStatus::ERRORED:
+			buffer.GetError().Throw();
+			return QuackScanBatchResult::FINISHED;
+		case QuackClaimPopStatus::EMPTY: {
+			if (input.results_execution_mode == AsyncResultsExecutionMode::TASK_EXECUTOR && input.interrupt_state) {
+				auto completion = buffer.RegisterWaiter(local_state.claim.GetIndex());
+				if (!completion || !completion->TryPark(*input.interrupt_state)) {
+					// the batch arrived, or the stream ended, in the meantime: pop again
+					continue;
+				}
+				// parked: the push of this claim's batch wakes exactly this scan task
+				input.async_result = AsyncResultType::BLOCKED;
+				return QuackScanBatchResult::BLOCKED;
+			}
+			// The synchronous fallback (async_threads=0): a bounded inline wait, then retry.
+			buffer.WaitForBatch(local_state.claim.GetIndex());
+			if (context.IsInterrupted()) {
+				throw InterruptException();
+			}
+			continue;
+		}
+		}
+	}
+}
+
+// The unordered path: pop any batch that is ready. Arrival jitter then costs no wait.
+static QuackScanBatchResult QuackScanAnyBatch(ClientContext &context, TableFunctionInput &input,
+                                              QuackScanFromClientLocalState &local_state,
+                                              const shared_ptr<QuackInsertStream> &stream) {
+	while (true) {
+		idx_t batch_index;
+		switch (stream->buffer.TryPopAny(batch_index, local_state.batch_buffer)) {
+		case QuackClaimPopStatus::BATCH:
+			local_state.current_batch_index = batch_index;
+			return QuackScanBatchResult::BATCH;
+		case QuackClaimPopStatus::FINISHED:
+			return QuackScanBatchResult::FINISHED;
+		case QuackClaimPopStatus::ERRORED:
+			stream->buffer.GetError().Throw();
+			return QuackScanBatchResult::FINISHED;
+		case QuackClaimPopStatus::EMPTY: {
+			vector<unique_ptr<AsyncTask>> tasks;
+			tasks.push_back(make_uniq<QuackWaitForAnyBatchTask>(stream));
+			AsyncResult res(std::move(tasks), TaskSchedulerType::ASYNC);
+			if (input.results_execution_mode == AsyncResultsExecutionMode::TASK_EXECUTOR) {
+				input.async_result = std::move(res);
+				return QuackScanBatchResult::BLOCKED;
+			}
+			// The synchronous fallback (async_threads=0): run the wait inline, then retry.
+			res.ExecuteTasksSynchronously();
+			if (context.IsInterrupted()) {
+				throw InterruptException();
+			}
+			continue;
+		}
+		}
+	}
+}
+
 static void QuackScanFromClient(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
 	auto &bind_data = input.bind_data->Cast<QuackScanFromClientBindData>();
 	auto &local_state = input.local_state->Cast<QuackScanFromClientLocalState>();
-	auto &stream = *bind_data.stream;
+	auto &stream = bind_data.stream;
 
 	if (context.IsInterrupted()) {
 		throw InterruptException();
@@ -113,32 +200,17 @@ static void QuackScanFromClient(ClientContext &context, TableFunctionInput &inpu
 		}
 		local_state.batch_buffer.clear();
 		local_state.batch_pos = 0;
-		idx_t batch_idx;
-		switch (stream.TryPopBatch(batch_idx, local_state.batch_buffer)) {
-		case QuackDataStream::PopBatchStatus::BATCH:
-			local_state.current_batch_index = batch_idx;
+		auto result = stream->ordered ? QuackScanOrderedBatch(context, input, local_state, stream->buffer)
+		                              : QuackScanAnyBatch(context, input, local_state, stream);
+		switch (result) {
+		case QuackScanBatchResult::BATCH:
 			continue;
-		case QuackDataStream::PopBatchStatus::FINISHED:
+		case QuackScanBatchResult::FINISHED:
 			output.SetChildCardinality(0);
 			return;
-		case QuackDataStream::PopBatchStatus::ERRORED:
-			stream.GetError().Throw();
+		case QuackScanBatchResult::BLOCKED:
+			// yielded through input.async_result; the executor calls the scan again when it wakes
 			return;
-		case QuackDataStream::PopBatchStatus::EMPTY: {
-			vector<unique_ptr<AsyncTask>> tasks;
-			tasks.push_back(make_uniq<QuackWaitForChunkTask>(bind_data.stream));
-			AsyncResult res(std::move(tasks), TaskSchedulerType::ASYNC);
-			if (input.results_execution_mode == AsyncResultsExecutionMode::TASK_EXECUTOR) {
-				input.async_result = std::move(res);
-				return;
-			}
-			// Synchronous fallback (async_threads=0): run the wait inline, then retry.
-			res.ExecuteTasksSynchronously();
-			if (context.IsInterrupted()) {
-				throw InterruptException();
-			}
-			break;
-		}
 		}
 	}
 }

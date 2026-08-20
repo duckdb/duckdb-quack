@@ -27,18 +27,19 @@ class DatabaseInstance;
 struct QuackFetchStream;
 class PreparedStatement;
 class EncryptionState;
-class QuackDataStream;
+struct QuackInsertStream;
 class ErrorData;
 
 enum class QuackQueryState : uint8_t { IDLE, ACTIVE, FINISHED, CANCELLED, QUACK_ERROR };
 
 //! An insert stream + its driver thread, taken off a connection so finish/join can run unlocked.
 struct DetachedInsertStream {
-	shared_ptr<QuackDataStream> stream;
+	shared_ptr<QuackInsertStream> stream;
 	std::thread thread;
 	string id;
-	//! Finish + join + deregister; returns any INSERT error. Call WITHOUT a lock held.
-	ErrorData FinishAndJoin();
+	//! Finish (checking `total_batches` when it is set) + join + deregister; returns any INSERT
+	//! error. Call WITHOUT a lock held.
+	ErrorData FinishAndJoin(optional_idx total_batches = optional_idx());
 	//! Roll the INSERT back (SetError) + join + deregister. Call WITHOUT a lock held.
 	void AbortAndJoin(const string &reason);
 };
@@ -47,22 +48,17 @@ struct DetachedInsertStream {
 //! connection (one at a time). `lock` is held only briefly — never across a Push or a join.
 struct QuackInsertState {
 	annotated_mutex lock;
-	shared_ptr<QuackDataStream> stream DUCKDB_GUARDED_BY(lock);
+	shared_ptr<QuackInsertStream> stream DUCKDB_GUARDED_BY(lock);
 	std::thread thread DUCKDB_GUARDED_BY(lock);
 	string stream_id DUCKDB_GUARDED_BY(lock);
-	//! Dead-range markers that arrived before the stream-creating data message, tagged with the stream
-	//! they belong to; applied once that stream is created.
-	string pending_marker_stream_id DUCKDB_GUARDED_BY(lock);
-	vector<std::pair<idx_t, idx_t>> pending_dead_ranges DUCKDB_GUARDED_BY(lock);
 
 	//! Take the active stream/thread/id off (briefly under the lock) for an unlocked finish/abort.
 	DetachedInsertStream Detach();
 	//! Detach only if the active stream is unrelated to `msg_stream_id` (else return an empty detach).
 	DetachedInsertStream DetachIfUnrelated(const string &msg_stream_id);
-	//! Detach + drain (`watermark`) + finish + join; returns any INSERT error. Empty if none active.
-	ErrorData Finalize(optional_idx watermark = optional_idx());
-	//! Active stream if it matches `sid` (caller pushes the range), else buffer the range and return null.
-	shared_ptr<QuackDataStream> StreamForDeadRangeOrBuffer(const string &sid, idx_t lo, idx_t hi);
+	//! Detach + finish (checking `total_batches` when it is set) + join; returns any INSERT error.
+	//! Empty if none is active.
+	ErrorData Finalize(optional_idx total_batches = optional_idx());
 };
 
 //! The stream the connection's active query fills, one at a time. The query runs on a background
