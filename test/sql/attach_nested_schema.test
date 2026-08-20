@@ -1,0 +1,144 @@
+# name: test/sql/attach_nested_schema.test
+# description: nested schemas of an attached quack catalog mirror the schema tree of the server
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+# --- server side: a nested schema tree plus a table at every level
+statement ok quack_db:quack_server_con
+create schema s1;
+
+statement ok quack_db:quack_server_con
+create schema s1.child;
+
+statement ok quack_db:quack_server_con
+create schema s1.child.grandchild;
+
+statement ok quack_db:quack_server_con
+create table top(i int);
+
+statement ok quack_db:quack_server_con
+insert into top values (1);
+
+statement ok quack_db:quack_server_con
+create table s1.mid(i int);
+
+statement ok quack_db:quack_server_con
+insert into s1.mid values (2);
+
+statement ok quack_db:quack_server_con
+create table s1.child.leaf(i int);
+
+statement ok quack_db:quack_server_con
+insert into s1.child.leaf values (3), (4);
+
+statement ok quack_db:quack_server_con
+create view s1.child.leaf_v as select i * 10 as i from s1.child.leaf;
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+# a table reference can carry at most three name parts, so the catalog has to be implicit for a table
+# that lives in a nested schema
+statement ok
+use rpc
+
+# --- the local schema tree mirrors the server's
+query II
+select schema_name, parent_schema from duckdb_schemas() where database_name='rpc' order by all
+----
+child	s1
+grandchild	child
+main	NULL
+s1	NULL
+
+# --- tables and views resolve through the nested path
+query I
+from main.top
+----
+1
+
+query I
+from s1.mid
+----
+2
+
+query I
+from s1.child.leaf order by i
+----
+3
+4
+
+query I
+from s1.child.leaf_v order by i
+----
+30
+40
+
+# tables are reported in the schema they actually live in - not merged into a same-named schema
+query III
+select schema_name, table_name, database_name from duckdb_tables() where database_name='rpc' order by all
+----
+child	leaf	rpc
+main	top	rpc
+s1	mid	rpc
+
+# a nested schema that does not exist
+statement error
+from s1.nope.leaf
+----
+<REGEX>:.*nope.*
+
+# --- a table in a nested schema is read over the quack transport, never scanned locally
+query II
+explain select count(*) from s1.child.leaf
+----
+physical_plan	<REGEX>:.*Quack Query.*
+
+query II
+explain select count(*) from s1.child.leaf
+----
+physical_plan	<!REGEX>:.*Seq Scan.*
+
+# a table in a top-level schema is still pushed down as a single remote query
+query II
+explain select count(*) from s1.mid
+----
+physical_plan	<REGEX>:.*Quack Query By Name.*
+
+# --- schema tree changes on the server are picked up by a cache refresh
+statement ok quack_db:quack_server_con
+create schema s1.child.fresh;
+
+statement ok quack_db:quack_server_con
+create table s1.child.fresh_t(i int);
+
+statement ok quack_db:quack_server_con
+insert into s1.child.fresh_t values (7);
+
+statement error
+from s1.child.fresh_t
+----
+<REGEX>:.*fresh_t.*
+
+statement ok
+call quack_clear_cache()
+
+query I
+from s1.child.fresh_t
+----
+7
+
+query II
+select schema_name, parent_schema from duckdb_schemas() where database_name='rpc' order by all
+----
+child	s1
+fresh	child
+grandchild	child
+main	NULL
+s1	NULL
+
+statement ok
+use memory
+
+include test/template/quack_teardown.test_template

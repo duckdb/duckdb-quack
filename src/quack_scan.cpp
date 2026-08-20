@@ -15,7 +15,7 @@
 namespace duckdb {
 
 static unique_ptr<FunctionData> QuackScanBind(ClientContext &context, TableFunctionBindInput &input,
-                                              vector<LogicalType> &return_types, vector<string> &names) {
+                                              vector<LogicalType> &return_types, vector<Identifier> &names) {
 	// Set logging to be pretty verbose (everything except message payloads)
 	if (input.inputs.empty()) {
 		throw InternalException("No input to quack scan?");
@@ -60,7 +60,10 @@ static unique_ptr<FunctionData> QuackScanBind(ClientContext &context, TableFunct
 	    context, make_uniq<PrepareRequestMessage>(client_connection.ConnectionId(), query, bind_data->query_uuid));
 
 	return_types = bind_response->Types();
-	names = bind_response->Names();
+	names.clear();
+	for (auto &name : bind_response->Names()) {
+		names.emplace_back(name);
+	}
 
 	bind_data->results = std::move(bind_response->MutableResults());
 	bind_data->needs_more_fetch = bind_response->NeedsMoreFetch();
@@ -70,7 +73,7 @@ static unique_ptr<FunctionData> QuackScanBind(ClientContext &context, TableFunct
 }
 
 static unique_ptr<FunctionData> QuackScanBindCatalogName(ClientContext &context, TableFunctionBindInput &input,
-                                                         vector<LogicalType> &return_types, vector<string> &names) {
+                                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
 	if (input.inputs[0].IsNull() || input.inputs[1].IsNull()) {
 		throw BinderException("catalog_name and query parameters cannot be NULL");
 	}
@@ -102,7 +105,10 @@ static unique_ptr<FunctionData> QuackScanBindCatalogName(ClientContext &context,
 	    make_uniq<PrepareRequestMessage>(bind_data->client_connection->ConnectionId(), query, bind_data->query_uuid));
 
 	return_types = bind_response->Types();
-	names = bind_response->Names();
+	names.clear();
+	for (auto &name : bind_response->Names()) {
+		names.emplace_back(name);
+	}
 
 	// new stuff
 	bind_data->results = std::move(bind_response->MutableResults());
@@ -230,7 +236,7 @@ static string BuildPushdownQuery(const QuackScanBindData &bind_data, const Table
 	// 		query = "SELECT " + StringUtil::Join(selected_columns, ", ") + " ";
 	// 	}
 	// }
-	query += StringUtil::Format("FROM %s", SQLIdentifier(bind_data.table_name));
+	query += StringUtil::Format("FROM %s", bind_data.qualified_table_name);
 	//
 	// // Filters: build WHERE clause from pushable filters
 	// if (input.filters) {
@@ -272,7 +278,7 @@ unique_ptr<GlobalTableFunctionState> QuackScanInitGlobal(ClientContext &context,
 	vector<ChunkResult> results;
 	bool needs_more_fetch = bind_data.needs_more_fetch;
 	hugeint_t query_uuid;
-	if (!bind_data.table_name.empty()) {
+	if (!bind_data.qualified_table_name.empty()) {
 		// apply pushdown to the query
 		auto query = BuildPushdownQuery(bind_data, input);
 		auto &client_connection = *bind_data.client_connection;
@@ -396,7 +402,7 @@ static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChu
 			case QuackFetchResult::BATCH: {
 				// tag fetched chunks like the initial batch (see QuackScanInitGlobal): direct queries
 				// return full-width chunks that still need projection, the catalog path already projected
-				auto fetched_pushdown_type = bind_data.table_name.empty()
+				auto fetched_pushdown_type = bind_data.qualified_table_name.empty()
 				                                 ? ChunkResultPushdownType::REQUIRES_PUSHDOWN
 				                                 : ChunkResultPushdownType::PUSHDOWN_ALREADY_APPLIED;
 				for (auto &chunk : chunks) {
