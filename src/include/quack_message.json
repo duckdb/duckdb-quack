@@ -137,32 +137,22 @@
       },
       {
         "id": 5,
-        "name": "batch_index",
-        "type": "optional_idx"
-      },
-      {
-        "id": 6,
-        "name": "sequence_index",
-        "type": "idx_t"
-      },
-      {
-        "id": 7,
-        "name": "is_last_in_batch",
+        "name": "ordered",
         "type": "bool"
       },
       {
-        "id": 8,
-        "name": "batch_watermark",
-        "type": "optional_idx",
-        "default": "optional_idx()"
-      },
-      {
-        "id": 9,
-        "name": "dead_range_end",
-        "type": "optional_idx",
-        "default": "optional_idx()"
+        "id": 6,
+        "name": "batch_index_fixed",
+        "type": "string",
+        "serialize_property": "EncodeBatchIndexFixed()",
+        "deserialize_skip_assign": true
       }
-    ]
+    ],
+    "methods": {
+      "ApplyBatchIndexFixed": [
+        "batch_index_fixed"
+      ]
+    }
   },
   {
     "class": "SendDataResponseMessage",
@@ -184,7 +174,7 @@
       },
       {
         "id": 2,
-        "name": "min_batch_watermark",
+        "name": "total_batches",
         "type": "optional_idx",
         "default": "optional_idx()"
       }

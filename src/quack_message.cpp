@@ -5,6 +5,7 @@
 
 #include "quack_message.hpp"
 
+#include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
 
 namespace duckdb {
@@ -350,6 +351,33 @@ QuackChunkPayloadWriter::SealedPayload QuackChunkPayloadWriter::Seal() {
 //===--------------------------------------------------------------------===//
 // FetchResponsePayloadWriter
 //===--------------------------------------------------------------------===//
+SendDataPayloadWriter::SendDataPayloadWriter(ClientContext &context, string connection_id, const string &schema_name,
+                                             const string &table_name, hugeint_t query_uuid_p, bool ordered_p,
+                                             idx_t capacity_hint)
+    : QuackChunkPayloadWriter(context, capacity_hint), query_uuid(query_uuid_p), ordered(ordered_p) {
+	// The same client_query_id that QuackClient::EncodeRequest adds, taken when the message opens.
+	MessageHeader header(MessageType::SEND_DATA_REQUEST, std::move(connection_id));
+	if (context.transaction.HasActiveTransaction()) {
+		auto raw_query_id = context.transaction.GetActiveQuery();
+		if (raw_query_id != DConstants::INVALID_INDEX) {
+			header.client_query_id = raw_query_id;
+		}
+	}
+	client_query_id = header.client_query_id;
+
+	OpenMessage(header);
+	// The body prefix, field by field, as the generated Serialize writes it.
+	Body().WritePropertyWithDefault<string>(1, "schema_name", schema_name);
+	Body().WritePropertyWithDefault<string>(2, "table_name", table_name);
+	BeginChunkList(3, "chunks");
+}
+
+void SendDataPayloadWriter::WriteTail() {
+	Body().WriteProperty<hugeint_t>(4, "query_uuid", query_uuid);
+	Body().WritePropertyWithDefault<bool>(5, "ordered", ordered);
+	WriteBatchIndexField(6, "batch_index_fixed");
+}
+
 FetchResponsePayloadWriter::FetchResponsePayloadWriter(ClientContext &context, idx_t capacity_hint)
     : QuackChunkPayloadWriter(context, capacity_hint) {
 	// A response has an empty connection id, as ToMemoryStream writes it.
@@ -378,6 +406,26 @@ void FetchResponseMessage::ApplyBatchIndexFixed(const string &bytes) {
 	auto value = QuackBatchIndexField::Decode(reinterpret_cast<const_data_ptr_t>(bytes.data()));
 	if (value == QuackBatchIndexField::PLACEHOLDER) {
 		throw IOException("FetchResponseMessage: batch arrived unstamped");
+	}
+	if (value != QuackBatchIndexField::INVALID) {
+		batch_index = optional_idx(value);
+	}
+}
+
+string SendDataRequestMessage::EncodeBatchIndexFixed() const {
+	string bytes(8, '\0');
+	QuackBatchIndexField::Encode(batch_index.IsValid() ? batch_index.GetIndex() : QuackBatchIndexField::INVALID,
+	                             reinterpret_cast<data_ptr_t>(&bytes[0]));
+	return bytes;
+}
+
+void SendDataRequestMessage::ApplyBatchIndexFixed(const string &bytes) {
+	if (bytes.size() != 8) {
+		throw IOException("SendDataRequestMessage: malformed batch index field");
+	}
+	auto value = QuackBatchIndexField::Decode(reinterpret_cast<const_data_ptr_t>(bytes.data()));
+	if (value == QuackBatchIndexField::PLACEHOLDER) {
+		throw IOException("SendDataRequestMessage: batch arrived unstamped");
 	}
 	if (value != QuackBatchIndexField::INVALID) {
 		batch_index = optional_idx(value);

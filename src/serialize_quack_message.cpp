@@ -117,13 +117,13 @@ unique_ptr<FetchResponseMessage> FetchResponseMessage::Deserialize(Deserializer 
 
 void FinalizeMessage::Serialize(Serializer &serializer) const {
 	serializer.WriteProperty<hugeint_t>(1, "query_uuid", query_uuid);
-	serializer.WritePropertyWithDefault<optional_idx>(2, "min_batch_watermark", min_batch_watermark, optional_idx());
+	serializer.WritePropertyWithDefault<optional_idx>(2, "total_batches", total_batches, optional_idx());
 }
 
 unique_ptr<FinalizeMessage> FinalizeMessage::Deserialize(Deserializer &deserializer) {
 	auto result = duckdb::unique_ptr<FinalizeMessage>(new FinalizeMessage());
 	deserializer.ReadProperty<hugeint_t>(1, "query_uuid", result->query_uuid);
-	deserializer.ReadPropertyWithExplicitDefault<optional_idx>(2, "min_batch_watermark", result->min_batch_watermark,
+	deserializer.ReadPropertyWithExplicitDefault<optional_idx>(2, "total_batches", result->total_batches,
 	                                                           optional_idx());
 	return result;
 }
@@ -186,11 +186,8 @@ void SendDataRequestMessage::Serialize(Serializer &serializer) const {
 	serializer.WritePropertyWithDefault<string>(2, "table_name", table_name);
 	serializer.WritePropertyWithDefault<vector<unique_ptr<DataChunkWrapper>>>(3, "chunks", chunks);
 	serializer.WriteProperty<hugeint_t>(4, "query_uuid", query_uuid);
-	serializer.WriteProperty<optional_idx>(5, "batch_index", batch_index);
-	serializer.WritePropertyWithDefault<idx_t>(6, "sequence_index", sequence_index);
-	serializer.WritePropertyWithDefault<bool>(7, "is_last_in_batch", is_last_in_batch);
-	serializer.WritePropertyWithDefault<optional_idx>(8, "batch_watermark", batch_watermark, optional_idx());
-	serializer.WritePropertyWithDefault<optional_idx>(9, "dead_range_end", dead_range_end, optional_idx());
+	serializer.WritePropertyWithDefault<bool>(5, "ordered", ordered);
+	serializer.WritePropertyWithDefault<string>(6, "batch_index_fixed", EncodeBatchIndexFixed());
 }
 
 unique_ptr<SendDataRequestMessage> SendDataRequestMessage::Deserialize(Deserializer &deserializer) {
@@ -199,13 +196,9 @@ unique_ptr<SendDataRequestMessage> SendDataRequestMessage::Deserialize(Deseriali
 	deserializer.ReadPropertyWithDefault<string>(2, "table_name", result->table_name);
 	deserializer.ReadPropertyWithDefault<vector<unique_ptr<DataChunkWrapper>>>(3, "chunks", result->chunks);
 	deserializer.ReadProperty<hugeint_t>(4, "query_uuid", result->query_uuid);
-	deserializer.ReadProperty<optional_idx>(5, "batch_index", result->batch_index);
-	deserializer.ReadPropertyWithDefault<idx_t>(6, "sequence_index", result->sequence_index);
-	deserializer.ReadPropertyWithDefault<bool>(7, "is_last_in_batch", result->is_last_in_batch);
-	deserializer.ReadPropertyWithExplicitDefault<optional_idx>(8, "batch_watermark", result->batch_watermark,
-	                                                           optional_idx());
-	deserializer.ReadPropertyWithExplicitDefault<optional_idx>(9, "dead_range_end", result->dead_range_end,
-	                                                           optional_idx());
+	deserializer.ReadPropertyWithDefault<bool>(5, "ordered", result->ordered);
+	auto batch_index_fixed = deserializer.ReadPropertyWithDefault<string>(6, "batch_index_fixed");
+	result->ApplyBatchIndexFixed(std::move(batch_index_fixed));
 	return result;
 }
 

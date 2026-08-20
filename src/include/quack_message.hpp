@@ -392,43 +392,34 @@ private:
 	optional_idx total_batches;
 };
 
-// Streams one or more DataChunks of insert data to the server, keyed by (connection_id, query_uuid).
-// batch_index + sequence_index + is_last_in_batch are set for ordered inserts; invalid batch_index
-// means unordered (arrive and insert in any order). Answered by SendDataResponseMessage or ErrorResponse.
+// Streams one dense batch of insert data to the server, keyed by (connection_id, query_uuid).
+// batch_index is always dense (1,2,3,...). Batches travel in parallel and arrive in any order; the
+// server puts them back in order by index. `ordered` says if the receiving INSERT must keep that
+// order. The answer is a SendDataResponseMessage or an ErrorResponse.
+// Send side: SendDataPayloadWriter builds the payload step by step, so this class serializes only a
+// message that is fully in memory (the server receive path and the tests).
+// batch_index goes on the wire as the fixed patchable field (QuackBatchIndexField), and it is LAST.
 class SendDataRequestMessage : public QuackMessage {
 public:
 	static constexpr MessageType TYPE = MessageType::SEND_DATA_REQUEST;
 
-	explicit SendDataRequestMessage(string connection_id_p, string schema_name_p, string table_name_p,
-	                                vector<unique_ptr<DataChunkWrapper>> chunks_p, hugeint_t query_uuid_p)
+	SendDataRequestMessage(string connection_id_p, string schema_name_p, string table_name_p,
+	                       vector<unique_ptr<DataChunkWrapper>> chunks_p, hugeint_t query_uuid_p, bool ordered_p)
 	    : QuackMessage(TYPE, std::move(connection_id_p)), schema_name(std::move(schema_name_p)),
-	      table_name(std::move(table_name_p)), chunks(std::move(chunks_p)), query_uuid(query_uuid_p) {
+	      table_name(std::move(table_name_p)), chunks(std::move(chunks_p)), query_uuid(query_uuid_p),
+	      ordered(ordered_p) {
 	}
 
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<SendDataRequestMessage> Deserialize(Deserializer &deserializer);
 
-	void SetOrdering(optional_idx batch_index_p, idx_t sequence_index_p, bool is_last_in_batch_p) {
+	//! batch_index as the fixed-width wire string. The generator calls this.
+	string EncodeBatchIndexFixed() const;
+	//! Decode the wire string back into batch_index. An unstamped payload is an error.
+	void ApplyBatchIndexFixed(const string &bytes);
+
+	void SetBatchIndex(optional_idx batch_index_p) {
 		batch_index = batch_index_p;
-		sequence_index = sequence_index_p;
-		is_last_in_batch = is_last_in_batch_p;
-	}
-
-	void SetBatchWatermark(optional_idx watermark) {
-		batch_watermark = watermark;
-	}
-
-	//! Turn this into a dead-range marker: batches [batch_index, dead_range_end) produced no rows and will
-	//! never arrive. Carries no chunks; batch_index is the (low) range start so it stays near the cursor.
-	void SetDeadRange(idx_t dead_start, idx_t dead_end) {
-		batch_index = optional_idx(dead_start);
-		dead_range_end = optional_idx(dead_end);
-	}
-	bool IsDeadRange() const {
-		return dead_range_end.IsValid();
-	}
-	optional_idx DeadRangeEnd() const {
-		return dead_range_end;
 	}
 
 	vector<unique_ptr<DataChunkWrapper>> &Chunks() {
@@ -446,14 +437,8 @@ public:
 	optional_idx BatchIndex() const {
 		return batch_index;
 	}
-	idx_t SequenceIndex() const {
-		return sequence_index;
-	}
-	bool IsLastInBatch() const {
-		return is_last_in_batch;
-	}
-	optional_idx BatchWatermark() const {
-		return batch_watermark;
+	bool Ordered() const {
+		return ordered;
 	}
 
 protected:
@@ -463,17 +448,14 @@ protected:
 private:
 	string schema_name;
 	string table_name;
+	//! Receive side: the chunks of the batch, after the decode.
 	vector<unique_ptr<DataChunkWrapper>> chunks;
 	hugeint_t query_uuid;
+	//! True if the receiving INSERT must keep the stream order. It is the same on every message of
+	//! one stream, because the sink sets it once.
+	bool ordered = false;
+	//! The dense batch index (1,2,3,...). The client stamper writes it in stream order.
 	optional_idx batch_index;
-	idx_t sequence_index = 0;
-	bool is_last_in_batch = false;
-	//! Minimum batch index that will ever appear in this stream; piggybacked on every ordered message so
-	//! the server can initialise its delivery cursor and start draining as soon as batches are complete.
-	optional_idx batch_watermark;
-	//! Set only on dead-range markers: batches [batch_index, dead_range_end) are dead (a filtered/pruned
-	//! gap the sink never crossed). Lets the server skip the gap instead of stalling. Invalid on data messages.
-	optional_idx dead_range_end;
 };
 
 //! Builds one serialized message step by step, on the producing thread. A cut then needs no second
@@ -540,6 +522,30 @@ protected:
 	}
 };
 
+//! Builds SEND_DATA_REQUEST payloads on the producing thread of the client INSERT. It is the
+//! counterpart of FetchResponsePayloadWriter, for the opposite direction.
+class SendDataPayloadWriter : public QuackChunkPayloadWriter {
+public:
+	SendDataPayloadWriter(ClientContext &context, string connection_id, const string &schema_name,
+	                      const string &table_name, hugeint_t query_uuid, bool ordered, idx_t capacity_hint);
+
+	//! Captured when the message opens, because the POST runs with no ClientContext.
+	optional_idx ClientQueryId() const {
+		return client_query_id;
+	}
+
+protected:
+	void WriteTail() override;
+	MessageType WrittenType() const override {
+		return MessageType::SEND_DATA_REQUEST;
+	}
+
+private:
+	hugeint_t query_uuid;
+	bool ordered;
+	optional_idx client_query_id;
+};
+
 //! Carries a serialized payload. The HTTP layer finds it with RawPayload() and sends the bytes as
 //! they are. Never Cast<> this to the payload's message type: only the header type tag is the same.
 class QuackRawPayloadResponse : public QuackMessage {
@@ -594,14 +600,16 @@ public:
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<FinalizeMessage> Deserialize(Deserializer &deserializer);
 
-	void SetMinBatchWatermark(optional_idx watermark) {
-		min_batch_watermark = watermark;
+	//! The dense batches the client sent. The server closes the stream against this count, so a
+	//! short stream fails instead of inserting less data than the client sent.
+	void SetTotalBatches(optional_idx total_batches_p) {
+		total_batches = total_batches_p;
 	}
 	hugeint_t QueryUUID() const {
 		return query_uuid;
 	}
-	optional_idx MinBatchWatermark() const {
-		return min_batch_watermark;
+	optional_idx TotalBatches() const {
+		return total_batches;
 	}
 
 protected:
@@ -610,9 +618,7 @@ protected:
 
 private:
 	hugeint_t query_uuid;
-	//! Minimum batch index in the stream; set when ordered mode was used. Server initialises its delivery
-	//! cursor from this value after all data has been received.
-	optional_idx min_batch_watermark;
+	optional_idx total_batches;
 };
 
 class DisconnectMessage : public QuackMessage {
