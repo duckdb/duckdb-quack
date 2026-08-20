@@ -140,7 +140,7 @@ struct DetachedFetchStream {
 };
 
 //! Error the buffer, so consumers and parked producers wake. Interrupt the query if it still runs,
-//! then join the producer. Call this WITHOUT the connection lock.
+//! then join the producer. Call this WITHOUT the statement lock.
 static void AbortDetachedFetch(QuackConnection &connection, DetachedFetchStream detached, const string &reason) {
 	if (detached.stream) {
 		auto was_finished = detached.stream->buffer.Finished();
@@ -154,7 +154,7 @@ static void AbortDetachedFetch(QuackConnection &connection, DetachedFetchStream 
 	}
 }
 
-//! Stop and join the connection's fetch collector. Call this WITHOUT the connection lock.
+//! Stop and join the connection's fetch collector. Call this WITHOUT the statement lock.
 static void AbortFetchStream(QuackConnection &connection, const string &reason) {
 	DetachedFetchStream detached;
 	{
@@ -171,11 +171,11 @@ static void AbortFetchStream(QuackConnection &connection, const string &reason) 
 	AbortDetachedFetch(connection, std::move(detached), reason);
 }
 
-//! Runs the client's query with the fetch collector installed, and holds the connection lock for
+//! Runs the client's query with the fetch collector installed, and holds the statement lock for
 //! the full duration. The query fills the stream's claim buffer in parallel.
 static void RunFetchQuery(QuackConnection &connection, shared_ptr<QuackFetchStream> stream, string sql) {
 	try {
-		unique_lock<mutex> guard(connection.lock);
+		unique_lock<mutex> guard(connection.statement_lock);
 		auto &context = *connection.duckdb_connection->context;
 
 		// MakeQuackFetchCollector sends the FIRST statement that returns a result into the stream.
@@ -251,11 +251,11 @@ QuackConnection::~QuackConnection() {
 }
 
 //! Background thread: runs the INSERT that drains `stream` via scan_data_from_quack_client, holding
-//! the connection lock for the statement's duration (one transactional statement -> atomic).
+//! the statement lock for the statement's duration (one transactional statement -> atomic).
 static void RunInsertStatement(QuackConnection &connection, shared_ptr<QuackDataStream> stream, string stream_id,
                                string schema_name, string table_name) {
 	try {
-		unique_lock<mutex> lock(connection.lock);
+		unique_lock<mutex> lock(connection.statement_lock);
 		auto sql = StringUtil::Format("INSERT INTO %s.%s SELECT * FROM scan_data_from_quack_client(%s)",
 		                              SQLIdentifier(schema_name), SQLIdentifier(table_name), SQLString(stream_id));
 		auto result = connection.duckdb_connection->Query(sql);
@@ -303,7 +303,7 @@ void QuackServer::CleanupExpiredConnection(QuackConnection &connection) {
 	}
 	connection.insert.Detach().AbortAndJoin("connection heartbeat lease expired");
 	// Interrupt() alone cannot wake a producer parked on the buffer's capacity, and it holds the
-	// connection lock until it does. Abort and join it here, not in ~QuackConnection, so the
+	// statement lock until it does. Abort and join it here, not in ~QuackConnection, so the
 	// connection is fully quiet before the handler that expired it moves on.
 	AbortFetchStream(connection, "connection heartbeat lease expired");
 }
@@ -641,7 +641,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
                                                             optional_ptr<QuackConnection> connection_p) {
 	if (connection_p && received_message.Type() != MessageType::HEARTBEAT_REQUEST) {
 		// A message unrelated to the active insert stream means it was abandoned (client source failed, no
-		// FINALIZE) — abort it so it rolls back and releases the connection lock.
+		// FINALIZE) — abort it so it rolls back and releases the statement lock.
 		connection_p->insert.DetachIfUnrelated(StreamIdForMessage(received_message))
 		    .AbortAndJoin("insert stream abandoned");
 	}
@@ -697,7 +697,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		auto effective_sql = (auth_result.type().id() == LogicalTypeId::VARCHAR) ? auth_result.GetValue<string>()
 		                                                                         : prepare_request_message.Query();
 
-		// Stop the previous producer first. This joins its thread, so it frees the connection lock.
+		// Stop the previous producer first. This joins its thread, so it frees the statement lock.
 		AbortFetchStream(connection, "superseded by a new query");
 		{
 			std::unique_lock<std::mutex> lock(connection.lock);
@@ -783,7 +783,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		auto &fetch_request_message = received_message.Cast<FetchRequestMessage>();
 		auto &connection = *connection_p;
 
-		// No connection.lock here: the producer thread holds it, and FETCH touches only the buffer.
+		// FETCH touches only the buffer and the served map, so it needs neither lock on the way in.
 		shared_ptr<QuackFetchStream> stream;
 		hugeint_t stream_uuid;
 		ErrorData abort_error;
@@ -976,7 +976,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		// releases it. A client finds a cancel by the "Interrupt" text.
 		AbortFetchStream(connection, "Interrupted: query was cancelled");
 		connection.duckdb_connection->Interrupt();
-		// The interrupt aborts any statement currently running under the session lock; take the
+		// The interrupt aborts any statement currently running under the statement lock; take the
 		// lock so the state change cannot race that statement's handler.
 		std::unique_lock<std::mutex> lock(connection.lock);
 		connection.query_state = QuackQueryState::CANCELLED;

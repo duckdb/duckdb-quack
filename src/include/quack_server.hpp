@@ -85,7 +85,12 @@ struct QuackConnection {
 	//! True if the lease timeout has elapsed, latching the expiry ("cannot be revived").
 	bool LeaseExpiredLocked(time_point<steady_clock> now) DUCKDB_REQUIRES(lease_lock);
 
+	//! Short-held: guards the session state below (sql_query, query_state, query_started_at,
+	//! query_uuid) and the result cache. Never held across a statement.
 	mutex lock;
+	//! Held for a whole statement on `duckdb_connection`, which runs one at a time. The fetch
+	//! producer and the insert driver both take it; request handlers must not.
+	mutex statement_lock;
 	unique_ptr<Connection> duckdb_connection;
 	//! Only the result cache reads this now. The fetch stream carries the client's result.
 	unique_ptr<QueryResult> duckdb_query_result;
@@ -124,7 +129,8 @@ struct QuackConnection {
 	bool lease_expired DUCKDB_GUARDED_BY(lease_lock) = false;
 
 	string sql_query;
-	QuackQueryState query_state = QuackQueryState::IDLE;
+	//! Read unlocked by the cache sweep and the connection listing, so it must be atomic.
+	atomic<QuackQueryState> query_state {QuackQueryState::IDLE};
 	timestamp_t query_started_at {0};
 
 	//! The INSERT this connection is currently driving via a client SEND_DATA stream (one at a time).
