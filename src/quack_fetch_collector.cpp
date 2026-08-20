@@ -60,7 +60,7 @@ private:
 };
 
 // Stamps each dense batch's index into its sealed payload and publishes it into the stream's claim
-// buffer, blocking on the buffer's byte capacity — backpressure straight into the executor.
+// buffer. A full buffer parks the producing task instead of the thread — backpressure into the executor.
 class QuackFetchBufferEmitter : public QuackBatchEmitter {
 public:
 	QuackFetchBufferEmitter(shared_ptr<QuackFetchStream> stream_p, idx_t debug_delay_ms_p)
@@ -71,17 +71,23 @@ public:
 		return make_uniq<QuackFetchFragmentBuilder>(context, size_hint);
 	}
 
-	void EmitPrepared(ClientContext &context, idx_t dense_index, unique_ptr<QuackPreparedBatch> batch) override {
+	//! NO_CAPACITY leaves the batch with the caller for a retry (the patch below is idempotent — a
+	//! retry re-stamps the same index); DROPPED/PUSHED both consume it.
+	bool TryEmitPrepared(ClientContext &context, idx_t dense_index, unique_ptr<QuackPreparedBatch> &batch,
+	                     optional_ptr<const InterruptState> interrupt) override {
 		if (debug_delay_ms > 0) {
 			// DEBUG SETTING: randomize publish order to stress head-of-stream admission
 			RandomEngine random;
 			ThreadUtil::SleepMs(random.NextRandomInteger(0, NumericCast<uint32_t>(debug_delay_ms)));
 		}
-		auto prepared = unique_ptr_cast<QuackPreparedBatch, QuackPreparedFetchBatch>(std::move(batch));
-		auto &entry = prepared->entry;
+		auto &entry = static_cast<QuackPreparedFetchBatch &>(*batch).entry;
 		QuackBatchIndexField::Patch(entry.payload->GetData(), entry.payload_size, entry.index_offset, dense_index);
 		auto bytes = entry.payload_size;
-		stream->buffer.PushBatch(dense_index, std::move(entry), bytes);
+		if (stream->buffer.TryPushBatch(dense_index, entry, bytes, interrupt) == QuackPushStatus::NO_CAPACITY) {
+			return false;
+		}
+		batch.reset();
+		return true;
 	}
 
 	void Finish(ClientContext &context, idx_t total_batches) override {
