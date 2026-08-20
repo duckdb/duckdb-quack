@@ -1,0 +1,102 @@
+# name: test/sql/result_cache_read_ahead.test
+# description: result cache over a multi-batch read-ahead result: retention flows through FETCH, survives internal catalog traffic, and is released by the client's ACK
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok quack_db:quack_server_con
+CREATE TABLE big AS SELECT range AS i, (range * 48271) % 1000000007 AS r FROM range(200000);
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_enable_reconnects = true;
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_cache_max_rows = 0;
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_result_ttl = 0;
+
+# The other cache tests use results small enough that PREPARE inlines them whole, so they only cover
+# retention from the inline drain. Small batches force real FETCH round trips instead.
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_prepare_inline_rows = 1;
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_target_batch_bytes = 65536;
+
+statement ok
+CREATE SECRET (TYPE quack, TOKEN 'asdf');
+
+statement ok
+ATTACH {server} AS remote;
+
+statement ok
+CALL enable_logging('Quack');
+
+# --- a fully consumed multi-batch result is retained in full ---
+
+statement ok
+CREATE OR REPLACE TABLE local_copy AS SELECT i, r FROM remote.big;
+
+query II
+SELECT count(*), sum(r) FROM local_copy;
+----
+200000	97656166825687
+
+# the scan really did go over many FETCHes, so the rows below came through the FETCH handler
+query I
+SELECT count(*) > 1 FROM duckdb_logs_parsed('Quack') WHERE message_type = 'FETCH_REQUEST';
+----
+true
+
+query I quack_db:quack_server_con
+SELECT max(cached_rows) FROM quack_active_connections();
+----
+200000
+
+# --- internal catalog traffic must not displace it ---
+# quack_clear_cache re-binds the catalog over the same connection with query uuid 0. The retained
+# payloads belong to the cache, not to whatever stream the connection is serving now.
+
+statement ok
+CALL quack_clear_cache();
+
+query I quack_db:quack_server_con
+SELECT max(cached_rows) FROM quack_active_connections();
+----
+200000
+
+# --- the client's ACK releases it ---
+
+statement ok
+SET quack_enable_reconnects = true;
+
+statement ok
+CREATE OR REPLACE TABLE local_copy_2 AS SELECT i, r FROM remote.big;
+
+query II
+SELECT count(*), sum(r) FROM local_copy_2;
+----
+200000	97656166825687
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('Quack')
+WHERE message_type = 'ACKNOWLEDGEMENT' AND response_type = 'SUCCESS_RESPONSE';
+----
+1
+
+query I quack_db:quack_server_con
+SELECT count(cached_rows) FROM quack_active_connections();
+----
+0
+
+statement ok quack_db:quack_server_con
+RESET GLOBAL quack_prepare_inline_rows;
+
+statement ok quack_db:quack_server_con
+RESET GLOBAL quack_target_batch_bytes;
+
+statement ok
+DETACH remote;
+
+include test/template/quack_teardown.test_template
