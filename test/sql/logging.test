@@ -180,15 +180,17 @@ attach {server} as rpc (token 'asdf')
 statement ok
 create table rpc.log_t(i bigint);
 
-# UNORDERED (no small dead-range sends) + a small flush so one INSERT makes several async POSTs
+# UNORDERED + a small batch target, so one INSERT makes several async POSTs
 statement ok
 SET preserve_insertion_order=false;
 
 statement ok
-SET quack_send_data_flush_rows=50000;
+SET quack_target_batch_bytes=409600;
 
+# hash() makes the values hard to compress. Batches are cut on SERIALIZED bytes, and a sequence of
+# integers compresses to almost nothing, so the whole insert would fit in one message.
 statement ok
-insert into rpc.log_t select * from local_log_src;
+insert into rpc.log_t select (hash(i) % 9223372036854775807)::bigint from local_log_src;
 
 # sanity: the insert actually produced multiple async sends
 query I
@@ -196,14 +198,19 @@ select count(*) > 1 from duckdb_logs_parsed('Quack') where message_type = 'SEND_
 ----
 true
 
-# every SEND_DATA_REQUEST is now visible as a large-body HTTP POST (was ~1-2 of N before the fix)
+# every SEND_DATA_REQUEST is now visible as a data-sized HTTP POST (was ~1-2 of N before the fix).
+# The threshold must only stay above a control message: the last batch can be much smaller than
+# the batch target.
 query I
 select
   (select count(*) from duckdb_logs_parsed('Quack') where message_type = 'SEND_DATA_REQUEST')
   = (select count(*) from duckdb_logs_parsed('HTTP')
-       where request.type = 'POST' and request.request_body_length > 100000)
+       where request.type = 'POST' and request.request_body_length > 5000)
 ----
 true
+
+statement ok
+reset quack_target_batch_bytes;
 
 statement ok
 detach rpc
