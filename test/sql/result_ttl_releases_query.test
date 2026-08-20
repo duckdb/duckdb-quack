@@ -16,6 +16,15 @@ SET GLOBAL quack_cache_max_rows = 0;
 statement ok quack_db:quack_server_con
 SET GLOBAL quack_result_ttl = 1;
 
+# Small batches and a small producer buffer, so the producer parks while the sort is still live.
+# At the default sizes the whole result fits in the buffer. The query then completes during
+# PREPARE, and no abandoned query remains to release.
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_target_batch_bytes = 65536;
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_fetch_producer_buffer_bytes = 262144;
+
 statement ok
 CREATE SECRET (TYPE quack, TOKEN 'asdf');
 
@@ -52,5 +61,11 @@ DETACH sweeper;
 
 statement ok
 DEALLOCATE p;
+
+statement ok quack_db:quack_server_con
+RESET GLOBAL quack_target_batch_bytes;
+
+statement ok quack_db:quack_server_con
+RESET GLOBAL quack_fetch_producer_buffer_bytes;
 
 include test/template/quack_teardown.test_template

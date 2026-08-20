@@ -58,6 +58,18 @@
         "id": 1,
         "name": "uuid",
         "type": "hugeint_t"
+      },
+      {
+        "id": 2,
+        "name": "batch_index",
+        "type": "idx_t",
+        "default": 0
+      },
+      {
+        "id": 3,
+        "name": "ack_index",
+        "type": "idx_t",
+        "default": 0
       }
     ]
   },
@@ -188,10 +200,23 @@
       },
       {
         "id": 2,
-        "name": "batch_index",
-        "type": "optional_idx"
+        "name": "total_batches",
+        "type": "optional_idx",
+        "default": "optional_idx()"
+      },
+      {
+        "id": 3,
+        "name": "batch_index_fixed",
+        "type": "string",
+        "serialize_property": "EncodeBatchIndexFixed()",
+        "deserialize_skip_assign": true
       }
-    ]
+    ],
+    "methods": {
+      "ApplyBatchIndexFixed": [
+        "batch_index_fixed"
+      ]
+    }
   },
   {
     "class": "CancelRequestMessage",
