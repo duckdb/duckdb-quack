@@ -249,7 +249,12 @@ static string BuildPushdownQuery(const QuackScanBindData &bind_data, const Table
 	// 		query = "SELECT " + StringUtil::Join(selected_columns, ", ") + " ";
 	// 	}
 	// }
-	query += StringUtil::Format("FROM %s", SQLIdentifier(bind_data.table_name));
+	if (bind_data.schema_name.empty()) {
+		query += StringUtil::Format("FROM %s", SQLIdentifier(bind_data.table_name));
+	} else {
+		query +=
+		    StringUtil::Format("FROM %s.%s", SQLIdentifier(bind_data.schema_name), SQLIdentifier(bind_data.table_name));
+	}
 	//
 	// // Filters: build WHERE clause from pushable filters
 	// if (input.filters) {

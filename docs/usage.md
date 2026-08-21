@@ -87,6 +87,8 @@ ATTACH 'quack:localhost' AS rpc (disable_ssl true);
 ATTACH 'quack:localhost' AS rpc (
     token 'super_secret', client_id 'my_client', heartbeat_timeout 30
 );
+-- expose only one remote schema:
+ATTACH 'quack:localhost' AS rpc (schema 'main');
 ```
 
 Once attached, remote tables look local:
@@ -154,6 +156,7 @@ SET rpc_default_token = '<token-from-rpc_start>';
 | `rpc_uri_parser(uri, ssl)`   | Parse an RPC URI into `{host, port, ipv6, ssl, url}`.               |
 | `rpc_auth_token(sid, token)` | Default authentication callback; compares against `rpc_default_token`. |
 | `rpc_dummy_authorization(sid, query)` | Default authorization callback; always allows.              |
+| `quack_clear_cache([catalog])` | Refresh every attached Quack catalog, or only `catalog` when provided. |
 
 ### `ATTACH` options
 
@@ -161,6 +164,7 @@ SET rpc_default_token = '<token-from-rpc_start>';
 |---------------------|---------|---------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `disable_ssl`       | BOOLEAN | `false`                               | Use plain HTTP instead of HTTPS.                                                                                                                                                                                                                                                                                                                                                                             |
 | `token`             | VARCHAR | quack secret / `rpc_default_token`    | Auth token sent to the server; overrides any matching quack secret.                                                                                                                                                                                                                                                                                                                                          |
+| `schema`            | VARCHAR | all schemas                           | Load only the named remote schema into the attached catalog. This limits catalog visibility, not server authorization.                                                                                                                                                                                                                                                                                       |
 | `client_id`         | VARCHAR | `quack_default_client_id`             | Opaque client identifier; must be empty or at least 4 characters. Defaults to the `quack_default_client_id` setting when omitted — pass `''` to opt a single connection out. The server derives a stable per-client hash `HMAC-SHA256(server_hmac_key, client_id)` (keyed with a private per-server key, so it is not reproducible by clients), exposed as `client_id_hash` in `quack_active_connections()`. |
 | `heartbeat_timeout` | UBIGINT | `quack_default_heartbeat_timeout`     | Logical-client lease timeout in seconds.                                                                                                                                                                                                                                                                                                                                                                     |
 

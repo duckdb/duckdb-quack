@@ -14,6 +14,9 @@ statement ok
 attach {server} as rpc
 
 statement ok
+attach {server} as rpc2
+
+statement ok
 call system.main.quack_query_by_name('rpc', 'CREATE TABLE t1(i INTEGER); INSERT INTO t1 VALUES (1),(2),(3);')
 
 statement error
@@ -22,10 +25,25 @@ SELECT i FROM rpc.t1
 Table with name t1 does not exist
 
 statement ok
-CALL quack_clear_cache()
+CALL quack_clear_cache('rpc')
 
 query I
 SELECT i FROM rpc.t1 ORDER BY i
+----
+1
+2
+3
+
+statement error
+SELECT i FROM rpc2.t1
+----
+Table with name t1 does not exist
+
+statement ok
+CALL quack_clear_cache('rpc2')
+
+query I
+SELECT i FROM rpc2.t1 ORDER BY i
 ----
 1
 2
@@ -72,5 +90,8 @@ Catalog Error: Table with name t1 does not exist
 
 statement ok
 detach rpc;
+
+statement ok
+detach rpc2;
 
 include test/template/quack_teardown.test_template

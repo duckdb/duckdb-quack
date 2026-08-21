@@ -1,4 +1,5 @@
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/database_manager.hpp"
@@ -27,8 +28,9 @@
 namespace duckdb {
 
 QuackCatalog::QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri, ClientContext &context,
-                           const string &token, string client_id, idx_t heartbeat_timeout_seconds)
-    : Catalog(db_p) {
+                           const string &token, string client_id, idx_t heartbeat_timeout_seconds,
+                           string schema_filter_p)
+    : Catalog(db_p), schema_filter(std::move(schema_filter_p)) {
 	// connect to the server
 	client_connection =
 	    QuackClient::ConnectToServer(context, server_uri, token, std::move(client_id), heartbeat_timeout_seconds);
@@ -40,8 +42,8 @@ QuackCatalog::QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri, C
 
 QuackLoadCatalogData QuackCatalog::LoadCatalog(ClientContext &context) {
 	QuackLoadCatalogData result;
-	result.schemas = ExecuteCommandInternal(context, QuackSchemaSet::GetLoadQuery());
-	result.tables = ExecuteCommandInternal(context, QuackTableSet::GetLoadQuery());
+	result.schemas = ExecuteCommandInternal(context, QuackSchemaSet::GetLoadQuery(schema_filter));
+	result.tables = ExecuteCommandInternal(context, QuackTableSet::GetLoadQuery(schema_filter));
 	return result;
 }
 
@@ -119,6 +121,11 @@ QuackCatalog &QuackCatalog::GetQuackCatalog(ClientContext &context, Value &catal
 }
 
 optional_ptr<CatalogEntry> QuackCatalog::CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) {
+	auto &schema_name = info.SchemaName().GetIdentifierName();
+	if (!schema_filter.empty() && !StringUtil::CIEquals(schema_name, schema_filter)) {
+		throw BinderException("Cannot create schema \"%s\" through schema-scoped Quack catalog \"%s\"", schema_name,
+		                      schema_filter);
+	}
 	auto &quack_transaction = QuackTransaction::Get(transaction);
 	// create schema remotely
 	quack_transaction.Query(info.ToString());
@@ -207,6 +214,11 @@ bool QuackCatalog::SupportsPushdown(const TableRef &ref) {
 		return false;
 	}
 	return true;
+}
+
+bool QuackCatalog::SupportsPushdown(const SQLStatement &) {
+	// Local catalog lookup enforces schema_filter before remote DDL executes.
+	return schema_filter.empty();
 }
 
 } // namespace duckdb

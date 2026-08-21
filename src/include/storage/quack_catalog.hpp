@@ -21,7 +21,7 @@ class QuackClientConnection;
 class QuackCatalog : public Catalog {
 public:
 	explicit QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri_p, ClientContext &context,
-	                      const string &token, string client_id, idx_t heartbeat_timeout_seconds);
+	                      const string &token, string client_id, idx_t heartbeat_timeout_seconds, string schema_filter);
 	~QuackCatalog() override;
 
 public:
@@ -31,6 +31,7 @@ public:
 	static QuackCatalog &GetQuackCatalog(ClientContext &context, Value &catalog_name);
 	static bool IsQuackScan(const string &name);
 	bool SupportsPushdown(const TableRef &ref) override;
+	bool SupportsPushdown(const SQLStatement &statement) override;
 	void Initialize(bool load_builtin) override;
 
 	optional_ptr<CatalogEntry> CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) override;
@@ -94,6 +95,7 @@ private:
 private:
 	shared_ptr<QuackClientConnection> client_connection;
 	unique_ptr<QuackSchemaSet> schemas;
+	string schema_filter;
 };
 
 } // namespace duckdb

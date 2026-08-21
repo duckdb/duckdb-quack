@@ -28,13 +28,17 @@ void QuackSchemaSet::Reload(ClientContext &context, QuackCatalog &catalog, const
 	}
 }
 
-string QuackSchemaSet::GetLoadQuery() {
-	return R"(
+string QuackSchemaSet::GetLoadQuery(const string &schema_filter) {
+	string query = R"(
 SELECT catalog_name, schema_name
 FROM information_schema.schemata
 WHERE catalog_name NOT IN ('system', 'temp')
-ORDER BY ALL
-	)";
+)";
+	if (!schema_filter.empty()) {
+		query += StringUtil::Format("AND schema_name = %s\n", SQLString(schema_filter));
+	}
+	query += "ORDER BY ALL";
+	return query;
 }
 
 QuackSchemaCatalogEntry::QuackSchemaCatalogEntry(Catalog &catalog_p, CreateSchemaInfo &info_p)
