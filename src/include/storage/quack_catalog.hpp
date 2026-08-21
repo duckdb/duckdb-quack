@@ -21,14 +21,17 @@ class QuackClientConnection;
 class QuackCatalog : public Catalog {
 public:
 	explicit QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri_p, ClientContext &context,
-	                      const string &token, string schema_filter = string());
+	                      const string &token, string client_id, idx_t heartbeat_timeout_seconds, string schema_filter);
 	~QuackCatalog() override;
 
 public:
 	string GetCatalogType() override {
 		return "quack";
 	}
+	static QuackCatalog &GetQuackCatalog(ClientContext &context, Value &catalog_name);
 	static bool IsQuackScan(const string &name);
+	bool SupportsPushdown(const TableRef &ref) override;
+	bool SupportsPushdown(const SQLStatement &statement) override;
 	void Initialize(bool load_builtin) override;
 
 	optional_ptr<CatalogEntry> CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) override;
@@ -54,6 +57,24 @@ public:
 	bool InMemory() override;
 	string GetDBPath() override;
 
+	bool Supports(RemoteCapability capability) const override {
+		switch (capability) {
+		case RemoteCapability::IS_REMOTE:
+		case RemoteCapability::EXECUTE_QUERY_NODE:
+		case RemoteCapability::EXECUTE_STATEMENT:
+		case RemoteCapability::CONNECT:
+			return true;
+		default:
+			return false;
+		}
+	}
+	unique_ptr<TableRef> RemoteExecute(ClientContext &context, unique_ptr<QueryNode> node) override;
+	unique_ptr<TableRef> RemoteExecute(ClientContext &context, unique_ptr<SQLStatement> statement) override;
+	unique_ptr<TableRef> RemoteExecute(ClientContext &context, const string &sql) override;
+	string GetConnectDisplay() override {
+		return GetDBPath();
+	}
+
 	unique_ptr<ColumnDataCollection> ExecuteCommandInternal(ClientContext &context, const string &query);
 	const QuackUri &GetServerUri();
 	const string &GetConnectionId();
@@ -64,6 +85,10 @@ public:
 
 private:
 	void DropSchema(ClientContext &context, DropInfo &info) override;
+
+	//! Build the "quack_query_by_name" table function call that runs "sql" on the server. Statements pushed
+	//! down by the RemotePushdownOptimizer change the remote catalog, so they ask for a catalog refresh
+	unique_ptr<TableRef> CreateRemoteQueryRef(const string &sql, bool refresh_catalog);
 
 	QuackLoadCatalogData LoadCatalog(ClientContext &context);
 

@@ -1,8 +1,11 @@
 #include <thread>
 
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/attached_database.hpp"
+#include "duckdb/parser/parsed_data/attach_info.hpp"
 
 #include "quack_storage.hpp"
+#include "quack_client.hpp"
 #include "quack_server.hpp"
 #include "storage/quack_catalog.hpp"
 #include "storage/quack_transaction_manager.hpp"
@@ -20,14 +23,15 @@ QuackStorageExtensionInfo &QuackStorageExtensionInfo::GetState(const DatabaseIns
 
 QuackServer &QuackStorageExtensionInfo::CreateServer(ClientContext &context, const QuackUri &listen_uri,
                                                      const string &token) {
-	auto key = listen_uri.CanonicalUri();
+	auto server = make_uniq<HttpQuackServer>(context, listen_uri, token);
+
+	auto &actual_uri = server->ListenUri();
+	auto key = actual_uri.CanonicalUri();
 	std::lock_guard<std::mutex> lock(servers_mutex);
 	auto it = servers.find(key);
 	if (it != servers.end()) {
 		throw InvalidInputException("Server already exists for %s", key);
 	}
-	unique_ptr<QuackServer> server;
-	server = make_uniq<HttpQuackServer>(context, listen_uri, token);
 	servers.emplace(key, std::move(server));
 	return *servers[key];
 }
@@ -46,6 +50,18 @@ vector<QuackStorageExtensionInfo::ServerSnapshot> QuackStorageExtensionInfo::Lis
 		snap.active_connections = kv.second->ActiveConnectionCount();
 		snap.info.emplace_back("ipv6", uri.IPv6() ? "true" : "false");
 		result.push_back(std::move(snap));
+	}
+	return result;
+}
+
+vector<QuackConnectionSnapshot> QuackStorageExtensionInfo::GetActiveConnectionSnaps() {
+	vector<QuackConnectionSnapshot> result;
+	std::lock_guard<std::mutex> lock(servers_mutex);
+	for (auto &[uri, server] : servers) {
+		for (auto &snapshot : server->GetActiveConnectionSnap()) {
+			snapshot.server_id = uri;
+			result.push_back(std::move(snapshot));
+		}
 	}
 	return result;
 }
@@ -85,10 +101,21 @@ static unique_ptr<Catalog> QuackAttach(optional_ptr<StorageExtensionInfo> storag
 		token = attach_options.options["token"].GetValue<string>();
 	}
 	string schema_filter;
-	if (attach_options.options.find("schema") != attach_options.options.end()) {
-		schema_filter = attach_options.options["schema"].GetValue<string>();
+	auto schema_entry = attach_options.options.find("schema");
+	if (schema_entry != attach_options.options.end()) {
+		if (schema_entry->second.IsNull() || schema_entry->second.GetValue<string>().empty()) {
+			throw InvalidInputException("schema cannot be NULL or empty");
+		}
+		schema_filter = schema_entry->second.GetValue<string>();
 	}
-	return make_uniq<QuackCatalog>(db, QuackUri(uri, enable_ssl), context, token, std::move(schema_filter));
+	auto client_id_entry = attach_options.options.find("client_id");
+	auto client_id = QuackClient::ResolveClientId(
+	    context, client_id_entry != attach_options.options.end() ? &client_id_entry->second : nullptr);
+	auto heartbeat_timeout_entry = attach_options.options.find("heartbeat_timeout");
+	auto heartbeat_timeout = QuackClient::ResolveHeartbeatTimeout(
+	    context, heartbeat_timeout_entry != attach_options.options.end() ? &heartbeat_timeout_entry->second : nullptr);
+	return make_uniq<QuackCatalog>(db, QuackUri(uri, enable_ssl), context, token, std::move(client_id),
+	                               heartbeat_timeout, std::move(schema_filter));
 }
 
 static unique_ptr<TransactionManager> QuackCreateTransactionManager(optional_ptr<StorageExtensionInfo> storage_info,

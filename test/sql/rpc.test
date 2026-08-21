@@ -2,151 +2,157 @@
 # description: test rpc extension
 # group: [sql]
 
-require quack
-
-require httpfs
-
-set ignore_error_messages __none__
-
-foreach server 'quack:localhost'
-
-
-query III con1
-call quack_serve({server}, token='asdf');
-----
-quack:localhost	http://localhost:9494	asdf
-
-sleep 100 millisecond
+include test/template/quack_setup.test_template
 
 # we can use the direct token param
-query I con2
+query I
 from quack_query({server}, 'select 42', token='asdf')
 ----
 42
 
+# a NULL client_id must be rejected, not silently accepted and hashed as the literal string "NULL"
+statement error
+from quack_query({server}, 'select 42', token='asdf', client_id=NULL)
+----
+client_id cannot be null
+
+# a client_id on the direct quack_query path is accepted
+query I
+from quack_query({server}, 'select 42', token='asdf', client_id='direct_client')
+----
+42
+
+# an empty-string client_id is accepted
+query I
+from quack_query({server}, 'select 42', token='asdf', client_id='')
+----
+42
+
 # we fail with the wrong token
-statement error con2
+statement error
 from quack_query({server}, 'select 42', token='fdsa')
 ----
 Authentication failed
 
 # or a secret
-statement ok con2
+statement ok
 create secret (type quack, token 'asdf')
 
-query I con2
+query I
 from quack_query({server}, 'select 42')
 ----
 42
 
 # we return the last result set - for now
-query I con2
+query I
 from quack_query({server}, 'select 42; select 43')
 ----
 42
 
-query I con2
+query I
 from quack_query({server}, 'set variable x=44; select getvariable(''x'')')
 ----
 44
 
 # we can run whole goddamn transactions in here
-query I con2
+query I
 from quack_query({server}, 'create table fuu2 (i integer); begin transaction; insert into fuu2 values(45); rollback; from fuu2')
 ----
 
 
-statement error con2
+statement error
 from quack_query({server}, '')
 ----
 Error
 
 
-statement error con2
+statement error
 from quack_query({server}, NULL)
 ----
 Error
 
 
-statement error con2
+statement error
 from quack_query({server}, 'selexxxct 42')
 ----
 Error
 
-query I con2
+query I
 select max(range) from quack_query({server}, 'from range(100000)')
 ----
 99999
 
-statement ok con2
+statement ok
 from quack_query({server}, 'from test_all_types()')
 
 
-statement ok con2
+statement ok
 from quack_query({server}, 'create table fuu(i integer)')
 
-statement ok con2
+statement ok
 from quack_query({server}, 'insert into fuu values (42)')
 
-query I ok con2
+query I ok
 from quack_query({server}, 'from fuu')
 ----
 42
 
-statement error con2
+statement error
 from quack_query({server}, 'from yyyy')
 ----
 does not exist
 
-statement ok con2
+statement ok
 from quack_query({server}, 'drop table fuu')
 
 # some error cases
-statement error con2
+statement error
 from quack_query({server}, NULL)
 ----
 cannot be NULL
 
-statement error con2
+statement error
 from quack_query(NULL, '')
 ----
 cannot be NULL
 
 
-statement error con1
+statement error quack_db:quack_server_con
 call quack_serve('')
 ----
 Invalid listen string
 
-statement error con1
+statement error quack_db:quack_server_con
 call quack_serve(NULL)
 ----
 Invalid listen string
 
-statement ok con2
+statement ok
 from quack_query({server}, 'select 42')
 
-statement ok con 1
+statement ok quack_db:quack_server_con
 call quack_stop({server})
 
-statement ok con 1
+statement ok quack_db:quack_server_con
 call quack_stop({server})
 
-statement error con2
+# quack_stop tears the server down asynchronously (workers are joined off-thread to avoid
+# deadlocking a worker that joins itself). Give the detached teardown a moment to close the
+# listening socket before asserting the address is unreachable.
+sleep 2 seconds
+
+statement error
 from quack_query({server}, 'select 42')
 ----
-Error
+IO Error
 
 # we can call quack_serve() without parameters and connect using just quack:localhost
-statement ok
-SET VARIABLE token=(FROM quack_serve() SELECT auth_token);
+statement ok quack_db:quack_server_con
+SET VARIABLE token=(FROM quack_serve({server}) SELECT auth_token);
 
-query I
-FROM quack_query('quack:localhost', 'select 42', token=getvariable('token'))
+query I quack_db:quack_server_con
+FROM quack_query({server}, 'select 42', token=getvariable('token'))
 ----
 42
 
-statement ok
-call quack_stop('quack:localhost')
-
-endloop
+include test/template/quack_teardown.test_template

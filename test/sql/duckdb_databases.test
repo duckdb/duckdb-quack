@@ -1,0 +1,28 @@
+# name: test/sql/duckdb_databases.test
+# description: A quack-attached database must show up cleanly in duckdb_databases()
+# group: [sql]
+
+require quack
+
+require httpfs
+
+foreach server 'quack:localhost'
+
+statement ok con1
+call quack_serve({server}, token='asdf');
+
+statement ok con2
+attach {server} as my_remote (token 'asdf');
+
+query III
+select database_name, path, type from duckdb_databases() where database_name='my_remote';
+----
+my_remote	quack:localhost	quack
+
+statement ok con2
+detach my_remote;
+
+statement ok con1
+call quack_stop({server});
+
+endloop

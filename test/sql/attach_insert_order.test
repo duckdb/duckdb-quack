@@ -1,0 +1,293 @@
+# name: test/sql/attach_insert_order.test
+# description: order-preserving rpc INSERT: PARALLEL_ORDERED (scan/parquet), SERIAL_ORDERED (range), flush splitting, trailing + internal batch-index gaps (dead-range markers), async sweep, CTAS, unordered fast path
+# group: [sql]
+
+require parquet
+
+include test/template/quack_setup.test_template
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+# Local ordered source. Parallel table scan supplies executor batch indices (PARALLEL_ORDERED path).
+statement ok
+create table src as select * from range(300000) t(i);
+
+statement ok
+SET threads=4;
+
+# --- PARALLEL_ORDERED: parallel table-scan source must land in source order despite concurrent producers.
+statement ok
+create table rpc.t_scan(i bigint);
+
+statement ok
+insert into rpc.t_scan select i from src;
+
+query III
+select count(*), min(i), max(i) from rpc.t_scan;
+----
+300000	0	299999
+
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_scan) where i != rn;
+----
+0
+
+# First stored row must be 0.
+query I
+select i from (select i, row_number() over () as rn from rpc.t_scan) where rn = 1;
+----
+0
+
+# --- SERIAL_ORDERED: range() has no executor batch index; the single producer mints one batch per flush.
+# Upload still runs async; order must be exact.
+statement ok
+create table rpc.t_range(i bigint);
+
+statement ok
+insert into rpc.t_range select * from range(300000) t(i);
+
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_range) where i != rn;
+----
+0
+
+# --- Parquet multi-row-group source (PARALLEL_ORDERED via parallel parquet scan).
+statement ok
+copy (select * from range(300000) t(i)) to '{TEST_DIR}/ord.parquet' (row_group_size 50000);
+
+statement ok
+create table rpc.t_parq(i bigint);
+
+statement ok
+insert into rpc.t_parq select i from read_parquet('{TEST_DIR}/ord.parquet');
+
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_parq) where i != rn;
+----
+0
+
+# --- Flush splitting: quack_send_data_flush_rows controls when a SEND_DATA_REQUEST is dispatched.
+# Setting it to 2048 means each row group is split into many messages; order must still be exact
+# and the client must emit far more SEND_DATA_REQUEST messages than there are row groups.
+statement ok
+CALL enable_logging(['Quack'], storage='memory');
+
+statement ok
+SET quack_send_data_flush_rows=2048;
+
+statement ok
+create table rpc.t_split(i bigint);
+
+statement ok
+insert into rpc.t_split select i from src;
+
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_split) where i != rn;
+----
+0
+
+# server != '' selects only client-side outgoing requests (not server-side echoes).
+# 300000 rows at flush_rows=2048 → ~147 messages, well above the 1 message without splitting.
+query I
+select count(*) > 50 from duckdb_logs_parsed('Quack')
+where message_type = 'SEND_DATA_REQUEST' and server is not null and server != '';
+----
+true
+
+# Async SEND_DATA POSTs log through the context logger captured on the producer thread, so client-side
+# SEND_DATA logs are CONNECTION-scoped and carry the query's context ids. Assert none is mis-attributed
+# (previously these were DATABASE-scoped with null query_id/transaction_id, emitted via the db logger).
+query I
+select count(*) from duckdb_logs_parsed('Quack')
+where message_type = 'SEND_DATA_REQUEST' and server is not null and server != ''
+  and (scope != 'CONNECTION' or query_id is null or transaction_id is null);
+----
+0
+
+statement ok
+reset quack_send_data_flush_rows;
+
+statement ok
+CALL disable_logging();
+
+# --- Trailing gap: a WHERE predicate empties the high morsels, so the batch-index sequence runs
+# 0..M then stops. The server delivers 0..M and finishes; there is nothing above to skip.
+statement ok
+create table rpc.t_filt(i bigint);
+
+statement ok
+insert into rpc.t_filt select i from src where i < 150000;
+
+query II
+select count(*), (select count(*) from src where i < 150000) from rpc.t_filt;
+----
+150000	150000
+
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_filt) where i != rn;
+----
+0
+
+# --- Internal gap: a predicate empties whole parquet row groups *between* live ones, leaving a gap in
+# the middle of the batch-index sequence. The client emits dead-range markers so the server skips the
+# dead indices and delivers the batches after the gap, in order, instead of stalling and dropping them.
+statement ok
+copy (select * from range(300000) t(i)) to '{TEST_DIR}/gap.parquet' (row_group_size 50000);
+
+statement ok
+create table rpc.t_gap(i bigint);
+
+statement ok
+insert into rpc.t_gap
+select i from read_parquet('{TEST_DIR}/gap.parquet') where i < 4096 or (i >= 200000 and i < 204096);
+
+query III
+select count(*), min(i), max(i) from rpc.t_gap;
+----
+8192	0	204095
+
+# rows land in source order across the gap: 0..4095 then 200000..204095
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_gap)
+where (rn < 4096 and i != rn) or (rn >= 4096 and i != rn + 195904);
+----
+0
+
+# All row groups filtered out: no live batch, no stream, 0 rows — must not hang.
+statement ok
+create table rpc.t_alldead(i bigint);
+
+statement ok
+insert into rpc.t_alldead select i from read_parquet('{TEST_DIR}/gap.parquet') where i > 1000000;
+
+query I
+select count(*) from rpc.t_alldead;
+----
+0
+
+# Leading dead row group (0) + an internal one (2): live groups are 1 and 3.
+statement ok
+create table rpc.t_lead(i bigint);
+
+statement ok
+insert into rpc.t_lead
+select i from read_parquet('{TEST_DIR}/gap.parquet') where (i >= 50000 and i < 54096) or (i >= 150000 and i < 154096);
+
+query III
+select count(*), min(i), max(i) from rpc.t_lead;
+----
+8192	50000	154095
+
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_lead)
+where (rn < 4096 and i != rn + 50000) or (rn >= 4096 and i != rn + 145904);
+----
+0
+
+# Alternating live/dead row groups (0,2,4 live; 1,3,5 dead): multiple gaps -> multiple dead-range markers.
+statement ok
+create table rpc.t_alt(i bigint);
+
+statement ok
+insert into rpc.t_alt select i from read_parquet('{TEST_DIR}/gap.parquet') where (i % 100000) < 4096;
+
+query III
+select count(*), min(i), max(i) from rpc.t_alt;
+----
+12288	0	204095
+
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_alt)
+where (rn < 4096 and i != rn) or (rn >= 4096 and rn < 8192 and i != rn + 95904) or (rn >= 8192 and i != rn + 191808);
+----
+0
+
+# --- async_threads sweep: order holds for synchronous (=0), single-async (=1), and wide (=8) modes.
+foreach at 0 1 8
+
+statement ok
+SET async_threads={at};
+
+statement ok
+create table rpc.t_at(i bigint);
+
+statement ok
+insert into rpc.t_at select i from src;
+
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_at) where i != rn;
+----
+0
+
+statement ok
+drop table rpc.t_at;
+
+endloop
+
+statement ok
+reset async_threads;
+
+# --- CTAS preserves order.
+statement ok
+create table rpc.t_ctas as select i from src;
+
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_ctas) where i != rn;
+----
+0
+
+# --- UNORDERED fast path (preserve_insertion_order=false): all rows arrive, order not asserted.
+statement ok
+SET preserve_insertion_order=false;
+
+statement ok
+create table rpc.t_fast(i bigint);
+
+statement ok
+insert into rpc.t_fast select i from src;
+
+query II
+select count(*), sum(i) from rpc.t_fast;
+----
+300000	44999850000
+
+statement ok
+reset preserve_insertion_order;
+
+# --- Seeding race: a slow leading row group (expensive md5 column on group 0) means a later batch is
+# produced and sent before the earlier one. The watermark must be a firm lower bound so the server does
+# not seed its delivery cursor too high and drop the slow earlier batch.
+statement ok
+SET threads=2;
+
+statement ok
+copy (
+    select i, case when i < 50000 then md5(i::varchar) else 'x' end as s
+    from range(300000) t(i)
+) to '{TEST_DIR}/slow_leading.parquet' (row_group_size 50000);
+
+statement ok
+create table rpc.t_race(i bigint, l bigint);
+
+statement ok
+insert into rpc.t_race
+select i, length(s)
+from read_parquet('{TEST_DIR}/slow_leading.parquet')
+where i < 4096 or (i >= 200000 and i < 204096);
+
+query III
+select count(*), min(i), max(i) from rpc.t_race;
+----
+8192	0	204095
+
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_race)
+where (rn < 4096 and i != rn) or (rn >= 4096 and i != rn + 195904);
+----
+0
+
+statement ok con2
+detach rpc;
+
+include test/template/quack_teardown.test_template

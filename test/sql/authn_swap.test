@@ -2,78 +2,67 @@
 # description: swap quack_authentication_function and quack_authorization_function at runtime
 # group: [sql]
 
-require quack
+include test/template/quack_setup.test_template
 
-require httpfs
-
-set ignore_error_messages __none__
-
-statement ok con1
+statement ok quack_db:quack_server_con
 CREATE MACRO authn_no(sid, auth_string, token)  AS false;
 
-statement ok con1
+statement ok quack_db:quack_server_con
 CREATE MACRO authn_yes(sid, auth_string, token) AS true;
 
-query III con1
-CALL quack_serve('quack:localhost', token='asdf');
-----
-quack:localhost	http://localhost:9494	asdf
-
-sleep 100 millisecond
-
 # Phase 1: deny-all — both correct and wrong token rejected
-statement ok con1
+statement ok quack_db:quack_server_con
 SET quack_authentication_function = 'authn_no';
 
-statement error con2
-FROM quack_query('quack:localhost', 'select 42', token='asdf');
+statement error
+FROM quack_query({server}, 'select 42', token='asdf');
 ----
 Authentication failed
 
-statement error con2
-FROM quack_query('quack:localhost', 'select 42', token='fdsa');
+statement error
+FROM quack_query({server}, 'select 42', token='fdsa');
 ----
 Authentication failed
 
 # Phase 2: token check — correct token works, wrong token fails
-statement ok con1
+statement ok quack_db:quack_server_con
 SET quack_authentication_function = 'quack_check_token';
 
-query I con2
-FROM quack_query('quack:localhost', 'select 42', token='asdf');
+query I
+FROM quack_query({server}, 'select 42', token='asdf');
 ----
 42
 
-statement error con2
-FROM quack_query('quack:localhost', 'select 42', token='fdsa');
+statement error
+FROM quack_query({server}, 'select 42', token='fdsa');
 ----
 Authentication failed
 
 # Phase 3: allow-all — both correct and wrong token accepted
-statement ok con1
+statement ok quack_db:quack_server_con
 SET quack_authentication_function = 'authn_yes';
 
-query I con2
-FROM quack_query('quack:localhost', 'select 42', token='asdf');
+query I
+FROM quack_query({server}, 'select 42', token='asdf');
 ----
 42
 
-query I con2
-FROM quack_query('quack:localhost', 'select 42', token='fdsa');
+query I
+FROM quack_query({server}, 'select 42', token='fdsa');
 ----
 42
 
 # Phase 4: non-existent function — auth path fails closed for any token
-statement ok con1
+statement ok quack_db:quack_server_con
 SET quack_authentication_function = 'authn_does_not_exist';
 
-statement error con2
-FROM quack_query('quack:localhost', 'select 42', token='asdf');
+statement error
+FROM quack_query({server}, 'select 42', token='asdf');
 ----
 Authentication failed
 
-statement error con2
-FROM quack_query('quack:localhost', 'select 42', token='fdsa');
+statement error
+FROM quack_query({server}, 'select 42', token='fdsa');
 ----
 Authentication failed
 
@@ -81,21 +70,21 @@ Authentication failed
 # Note: plain RESET (without GLOBAL) only clears the session view — the auth
 # callback runs on a fresh connection that would still read the stale GLOBAL
 # value. RESET GLOBAL is the correct incantation.
-statement ok con1
+statement ok quack_db:quack_server_con
 RESET GLOBAL quack_authentication_function;
 
-query I con1
+query I quack_db:quack_server_con
 SELECT current_setting('quack_authentication_function');
 ----
 quack_check_token
 
-query I con2
-FROM quack_query('quack:localhost', 'select 42', token='asdf');
+query I
+FROM quack_query({server}, 'select 42', token='asdf');
 ----
 42
 
-statement error con2
-FROM quack_query('quack:localhost', 'select 42', token='fdsa');
+statement error
+FROM quack_query({server}, 'select 42', token='fdsa');
 ----
 Authentication failed
 
@@ -103,99 +92,104 @@ Authentication failed
 # 'duck', ignoring sid and the server-configured token.
 # Macro arg order: (sid, client_token, server_token) — arg[1] is the value the
 # client passed as token=..., arg[2] is the server-configured token.
-statement ok con1
+statement ok quack_db:quack_server_con
 CREATE MACRO authn_duck(sid, client_token, server_token) AS client_token = 'duck';
 
-statement ok con1
+statement ok quack_db:quack_server_con
 SET quack_authentication_function = 'authn_duck';
 
-query I con2
-FROM quack_query('quack:localhost', 'select 42', token='duck');
+query I
+FROM quack_query({server}, 'select 42', token='duck');
 ----
 42
 
 # the server-configured token ('asdf') is no longer special — only 'duck' passes
-statement error con2
-FROM quack_query('quack:localhost', 'select 42', token='asdf');
+statement error
+FROM quack_query({server}, 'select 42', token='asdf');
 ----
 Authentication failed
 
-statement error con2
-FROM quack_query('quack:localhost', 'select 42', token='quack');
+statement error
+FROM quack_query({server}, 'select 42', token='quack');
 ----
 Authentication failed
 
-statement ok con1
+statement ok quack_db:quack_server_con
 RESET GLOBAL quack_authentication_function;
 
 ####################
 # quack_authorization_function — authn stays at default (quack_check_token)
 ####################
 
-statement ok con1
+statement ok quack_db:quack_server_con
 CREATE MACRO authz_no(sid, query)  AS false;
 
-statement ok con1
+statement ok quack_db:quack_server_con
 CREATE MACRO authz_yes(sid, query) AS true;
 
 # Phase A: deny-all — even an authenticated request is rejected
-statement ok con1
+statement ok quack_db:quack_server_con
 SET quack_authorization_function = 'authz_no';
 
-statement error con2
-FROM quack_query('quack:localhost', 'select 42', token='asdf');
+statement error
+FROM quack_query({server}, 'select 42', token='asdf');
 ----
 Authorization failed
 
 # Phase B: allow-all (default-equivalent)
-statement ok con1
+statement ok quack_db:quack_server_con
 SET quack_authorization_function = 'quack_nop_authorization';
 
-query I con2
-FROM quack_query('quack:localhost', 'select 42', token='asdf');
+query I
+FROM quack_query({server}, 'select 42', token='asdf');
 ----
 42
 
 # Phase C: explicit authz_yes
-statement ok con1
+statement ok quack_db:quack_server_con
 SET quack_authorization_function = 'authz_yes';
 
-query I con2
-FROM quack_query('quack:localhost', 'select 42', token='asdf');
+query I
+FROM quack_query({server}, 'select 42', token='asdf');
 ----
 42
 
 # Authn still gates: wrong token fails before authz runs
-statement error con2
-FROM quack_query('quack:localhost', 'select 42', token='fdsa');
+statement error
+FROM quack_query({server}, 'select 42', token='fdsa');
 ----
 Authentication failed
 
 # Phase D: non-existent function — authz path fails closed
-statement ok con1
+statement ok quack_db:quack_server_con
 SET quack_authorization_function = 'authz_does_not_exist';
 
-statement error con2
-FROM quack_query('quack:localhost', 'select 42', token='asdf');
+statement error
+FROM quack_query({server}, 'select 42', token='asdf');
 ----
 Authorization failed
 
 # Phase E: RESET GLOBAL restores the default (quack_nop_authorization)
-statement ok con1
+statement ok quack_db:quack_server_con
 RESET GLOBAL quack_authorization_function;
 
-query I con1
+query I quack_db:quack_server_con
 SELECT current_setting('quack_authorization_function');
 ----
 quack_nop_authorization
 
-query I con2
-FROM quack_query('quack:localhost', 'select 42', token='asdf');
+query I
+FROM quack_query({server}, 'select 42', token='asdf');
 ----
 42
 
-statement ok con1
-CALL quack_stop('quack:localhost');
+statement ok quack_db:quack_server_con
+CALL quack_stop({server});
+
+# The server tears down asynchronously; wait for the listening socket to close before
+# re-serving on the same address below, so the fresh server (not the draining old one,
+# which still carries the previous token) answers the requests that follow.
+sleep 2 seconds
 
 ####################
 # Combined: custom authn + custom authz, server starts with a long token.
@@ -204,59 +198,56 @@ CALL quack_stop('quack:localhost');
 # tripped ValidateToken with "must be at least 4 characters."
 ####################
 
-statement ok con1
+statement ok quack_db:quack_server_con
 CREATE MACRO check_token(sid, auth_string, token) AS auth_string = token;
 
-statement ok con1
+statement ok quack_db:quack_server_con
 CREATE MACRO read_only(sid, query) AS regexp_matches(upper(ltrim(query)), '^(SELECT|PRAGMA|CALL|EXPLAIN|DESCRIBE|SHOW)\b');
 
-statement ok con1
+statement ok quack_db:quack_server_con
 SET GLOBAL quack_authentication_function = 'check_token';
 
-statement ok con1
+statement ok quack_db:quack_server_con
 SET GLOBAL quack_authorization_function = 'read_only';
 
-query III con1
-CALL quack_serve('quack:localhost', token => 'analytics-team-token');
+query I quack_db:quack_server_con
+SELECT auth_token FROM quack_serve({server}, token => 'analytics-team-token');
 ----
-quack:localhost	http://localhost:9494	analytics-team-token
-
-sleep 100 millisecond
+analytics-team-token
 
 # Authn happy path with the configured token
-query I con2
-FROM quack_query('quack:localhost', 'select 42', token => 'analytics-team-token');
+query I
+FROM quack_query({server}, 'select 42', token => 'analytics-team-token');
 ----
 42
 
 # Authn rejects wrong token
-statement error con2
-FROM quack_query('quack:localhost', 'select 42', token => 'wrong-token');
+statement error
+FROM quack_query({server}, 'select 42', token => 'wrong-token');
 ----
 Authentication failed
 
 # Authz allows SELECT
-query I con2
-FROM quack_query('quack:localhost', 'select 1+1', token => 'analytics-team-token');
+query I
+FROM quack_query({server}, 'select 1+1', token => 'analytics-team-token');
 ----
 2
 
 # Authz blocks writes
-statement error con2
-FROM quack_query('quack:localhost', 'CREATE TABLE t(x INT)', token => 'analytics-team-token');
+statement error
+FROM quack_query({server}, 'CREATE TABLE t(x INT)', token => 'analytics-team-token');
 ----
 Authorization failed
 
 statement error con2
-FROM quack_query('quack:localhost', 'INSERT INTO t VALUES (1)', token => 'analytics-team-token');
+FROM quack_query({server}, 'INSERT INTO t VALUES (1)', token => 'analytics-team-token');
 ----
 Authorization failed
 
-statement ok con1
+statement ok quack_db:quack_server_con
 RESET GLOBAL quack_authentication_function;
 
-statement ok con1
+statement ok quack_db:quack_server_con
 RESET GLOBAL quack_authorization_function;
 
-statement ok con1
-CALL quack_stop('quack:localhost');
+include test/template/quack_teardown.test_template

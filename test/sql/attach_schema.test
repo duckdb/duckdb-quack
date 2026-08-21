@@ -2,54 +2,65 @@
 # description: test schema-scoped quack attach
 # group: [sql]
 
-require quack
+include test/template/quack_setup.test_template
 
-require httpfs
-
-set ignore_error_messages __none__
-
-statement ok con1
+statement ok quack_db:quack_server_con
 create table t as values (7);
 
-statement ok con1
+statement ok quack_db:quack_server_con
 create schema wanted;
 
-statement ok con1
+statement ok quack_db:quack_server_con
 create table wanted.t as values (42);
 
-statement ok con1
+statement ok quack_db:quack_server_con
 create schema other;
 
-statement ok con1
+statement ok quack_db:quack_server_con
 create table other.t as values (99);
 
-foreach server 'quack:localhost'
-
-statement ok con1
-call quack_serve({server}, token='asdf');
-
-statement ok con2
+statement ok
 attach {server} as rpc (token 'asdf', schema 'wanted')
 
-query I con2
+query I
 select col0 from rpc.wanted.t;
 ----
 42
 
-statement error con2
+statement error
 select * from rpc.other.t;
 ----
 schema "other" does not exist
 
-statement error con2
+statement error
 create schema rpc.other;
 ----
 Cannot create schema "other" through schema-scoped Quack catalog "wanted"
 
-statement ok con2
+statement error
+drop table rpc.other.t;
+----
+schema "other" does not exist
+
+query I quack_db:quack_server_con
+select col0 from other.t;
+----
+99
+
+statement ok
+create table rpc.wanted.created as values (8);
+
+query I
+select col0 from rpc.wanted.created;
+----
+8
+
+statement ok
 detach rpc;
 
-statement ok con1
-call quack_stop({server});
+statement error
+attach {server} as rpc (token 'asdf', schema '')
+----
+schema cannot be NULL or empty
 
-endloop
+include test/template/quack_teardown.test_template

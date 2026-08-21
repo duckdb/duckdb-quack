@@ -2,80 +2,72 @@
 # description: projection pushdown through quack_query returns the RIGHT column (not just first-N)
 # group: [sql]
 
-require quack
+include test/template/quack_setup.test_template
 
-require httpfs
-
-set ignore_error_messages __none__
-
-statement ok con1
-call quack_serve('quack:localhost', token='asdf');
-
-statement ok con2
+statement ok
 create secret (type quack, token 'asdf')
 
 # Pick the non-first column — exercises the column_ids remap in RpcScan.
-query I con2
-SELECT b FROM quack_query('quack:localhost', 'SELECT 1 as a, ''2'' as b');
+query I
+SELECT b FROM quack_query({server}, 'SELECT 1 as a, ''2'' as b');
 ----
 2
 
 # Multi-column projection with reordering — output wants b, a (reverse of server order).
-query II con2
-SELECT b, a FROM quack_query('quack:localhost', 'SELECT 1 as a, ''2'' as b');
+query II
+SELECT b, a FROM quack_query({server}, 'SELECT 1 as a, ''2'' as b');
 ----
 2	1
 
 # Types differ per column — catches type-mismatch (INTEGER vs VARCHAR).
-query I con2
-SELECT b FROM quack_query('quack:localhost', 'SELECT 42 as a, ''hello'' as b');
+query I
+SELECT b FROM quack_query({server}, 'SELECT 42 as a, ''hello'' as b');
 ----
 hello
 
 # Projection of a single middle column.
-query I con2
-SELECT middle FROM quack_query('quack:localhost',
+query I
+SELECT middle FROM quack_query({server},
     'SELECT 1 as first, 2.5 as middle, ''last'' as last');
 ----
 2.5
 
 # No projection — SELECT * — identity mapping should still work.
-query III con2
-SELECT * FROM quack_query('quack:localhost',
+query III
+SELECT * FROM quack_query({server},
     'SELECT 1 as a, ''two'' as b, true as c');
 ----
 1	two	true
 
 # Projection + alias at the outer SELECT.
-query I con2
-SELECT b AS renamed FROM quack_query('quack:localhost',
+query I
+SELECT b AS renamed FROM quack_query({server},
     'SELECT 1 as a, ''hello'' as b');
 ----
 hello
 
 # Projection through aggregation — only needs `b`, drops `a`.
-query I con2
-SELECT count(b) FROM quack_query('quack:localhost',
+query I
+SELECT count(b) FROM quack_query({server},
     'SELECT 1 as a, ''x'' as b UNION ALL SELECT 2, ''y''');
 ----
 2
 
 # Same via quack_query_by_name (ATTACH path).
-statement ok con2
-attach 'quack:localhost' as r (type quack);
+statement ok
+attach {server} as r (type quack);
 
-query I con2
+query I
 SELECT b FROM quack_query_by_name('r', 'SELECT 1 as a, ''2'' as b');
 ----
 2
 
-query II con2
+query II
 SELECT b, a FROM quack_query_by_name('r', 'SELECT 1 as a, ''2'' as b');
 ----
 2	1
 
-statement ok con2
+statement ok
 detach r;
 
-statement ok con1
-call quack_stop('quack:localhost');
+include test/template/quack_teardown.test_template

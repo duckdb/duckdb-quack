@@ -1,0 +1,36 @@
+# name: test/remote_pushdown/remote_pushdown_tpch.test_slow
+# description: CTE (non-recursive and recursive) pushdown for remote catalogs
+# group: [remote_pushdown]
+
+require tpch
+
+include test/template/quack_setup.test_template
+
+statement ok quack_db:quack_server_con
+call dbgen(sf=1);
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+statement ok
+use rpc
+
+loop i 1 9
+
+query I
+PRAGMA tpch({i})
+----
+<FILE>:extension/tpch/dbgen/answers/sf1/q0{i}.csv
+
+endloop
+
+loop i 10 23
+
+query I
+PRAGMA tpch({i})
+----
+<FILE>:extension/tpch/dbgen/answers/sf1/q{i}.csv
+
+endloop
+
+include test/template/quack_teardown.test_template

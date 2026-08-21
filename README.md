@@ -9,16 +9,17 @@ and the [documentation](https://duckdb.org/docs/current/quack/overview).
 
 ## Usage Example
 
-We have to install the extension in all involved DuckDB instances:
+The Quack extensions autoinstalls and [autoloads](https://duckdb.org/docs/current/extensions/overview#autoloading-extensions) on first use.
+You can also install and load it manually using:
 
 ```sql
-INSTALL quack FROM core_nightly;
+INSTALL quack;
+LOAD quack;
 ```
 
-Then, we can use one DuckDB instance as a server like so:
+Start Quack on one DuckDB instance, the server, using:
 
 ```sql
-LOAD quack;
 CALL quack_serve('quack:localhost', token = 'super_secret');
 CREATE TABLE hello AS FROM VALUES ('world') v(s);
 ```
@@ -26,7 +27,6 @@ CREATE TABLE hello AS FROM VALUES ('world') v(s);
 And talk to this server from another instance:
 
 ```sql
-LOAD quack;
 CREATE SECRET (TYPE quack, TOKEN 'super_secret');
 ATTACH 'quack:localhost' AS remote;
 FROM remote.hello;
@@ -38,7 +38,7 @@ We can also copy data from client to server:
 
 ```sql
 -- on client
-CREATE TABLE remote.hello2 AS FROM VALUES ('world2')v(s);
+CREATE TABLE remote.hello2 AS FROM VALUES ('world2') v(s);
 ```
 
 ```sql

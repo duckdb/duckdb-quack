@@ -6,7 +6,7 @@ require quack
 
 require httpfs
 
-# Start a server on the explicit form. listen_uri column preserves what was sent.
+# Start a server with the explicit form. listen_uri column preserves what was sent.
 query III
 FROM quack_serve('quack:127.0.0.1:9494', token='abcd');
 ----
@@ -47,10 +47,19 @@ Server already exists for quack:127.0.0.1:9494
 statement ok
 CALL quack_stop('quack:127.0.0.1:9494');
 
-# Port 1 is privileged — bind() will fail unless the test runs as root.
+# On Linux and macOS port 1 is privileged — bind() will fail unless the test runs as root.
+# On Windows bind() to port 1 will succeed.
 # `statement maybe` accepts either outcome but matches the expected error
 # string when the bind does fail.
 statement maybe
 FROM quack_serve('quack:127.0.0.1:1', token='abcd');
 ----
 Failed to bind DuckDB Quack RPC server
+
+statement ok
+CALL quack_stop('quack:127.0.0.1:1');
+
+query I quack_db:quack_server_con
+SELECT count(*) FROM quack_server_list();
+----
+0

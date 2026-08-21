@@ -1,0 +1,26 @@
+# name: test/sql/attach_transactions.test
+# description: test attach with transactions
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+statement ok
+create table rpc.t(i INT)
+
+statement ok
+BEGIN
+
+statement ok
+insert into rpc.t values (42);
+
+statement ok
+rollback
+
+query I
+from rpc.t
+----
+
+include test/template/quack_teardown.test_template

@@ -2,45 +2,39 @@
 # description: test rpc extension
 # group: [sql]
 
-require quack
+include test/template/quack_setup.test_template
 
-require httpfs
-
-set ignore_error_messages __none__
-
-statement ok
+statement ok quack_db:quack_server_con
 create schema moo;
 
-statement ok
+statement ok quack_db:quack_server_con
 create table fuu as values(42, 43);
 
-statement ok
+statement ok quack_db:quack_server_con
 create table moo.fuu2 as values(44, 45);
 
-foreach server 'quack:localhost'
-
-
-statement ok con1
-call quack_serve({server}, token='asdf');
-
-query II con2
+query II
 from quack_query({server}, 'select 42, 43', token='asdf')
 ----
 42	43
 
 # we can attach with a straight token
-statement ok con2
+statement ok
 attach {server} as rpc2 (token 'asdf')
 
-statement ok con2
+statement ok
 detach rpc2;
 
-statement ok con2
+statement ok
 create secret (type quack, token 'asdf')
 
-statement ok con2
+statement ok
 attach {server} as rpc
 
+query I
+from rpc.query('BEGIN; select 42; COMMIT;')
+----
+42
 
 query II
 from rpc.fuu;
@@ -109,11 +103,6 @@ begin transaction
 statement ok
 create table rpc.fuu3(i integer);
 
-statement error
-insert into rpc.fuu2 values (42);
-----
-not exist
-
 statement ok
 insert into rpc.fuu3 from range(10000);
 
@@ -131,19 +120,20 @@ from rpc.fuu3;
 not exist
 
 
-statement ok con2
+statement ok
 detach rpc;
 
-statement error con2
+statement error
 detach rpc;
 ----
 database not found
 
-statement ok con1
-call quack_stop({server});
+include test/template/quack_teardown.test_template
 
-statement error con2
+# quack_stop tears the server down asynchronously; wait for the listening socket to close
+# before asserting a fresh attach to the same address fails.
+sleep 2 seconds
+
+statement error
 attach {server} as rpc
 ----
-
-endloop

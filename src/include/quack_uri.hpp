@@ -10,10 +10,9 @@ public:
 	} // orrr
 
 	explicit QuackUri(string uri_p, bool ssl_p = true);
+	QuackUri(const QuackUri &uri, uint16_t new_port);
 
-	string Http() const {
-		return http;
-	}
+	string Http() const;
 	string Uri() const {
 		return uri;
 	}
@@ -37,8 +36,7 @@ public:
 		return StringUtil::Lower(host) == "localhost" || host == "127.0.0.1" || host == "::1";
 	}
 	bool operator==(const QuackUri &other) const {
-		return other.ssl == ssl && other.ipv6 == ipv6 && other.host == host && other.port == port &&
-		       other.http == http && other.uri == uri;
+		return other.ssl == ssl && other.ipv6 == ipv6 && other.host == host && other.port == port && other.uri == uri;
 	}
 	bool operator!=(const QuackUri &other) const {
 		return !(*this == other);
@@ -49,7 +47,6 @@ private:
 	bool ipv6;
 	string host;
 	uint16_t port; // default port!
-	string http;
 	string uri;
 };
 

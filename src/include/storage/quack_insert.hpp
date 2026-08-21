@@ -11,6 +11,8 @@
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/common/index_vector.hpp"
 
+#include "quack_rebalancer_sink.hpp"
+
 namespace duckdb {
 
 class QuackInsert : public PhysicalOperator {
@@ -27,8 +29,9 @@ public:
 	optional_ptr<SchemaCatalogEntry> schema;
 	//! Create table info, in case of CREATE TABLE AS
 	unique_ptr<BoundCreateTableInfo> info;
-	//! Whether we can keep the copy alive during Sink calls
-	bool keep_copy_alive = true;
+
+	//! Ordering strategy, set at plan time.
+	AppendOrderMode order_mode = AppendOrderMode::UNORDERED;
 
 protected:
 	// Source interface
@@ -38,9 +41,12 @@ protected:
 public:
 	// Sink interface
 	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override;
+	unique_ptr<LocalSinkState> GetLocalSinkState(ExecutionContext &context) const override;
 	SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const override;
+	SinkCombineResultType Combine(ExecutionContext &context, OperatorSinkCombineInput &input) const override;
 	SinkFinalizeType Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
 	                          OperatorSinkFinalizeInput &input) const override;
+	SinkNextBatchType NextBatch(ExecutionContext &context, OperatorSinkNextBatchInput &input) const override;
 
 	bool IsSource() const override {
 		return true;
@@ -51,7 +57,14 @@ public:
 	}
 
 	bool ParallelSink() const override {
-		return false;
+		return order_mode != AppendOrderMode::SERIAL_ORDERED;
+	}
+
+	//! Request executor batch indices only for PARALLEL_ORDERED, so the executor's assertion never fires for
+	//! sources that don't supply a batch index.
+	OperatorPartitionInfo RequiredPartitionInfo() const override {
+		return order_mode == AppendOrderMode::PARALLEL_ORDERED ? OperatorPartitionInfo(/*batch_index=*/true)
+		                                                       : OperatorPartitionInfo();
 	}
 
 	string GetName() const override;

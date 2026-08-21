@@ -2,33 +2,27 @@
 # description: A client may instruct a quack server to stop itself via `CALL quack_stop(...)` over RPC. Must not deadlock or crash.
 # group: [sql]
 
-require notwindows
-
-require quack
-
-require httpfs
-
-# Don't skip on the connection-error string — it's exactly what we expect.
-set ignore_error_messages __none__
-
-# Start the server.
-statement ok
-FROM quack_serve('quack:127.0.0.1', token='abcd');
+include test/template/quack_setup.test_template
 
 # Have the client tell the server to stop itself. The server processes the
 # request on a worker thread, runs CALL quack_stop, returns the result row,
 # and asynchronously tears itself down — no deadlock joining the worker pool
 # from inside a worker.
 statement ok
-FROM quack_query('quack:127.0.0.1', 'CALL quack_stop(''quack:127.0.0.1'')', token='abcd');
+FROM quack_query({server}, 'CALL quack_stop('{server}')', token='asdf');
+
+# The server tears itself down asynchronously (the worker running quack_stop can't join the
+# worker pool from inside it). Give the detached teardown a moment to close the listening
+# socket before asserting the address is unreachable.
+sleep 2 seconds
 
 # Server is now gone — a subsequent client request to the same address must
 # fail (any error is fine, as long as it doesn't hang or succeed).
 statement error
-FROM quack_query('quack:127.0.0.1', 'CALL quack_stop(''quack:127.0.0.1'')', token='abcd');
+FROM quack_query({server}, 'CALL quack_stop('{server}')', token='asdf');
 ----
 Failed to send message
 
 # Local-side stop is a no-op (no entry in the registry).
 statement ok
-CALL quack_stop('quack:127.0.0.1');
+CALL quack_stop({server});

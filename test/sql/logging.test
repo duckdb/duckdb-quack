@@ -1,156 +1,299 @@
 # name: test/sql/logging.test
-# description: test RPC and HTTP logging
+# description: test Quack and HTTP logging
 # group: [sql]
 
-require quack
+include test/template/quack_setup.test_template
 
-require httpfs
-
-set ignore_error_messages __none__
-
-
-statement ok con1
-call quack_serve('quack:localhost', token='asdf');
-
-sleep 100 millisecond
-
-
-statement ok con2
+statement ok
 create secret (type quack, token 'asdf')
 
 
 # --- RPC logging ---
 
-statement ok con2
+# enable client-side logging
+statement ok
+CALL enable_logging('Quack');
+
+# enable server-side logging
+statement ok quack_db:quack_server_con
 CALL enable_logging('Quack');
 
 # quack_query should produce RPC log entries
-query I con2
-from quack_query('quack:localhost', 'select 42 as answer')
+query I
+from quack_query({server}, 'select 42 as answer')
 ----
 42
 
 # check that we have RPC logs with correct structure
-query I con2
+query I
 select count(*) > 0 from duckdb_logs where type = 'Quack'
 ----
 true
 
 # check that PREPARE_REQUEST has the query
-query I con2
+query I
 select count(*) > 0 from duckdb_logs_parsed('Quack') where message_type = 'PREPARE_REQUEST' and query = 'select 42 as answer'
 ----
 true
 
+# a query carrying a client_id is logged with its client_id_hash on the server side
+query I
+from quack_query({server}, 'select 42', token='asdf', client_id='logtest_client')
+----
+42
+
+query I quack_db:quack_server_con
+select count(*) > 0 from duckdb_logs_parsed('Quack')
+  where message_type = 'PREPARE_REQUEST' and client_id_hash is not null
+----
+true
+
+# the earlier client_id-less query is logged with a NULL client_id_hash
+query I quack_db:quack_server_con
+select count(*) > 0 from duckdb_logs_parsed('Quack')
+  where message_type = 'PREPARE_REQUEST' and client_id_hash is null
+----
+true
+
 # we no longer need a fetch
-query I con2
+query I
 select count(*) > 0 from duckdb_logs_parsed('Quack') where message_type = 'FETCH_REQUEST'
 ----
 false
 
 # check that rpc_connection_id is set on non-connection messages
-query I con2
+query I
 select count(*) > 0 from duckdb_logs_parsed('Quack') where message_type = 'PREPARE_REQUEST' and quack_connection_id != ''
 ----
 true
 
 # check duration_ms is non-negative
-query I con2
+query I
 select count(*) = 0 from duckdb_logs_parsed('Quack') where duration_ms < 0
 ----
 true
 
 # check server field is populated on client-side logs
-query I con2
+query I
 select count(*) > 0 from duckdb_logs_parsed('Quack') where server is not null and server != ''
 ----
 true
 
 # check response_type is populated
-query I con2
+query I
 select count(*) > 0 from duckdb_logs_parsed('Quack') where response_type = 'PREPARE_RESPONSE'
 ----
 true
 
 # check error field for successful queries is NULL
-query I con2
+query I
 select count(*) = 0 from duckdb_logs_parsed('Quack') where error is not null and server is not null
 ----
 true
 
 # check client_query_id is populated on client-side logs
-query I con2
-select count(*) > 0 from duckdb_logs_parsed('Quack') where client_query_id is not null and server is not null
+query I
+select count(*) > 0 from duckdb_logs_parsed('Quack') where client_query_id is null and server is not null
 ----
 true
 
-mode skip
-
 # check client_query_id is populated on server-side logs
-query I con2
+query I quack_db:quack_server_con
 select count(*) > 0 from duckdb_logs_parsed('Quack') where client_query_id is not null and (server is null or server = '')
 ----
 true
 
-mode unskip
-
 # check server-side logs exist (scope=DATABASE, no server field)
-query I con2
+query I quack_db:quack_server_con
 select count(*) > 0 from duckdb_logs_parsed('Quack') where server is null or server = ''
 ----
 true
 
 # clear logs and test error logging
-statement ok con2
+statement ok
 CALL truncate_duckdb_logs();
 
-statement error con2
-from quack_query('quack:localhost', 'selexxxct 42')
+statement error
+from quack_query({server}, 'selexxxct 42')
 ----
 Error
 
-query I con2
+query I
 select count(*) > 0 from duckdb_logs_parsed('Quack') where response_type = 'ERROR_RESPONSE' and error is not null
 ----
 true
 
 # --- HTTP logging ---
 
-statement ok con2
+statement ok
 CALL truncate_duckdb_logs();
 
-statement ok con2
+statement ok
 CALL disable_logging();
 
-statement ok con2
+statement ok
 CALL enable_logging('HTTP');
 
-query I con2
-from quack_query('quack:localhost', 'select 1')
+query I
+from quack_query({server}, 'select 1')
 ----
 1
 
 # check HTTP logs exist with POST method
-query I con2
+query I
 select count(*) > 0 from duckdb_logs_parsed('HTTP') where request.type = 'POST'
 ----
 true
 
 # check HTTP response status
-query I con2
+query I
 select count(*) > 0 from duckdb_logs_parsed('HTTP') where response.status = 'OK_200'
 ----
 true
 
 # check URL contains /quack
-query I con2
+query I
 select count(*) > 0 from duckdb_logs_parsed('HTTP') where request.url like '%/quack'
 ----
 true
 
-# clean up
-statement ok con2
+# --- HTTP logging (async insert path) ---
+# The async bulk-INSERT SEND_DATA POSTs must show up in the HTTP transport log, not just the Quack log.
+
+# the insert source must be a local table: an INSERT that only reads remote tables and
+# builtin functions (e.g. range()) is pushed down to the server as a whole, so no data is sent
+statement ok
+create table local_log_src(i bigint);
+
+statement ok
+insert into local_log_src select * from range(200000);
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+CALL enable_logging(['HTTP','Quack']);
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+statement ok
+create table rpc.log_t(i bigint);
+
+# UNORDERED (no small dead-range sends) + a small flush so one INSERT makes several async POSTs
+statement ok
+SET preserve_insertion_order=false;
+
+statement ok
+SET quack_send_data_flush_rows=50000;
+
+statement ok
+insert into rpc.log_t select * from local_log_src;
+
+# sanity: the insert actually produced multiple async sends
+query I
+select count(*) > 1 from duckdb_logs_parsed('Quack') where message_type = 'SEND_DATA_REQUEST'
+----
+true
+
+# every SEND_DATA_REQUEST is now visible as a large-body HTTP POST (was ~1-2 of N before the fix)
+query I
+select
+  (select count(*) from duckdb_logs_parsed('Quack') where message_type = 'SEND_DATA_REQUEST')
+  = (select count(*) from duckdb_logs_parsed('HTTP')
+       where request.type = 'POST' and request.request_body_length > 100000)
+----
+true
+
+statement ok
+detach rpc
+
+statement ok
+SET preserve_insertion_order=true;
+
+# --- HTTP logging (async fetch read-ahead path) ---
+# Async FETCH POSTs run on ASYNC-pool threads via PostRaw(nullptr, ...); the logger stamped at
+# client checkout must make them visible in the HTTP transport log, not just the Quack log.
+
+# small batches, so one scan makes many async FETCH round trips
+statement ok quack_db:quack_server_con
+set global quack_prepare_inline_rows=2048;
+
+statement ok quack_db:quack_server_con
+set global quack_target_batch_bytes=65536;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+# hash() makes the batches hard to compress. They are cut on SERIALIZED bytes, so a plain range()
+# would give one batch, PREPARE would inline it, and no FETCH would run.
+query I
+select count(*) from quack_query({server}, 'select hash(range) h from range(50000)')
+----
+50000
+
+# sanity: the scan actually produced multiple async fetches
+query I
+select count(*) > 1 from duckdb_logs_parsed('Quack') where message_type = 'FETCH_REQUEST'
+----
+true
+
+# every Quack-logged request (including all async FETCHes) is visible as an HTTP POST.
+# DISCONNECTs are excluded: they are context-less teardown on pooled clients whose logger stamp
+# was cleared, so they are Quack-logged (db logger) but deliberately not HTTP-logged (see below).
+query I
+select
+  (select count(*) from duckdb_logs_parsed('Quack') where message_type != 'DISCONNECT_MESSAGE')
+  = (select count(*) from duckdb_logs_parsed('HTTP') where request.type = 'POST')
+----
+true
+
+statement ok quack_db:quack_server_con
+reset global quack_prepare_inline_rows;
+
+statement ok quack_db:quack_server_con
+reset global quack_target_batch_bytes;
+
+# --- HTTP logging (context-less teardown scope) ---
+# A pooled client's DISCONNECT POST is context-less and must not be logged under the
+# connection scope of a query that already ran on that pooled connection.
+
+statement ok
 CALL disable_logging();
 
-statement ok con1
-call quack_stop('quack:localhost');
+statement ok
+CALL enable_logging('HTTP');
+
+statement ok
+attach {server} as rpc_td (token 'asdf')
+
+statement ok
+create table rpc_td.teardown_t(i bigint);
+
+statement ok
+insert into rpc_td.teardown_t values (1);
+
+# sanity: the query's own POSTs are connection-scoped (non-null connection id)
+query I
+select count(*) > 0 from duckdb_logs_parsed('HTTP') where request.type = 'POST' and connection_id is not null
+----
+true
+
+# clear the query's logs so only the detach's DISCONNECT traffic follows
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+detach rpc_td
+
+# the DISCONNECT POST must not carry the finished query's connection id
+query I
+select count(*) = 0 from duckdb_logs_parsed('HTTP') where request.type = 'POST' and connection_id is not null
+----
+true
+
+# clean up
+statement ok
+CALL disable_logging();
+
+include test/template/quack_teardown.test_template

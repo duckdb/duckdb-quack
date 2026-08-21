@@ -1,6 +1,9 @@
 #define DUCKDB_EXTENSION_MAIN
 
+#include <cstdlib>
+
 #include "duckdb/catalog/default/default_table_functions.hpp"
+#include "duckdb/common/types/uuid.hpp"
 #include "duckdb/logging/log_manager.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
@@ -13,10 +16,15 @@
 #include "storage/quack_optimizer.hpp"
 
 #include "include/storage/quack_catalog.hpp"
+#include "quack_active_connections.hpp"
 #include "quack_clear_cache.hpp"
+#include "quack_client.hpp"
 #include "quack_extension.hpp"
 #include "quack_log.hpp"
+#include "quack_rebalancer_sink.hpp"
 #include "quack_scan.hpp"
+#include "quack_scan_from_client.hpp"
+#include "quack_cancel.hpp"
 #include "quack_startstop.hpp"
 #include "quack_storage.hpp"
 #include "quack_uri.hpp"
@@ -27,6 +35,13 @@
 namespace duckdb {
 
 static constexpr const char *QUACK_SECRET_TYPE = "quack";
+
+static void ValidateHeartbeatTimeoutSetting(ClientContext &, SetScope, Value &parameter) {
+	if (parameter.IsNull()) {
+		throw InvalidInputException("heartbeat_timeout cannot be null");
+	}
+	QuackClient::ValidateHeartbeatTimeout(parameter.GetValue<idx_t>());
+}
 
 static unique_ptr<BaseSecret> CreateQuackSecretFromConfig(ClientContext &, CreateSecretInput &input) {
 	auto scope = input.scope;
@@ -48,7 +63,7 @@ static unique_ptr<BaseSecret> CreateQuackSecretFromConfig(ClientContext &, Creat
 
 static void RegisterQuackSecretType(ExtensionLoader &loader) {
 	SecretType secret_type;
-	secret_type.name = QUACK_SECRET_TYPE;
+	secret_type.name = Identifier(QUACK_SECRET_TYPE);
 	secret_type.deserializer = KeyValueSecret::Deserialize<KeyValueSecret>;
 	secret_type.default_provider = "config";
 	secret_type.extension = "quack";
@@ -82,18 +97,24 @@ static void QuackDummyAuthorization(const DataChunk &args, ExpressionState &, Ve
 	result.SetValue(0, args.GetValue(1, 0)); // choose life
 }
 
+static void QuackConnectionIdFunc(const DataChunk &args, ExpressionState &state, Vector &result) {
+	auto catalog_name = args.GetValue(0, 0);
+	auto &quack_catalog = QuackCatalog::GetQuackCatalog(state.GetContext(), catalog_name);
+	result.SetValue(0, Value(quack_catalog.GetConnectionId()));
+}
+
 static void QuackIdentifyFun(ClientContext &, TableFunctionInput &, DataChunk &) {
 	// No-op: side effects are in bind.
 }
 
 static unique_ptr<FunctionData> QuackIdentifyBind(ClientContext &ctx, TableFunctionBindInput &input,
-                                                  vector<LogicalType> &return_types, vector<string> &names) {
+                                                  vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto &db_config = DBConfig::GetConfig(ctx);
 	for (auto &kv : input.named_parameters) {
 		if (kv.second.IsNull()) {
 			continue;
 		}
-		db_config.SetOptionByName("whoami_" + kv.first, kv.second);
+		db_config.SetOptionByName(Identifier("whoami_" + kv.first), kv.second);
 	}
 	return_types.emplace_back(LogicalType::BOOLEAN);
 	names.emplace_back("ok");
@@ -115,11 +136,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	loader.RegisterFunction(QuackScanFunction::GetFunction());
 	loader.RegisterFunction(QuackScanByNameFunction::GetFunction());
+	loader.RegisterFunction(QuackScanFromClientFunction::GetFunction());
 	loader.RegisterFunction(QuackServeFunction::GetFunction());
+	loader.RegisterFunction(QuackCancelFunction::GetFunction());
 	loader.RegisterFunction(QuackStopFunction::GetFunction());
 	loader.RegisterFunction(QuackServerListFunction::GetFunction());
 	loader.RegisterFunction(QuackClearCacheFunction::GetFunction());
 	loader.RegisterFunction(GetQuackIdentifyFunction());
+	loader.RegisterFunction(QuacktivityFunction::GetFunction());
 
 	// the default authentication function
 	ScalarFunction quack_check_token("quack_check_token",
@@ -134,6 +158,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                                 LogicalType::VARCHAR, QuackDummyAuthorization);
 	rpc_authorization.SetVolatile();
 	loader.RegisterFunction(rpc_authorization);
+
+	ScalarFunction quack_connection_id("quack_connection_id", {LogicalType::VARCHAR}, LogicalType::VARCHAR,
+	                                   QuackConnectionIdFunc);
+	quack_connection_id.SetVolatile();
+	loader.RegisterFunction(quack_connection_id);
 
 	loader.RegisterFunction(QuackParseUriFunction::GetFunction());
 
@@ -153,8 +182,80 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("quack_authorization_function", "Name of a callback function for authorization",
 	                          LogicalType::VARCHAR, Value("quack_nop_authorization"), nullptr, SetScope::GLOBAL);
 
-	config.AddExtensionOption("quack_fetch_batch_chunks", "Maximum number of DataChunks returned per FETCH response",
-	                          LogicalType::UBIGINT, Value::UBIGINT(12));
+	config.AddExtensionOption("quack_prepare_inline_rows",
+	                          "Rows returned inline in the PREPARE response before the remainder is left to "
+	                          "FETCH; drains whole batches, so it may overshoot to a batch boundary",
+	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_PREPARE_INLINE_ROWS_DEFAULT));
+
+	config.AddExtensionOption("quack_fetch_read_ahead",
+	                          "FETCH requests kept in flight ahead of the scan (0 = number of async threads)",
+	                          LogicalType::UBIGINT, Value::UBIGINT(0));
+
+	config.AddExtensionOption("quack_debug_fetch_delay_ms",
+	                          "DEBUG SETTING: max random delay in ms before a FETCH response is published, "
+	                          "stressing out-of-order batch arrival",
+	                          LogicalType::UBIGINT, Value::UBIGINT(0));
+
+	config.AddExtensionOption("quack_debug_emit_delay_ms",
+	                          "DEBUG SETTING: max random delay in ms before the fetch collector publishes a "
+	                          "batch, stressing out-of-order emission",
+	                          LogicalType::UBIGINT, Value::UBIGINT(0));
+
+	config.AddExtensionOption("quack_target_batch_bytes",
+	                          "Target in-memory size of one rebalanced batch (one wire message payload); "
+	                          "batches are cut when they reach this size",
+	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_TARGET_BATCH_BYTES_DEFAULT));
+
+	config.AddExtensionOption("quack_rebalance_buffer_bytes",
+	                          "Pending (unstamped) bytes the batch rebalancer buffers before gating non-minimum "
+	                          "producers (0 = automatic, memory-manager governed)",
+	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_REBALANCE_BUFFER_BYTES_DEFAULT));
+
+	config.AddExtensionOption("quack_send_data_flush_rows",
+	                          "Rows a thread buffers before flushing one SEND_DATA_REQUEST (0 = default 204800)",
+	                          LogicalType::UBIGINT, Value::UBIGINT(0));
+
+	config.AddExtensionOption("quack_fetch_producer_buffer_bytes",
+	                          "Server-side cap on bytes buffered ahead by the fetch collector; the query "
+	                          "executor blocks when the client falls this far behind",
+	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_FETCH_PRODUCER_BUFFER_BYTES_DEFAULT));
+
+	config.AddExtensionOption("quack_server_max_connections",
+	                          "Maximum concurrent connections the RPC server accepts; beyond this new "
+	                          "connections are refused",
+	                          LogicalType::UBIGINT, Value::UBIGINT(1024), nullptr, SetScope::GLOBAL);
+	config.AddExtensionOption("quack_server_keep_alive_timeout",
+	                          "Seconds an idle keep-alive connection is kept open by the RPC server",
+	                          LogicalType::UBIGINT, Value::UBIGINT(300), nullptr, SetScope::GLOBAL);
+
+	// Default client_id handed to any ATTACH / quack_query that doesn't pass one explicitly
+	string default_client_id;
+	if (const char *env_client_id = std::getenv("QUACK_CLIENT_ID")) {
+		default_client_id = env_client_id;
+	} else {
+		default_client_id = UUID::ToString(UUID::GenerateRandomUUID());
+	}
+	config.AddExtensionOption("quack_default_client_id",
+	                          "client_id used when ATTACH / quack_query omit one; precomputed at load from "
+	                          "$QUACK_CLIENT_ID (empty opts out) or a random per-instance id. Set to '' to opt out.",
+	                          LogicalType::VARCHAR, Value(default_client_id), nullptr, SetScope::GLOBAL);
+	config.AddExtensionOption("quack_default_heartbeat_timeout",
+	                          "Heartbeat lease timeout in seconds requested by clients when ATTACH / quack_query "
+	                          "omit heartbeat_timeout",
+	                          LogicalType::UBIGINT, Value::UBIGINT(60), ValidateHeartbeatTimeoutSetting);
+
+	config.AddExtensionOption("quack_enable_reconnects",
+	                          "Enable reconnect support (clients acknowledge results, the server caches the last "
+	                          "result until acknowledged)",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(false));
+
+	config.AddExtensionOption("quack_cache_max_rows",
+	                          "Maximum rows the server retains in the result cache (0 = unlimited)",
+	                          LogicalType::UBIGINT, Value::UBIGINT(100000), nullptr, SetScope::GLOBAL);
+
+	config.AddExtensionOption("quack_result_ttl",
+	                          "Seconds an idle cached result is kept before it is dropped (0 = never)",
+	                          LogicalType::UBIGINT, Value::UBIGINT(3600), nullptr, SetScope::GLOBAL);
 
 	// Process-wide fallback anchor for whoami().uptime when whoami_started_at isn't set.
 	// Stored as BIGINT epoch-microseconds to stay TZ-invariant regardless of ICU state.

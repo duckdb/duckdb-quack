@@ -28,6 +28,8 @@ public:
 		idx_t active_connections;
 		vector<std::pair<string, string>> info;
 	};
+
+	vector<QuackConnectionSnapshot> GetActiveConnectionSnaps();
 	vector<ServerSnapshot> ListServers();
 
 	static constexpr const char *STORAGE_EXTENSION_KEY = "quack";

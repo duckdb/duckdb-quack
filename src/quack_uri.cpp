@@ -2,7 +2,12 @@
 
 namespace duckdb {
 
-QuackUri::QuackUri(string uri_p, bool ssl_p) : ssl(ssl_p), uri(uri_p) {
+QuackUri::QuackUri(const QuackUri &input_p, uint16_t new_port)
+    : ssl(input_p.Ssl()), ipv6(input_p.IPv6()), host(input_p.Host()), port(new_port) {
+	uri = CanonicalUri();
+}
+
+QuackUri::QuackUri(string uri_p, bool ssl_p) : ssl(ssl_p), uri(std::move(uri_p)) {
 	// we should really instantiate a parser here instead, but alas
 	// whitespace be gone
 	ipv6 = false;
@@ -41,16 +46,16 @@ QuackUri::QuackUri(string uri_p, bool ssl_p) : ssl(ssl_p), uri(uri_p) {
 		auto pos = remainder.find(':');
 		auto port_str = remainder.substr(pos + 1);
 		if (port_str.empty()) {
-			throw InvalidInputException("Invalid Port");
+			throw InvalidInputException("Invalid Port \"\"");
 		}
 		int raw_port;
 		try {
 			raw_port = stoi(port_str);
+			if (raw_port < 0 || raw_port > 65535) {
+				throw InvalidInputException("Invalid Port");
+			}
 		} catch (std::exception &) {
-			throw InvalidInputException("Invalid Port");
-		}
-		if (raw_port < 1 || raw_port > 65535) {
-			throw InvalidInputException("Invalid Port");
+			throw InvalidInputException("Invalid Port \"%s\" - must be between 0 and 65535", port_str);
 		}
 		port = raw_port;
 		remainder = remainder.substr(0, pos);
@@ -59,7 +64,10 @@ QuackUri::QuackUri(string uri_p, bool ssl_p) : ssl(ssl_p), uri(uri_p) {
 	if (!ipv6) {
 		host = remainder;
 	}
-	http = StringUtil::Format("http%s://%s:%d", ssl ? "s" : "", ipv6 ? "[" + host + "]" : host, port);
+}
+
+string QuackUri::Http() const {
+	return StringUtil::Format("http%s://%s:%d", ssl ? "s" : "", ipv6 ? "[" + host + "]" : host, port);
 }
 
 static void QuackUriParser(const DataChunk &args, ExpressionState &, Vector &result) {
@@ -78,13 +86,16 @@ static void QuackUriParser(const DataChunk &args, ExpressionState &, Vector &res
 
 // just for testing
 ScalarFunction QuackParseUriFunction::GetFunction() {
-	return ScalarFunction("quack_uri_parser", {/* uri */ LogicalType::VARCHAR, /* ssl */ LogicalType::BOOLEAN},
-	                      LogicalType::STRUCT({{"host", LogicalType::VARCHAR},
-	                                           {"port", LogicalType::USMALLINT},
-	                                           {"ipv6", LogicalType::BOOLEAN},
-	                                           {"ssl", LogicalType::BOOLEAN},
-	                                           {"url", LogicalType::VARCHAR}}),
-	                      QuackUriParser);
+	ScalarFunction function("quack_uri_parser", {/* uri */ LogicalType::VARCHAR, /* ssl */ LogicalType::BOOLEAN},
+	                        LogicalType::STRUCT({{"host", LogicalType::VARCHAR},
+	                                             {"port", LogicalType::USMALLINT},
+	                                             {"ipv6", LogicalType::BOOLEAN},
+	                                             {"ssl", LogicalType::BOOLEAN},
+	                                             {"url", LogicalType::VARCHAR}}),
+	                        QuackUriParser);
+	// parsing rejects malformed URIs at runtime, so constant folding must not treat a throw as internal
+	function.SetFallible();
+	return function;
 }
 
 } // namespace duckdb

@@ -1,4 +1,5 @@
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/client_context.hpp"
 
 #include "quack_startstop.hpp"
 #include "quack_storage.hpp"
@@ -15,7 +16,7 @@ struct QuackStartStopFunctionData : public TableFunctionData {
 };
 
 static unique_ptr<FunctionData> QuackServeBind(ClientContext &context, TableFunctionBindInput &input,
-                                               vector<LogicalType> &return_types, vector<string> &names) {
+                                               vector<LogicalType> &return_types, vector<Identifier> &names) {
 #ifdef __EMSCRIPTEN__
 	throw NotImplementedException("quack_serve is currently not implemented for the wasm platform, consider connecting "
 	                              "to already available endpoint");
@@ -71,12 +72,14 @@ static void QuackServe(ClientContext &context, TableFunctionInput &data_p, DataC
 		return;
 	}
 
-	QuackStorageExtensionInfo::GetState(*context.db).CreateServer(context, bind_data.listen_uri, bind_data.token);
-	output.SetValue(0, 0, bind_data.listen_uri.Uri());
-	output.SetValue(1, 0, bind_data.listen_uri.Http());
-	output.SetValue(2, 0, bind_data.token);
+	auto &server =
+	    QuackStorageExtensionInfo::GetState(*context.db).CreateServer(context, bind_data.listen_uri, bind_data.token);
+	auto &actual_uri = server.ListenUri();
+	output.data[0].SetValue(0, actual_uri.Uri());
+	output.data[1].SetValue(0, actual_uri.Http());
+	output.data[2].SetValue(0, bind_data.token);
 
-	output.SetCardinality(1);
+	output.SetChildCardinality(1);
 	bind_data.finished = true;
 }
 
@@ -94,7 +97,7 @@ TableFunctionSet QuackServeFunction::GetFunction() {
 }
 
 static unique_ptr<FunctionData> QuackStopBind(ClientContext &context, TableFunctionBindInput &input,
-                                              vector<LogicalType> &return_types, vector<string> &names) {
+                                              vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto bind_data = make_uniq<QuackStartStopFunctionData>();
 	auto &uri_value = input.inputs[0];
 	if (uri_value.IsNull() || uri_value.GetValue<string>().empty()) {
@@ -119,7 +122,7 @@ static void QuackStop(ClientContext &context, TableFunctionInput &data_p, DataCh
 	} else {
 		output.data[0].SetValue(0, StringUtil::Format("No server found listening on %s", bind_data.listen_uri.Uri()));
 	}
-	output.SetCardinality(1);
+	output.SetChildCardinality(1);
 	bind_data.finished = true;
 }
 
@@ -132,7 +135,7 @@ struct QuackServerListFunctionData : public TableFunctionData {
 };
 
 static unique_ptr<FunctionData> QuackServerListBind(ClientContext &context, TableFunctionBindInput &input,
-                                                    vector<LogicalType> &return_types, vector<string> &names) {
+                                                    vector<LogicalType> &return_types, vector<Identifier> &names) {
 	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("listen_uri");
 	return_types.emplace_back(LogicalType::VARCHAR);
@@ -156,11 +159,11 @@ static void QuackServerList(ClientContext &context, TableFunctionInput &data_p, 
 	auto snapshots = QuackStorageExtensionInfo::GetState(*context.db).ListServers();
 	idx_t row = 0;
 	for (auto &s : snapshots) {
-		output.SetValue(0, row, Value(s.listen_uri));
-		output.SetValue(1, row, Value(s.listen_url));
-		output.SetValue(2, row, Value(s.host));
-		output.SetValue(3, row, Value::USMALLINT(s.port));
-		output.SetValue(4, row, Value::UBIGINT(s.active_connections));
+		output.data[0].SetValue(row, Value(s.listen_uri));
+		output.data[1].SetValue(row, Value(s.listen_url));
+		output.data[2].SetValue(row, Value(s.host));
+		output.data[3].SetValue(row, Value::USMALLINT(s.port));
+		output.data[4].SetValue(row, Value::UBIGINT(s.active_connections));
 		vector<Value> keys;
 		vector<Value> values;
 		keys.reserve(s.info.size());
@@ -169,11 +172,11 @@ static void QuackServerList(ClientContext &context, TableFunctionInput &data_p, 
 			keys.emplace_back(Value(kv.first));
 			values.emplace_back(Value(kv.second));
 		}
-		output.SetValue(5, row,
-		                Value::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR, std::move(keys), std::move(values)));
+		output.data[5].SetValue(
+		    row, Value::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR, std::move(keys), std::move(values)));
 		row++;
 	}
-	output.SetCardinality(row);
+	output.SetChildCardinality(row);
 	bind_data.finished = true;
 }
 

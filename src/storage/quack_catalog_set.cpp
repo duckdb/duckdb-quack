@@ -44,10 +44,10 @@ optional_ptr<CatalogEntry> QuackCatalogSet::CreateEntry(unique_ptr<CatalogEntry>
 	lock_guard<mutex> l(entry_lock);
 	auto &entry_name = entry->name;
 	if (on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT) {
-		entries[entry_name] = std::move(entry);
-		return entries[entry_name].get();
+		entries[entry_name.GetIdentifierName()] = std::move(entry);
+		return entries[entry_name.GetIdentifierName()].get();
 	} else {
-		auto inserted_entry = entries.insert(make_pair(entry_name, std::move(entry)));
+		auto inserted_entry = entries.insert(make_pair(entry_name.GetIdentifierName(), std::move(entry)));
 		return inserted_entry.first->second.get();
 	}
 }

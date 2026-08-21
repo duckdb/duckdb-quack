@@ -22,7 +22,7 @@ void GatherQuackScans(LogicalOperator &op, QuackOperators &result) {
 	if (op.type == LogicalOperatorType::LOGICAL_GET) {
 		auto &get = op.Cast<LogicalGet>();
 		auto &table_scan = get.function;
-		if (QuackCatalog::IsQuackScan(table_scan.name)) {
+		if (QuackCatalog::IsQuackScan(table_scan.name.GetIdentifierName())) {
 			// add a quack scan
 			auto &bind_data = get.bind_data->Cast<QuackScanBindData>();
 			auto connection_id = bind_data.client_connection->ConnectionId();

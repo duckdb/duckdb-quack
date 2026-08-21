@@ -1,0 +1,57 @@
+# name: test/sql/heartbeat_config.test
+# description: heartbeat timeout configuration is available on both connection paths and rejects null or zero values
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+query I
+SELECT current_setting('quack_default_heartbeat_timeout');
+----
+60
+
+# An explicit timeout is accepted by the one-shot connection path.
+query I
+FROM quack_query({server}, 'SELECT 42', token='asdf', heartbeat_timeout=30);
+----
+42
+
+# ATTACH accepts the same per-client option.
+statement ok
+ATTACH {server} AS heartbeat_client (token 'asdf', heartbeat_timeout 45);
+
+query I
+FROM quack_query_by_name('heartbeat_client', 'SELECT 42');
+----
+42
+
+statement ok
+DETACH heartbeat_client;
+
+statement error
+FROM quack_query({server}, 'SELECT 42', token='asdf', heartbeat_timeout=NULL);
+----
+heartbeat_timeout cannot be null
+
+statement error
+FROM quack_query({server}, 'SELECT 42', token='asdf', heartbeat_timeout=0);
+----
+heartbeat_timeout must be greater than zero
+
+# Values that cannot be converted safely to the heartbeat interval are rejected at configuration time.
+statement error
+FROM quack_query({server}, 'SELECT 42', token='asdf', heartbeat_timeout=18446744073709551615::UBIGINT);
+----
+heartbeat_timeout is too large
+
+# Invalid configured defaults are rejected immediately.
+statement error
+SET quack_default_heartbeat_timeout=0;
+----
+heartbeat_timeout must be greater than zero
+
+statement error
+SET quack_default_heartbeat_timeout=18446744073709551615;
+----
+heartbeat_timeout is too large
+
+include test/template/quack_teardown.test_template

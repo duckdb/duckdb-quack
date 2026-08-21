@@ -2,26 +2,15 @@
 # description: test filter and projection pushdown for RPC catalog scans
 # group: [sql]
 
-require quack
+include test/template/quack_setup.test_template
 
-require httpfs
-
-set ignore_error_messages __none__
-
-statement ok con1
+statement ok quack_db:quack_server_con
 create table test_data as select range i, range * 2 as doubled, 'name_' || range::varchar as name from range(10000);
 
-foreach server 'quack:localhost'
-
-statement ok con1
-call quack_serve({server}, token='asdf');
-
-
-statement ok con2
+statement ok
 create secret (type quack, token 'asdf')
 
-
-statement ok con2
+statement ok
 attach {server} as rpc
 
 # Verify projection pushdown: selecting one column should only project that column
@@ -97,10 +86,7 @@ select max(i) from rpc.main.test_data;
 ----
 9999
 
-statement ok con2
+statement ok
 detach rpc;
 
-statement ok con1
-call quack_stop({server});
-
-endloop
+include test/template/quack_teardown.test_template

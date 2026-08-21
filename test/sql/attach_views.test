@@ -2,22 +2,13 @@
 # description: test attaching views
 # group: [sql]
 
-require quack
+include test/template/quack_setup.test_template
 
-require httpfs
-
-set ignore_error_messages __none__
-
-statement ok
+statement ok quack_db:quack_server_con
 create schema moo;
 
-statement ok
+statement ok quack_db:quack_server_con
 create view fuu as select 42 i, 'hello world' j
-
-foreach server 'quack:localhost'
-
-statement ok con1
-call quack_serve({server}, token='asdf');
 
 query II con2
 from quack_query({server}, 'select * from fuu', token='asdf')
@@ -48,7 +39,4 @@ FROM rpc.fuu
 ----
 does not exist
 
-statement ok con1
-call quack_stop({server});
-
-endloop
+include test/template/quack_teardown.test_template

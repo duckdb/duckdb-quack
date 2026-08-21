@@ -2,18 +2,9 @@
 # description: test CREATE TABLE AS over rpc attach
 # group: [sql]
 
-require quack
+include test/template/quack_setup.test_template
 
-require httpfs
-
-set ignore_error_messages __none__
-
-foreach server 'quack:localhost'
-
-statement ok con1
-call quack_serve({server}, token='asdf');
-
-statement ok con2
+statement ok
 attach {server} as rpc (token 'asdf')
 
 statement ok
@@ -30,7 +21,4 @@ drop table rpc.t;
 statement ok con2
 detach rpc;
 
-statement ok con1
-call quack_stop({server});
-
-endloop
+include test/template/quack_teardown.test_template

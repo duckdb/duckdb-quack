@@ -1,0 +1,49 @@
+# name: test/sql/reconnects.test
+# description: test quack_enable_reconnects sends an ACKNOWLEDGEMENT after the last fetch
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok quack_db:quack_server_con
+CREATE TABLE tbl AS SELECT range AS i FROM range(100);
+
+statement ok
+CREATE SECRET (TYPE quack, TOKEN 'asdf');
+
+statement ok
+ATTACH {server} AS remote;
+
+statement ok
+CALL enable_logging('Quack');
+
+query I
+FROM remote.tbl LIMIT 3;
+----
+0
+1
+2
+
+query I
+SELECT count(*) > 0 FROM duckdb_logs_parsed('Quack') WHERE message_type = 'ACKNOWLEDGEMENT' AND response_type = 'SUCCESS_RESPONSE'
+----
+false
+
+statement ok
+SET quack_enable_reconnects = true;
+
+query I
+FROM remote.tbl LIMIT 3;
+----
+0
+1
+2
+
+query I
+SELECT count(*) > 0 FROM duckdb_logs_parsed('Quack') WHERE message_type = 'ACKNOWLEDGEMENT' AND response_type = 'SUCCESS_RESPONSE'
+----
+true
+
+statement ok
+DETACH remote;
+
+include test/template/quack_teardown.test_template

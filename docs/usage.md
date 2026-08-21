@@ -83,6 +83,12 @@ the client.
 ATTACH 'quack:localhost' AS rpc;
 -- or without TLS:
 ATTACH 'quack:localhost' AS rpc (disable_ssl true);
+-- with an explicit token, client id, and requested heartbeat lease:
+ATTACH 'quack:localhost' AS rpc (
+    token 'super_secret', client_id 'my_client', heartbeat_timeout 30
+);
+-- expose only one remote schema:
+ATTACH 'quack:localhost' AS rpc (schema 'main');
 ```
 
 Once attached, remote tables look local:
@@ -150,12 +156,23 @@ SET rpc_default_token = '<token-from-rpc_start>';
 | `rpc_uri_parser(uri, ssl)`   | Parse an RPC URI into `{host, port, ipv6, ssl, url}`.               |
 | `rpc_auth_token(sid, token)` | Default authentication callback; compares against `rpc_default_token`. |
 | `rpc_dummy_authorization(sid, query)` | Default authorization callback; always allows.              |
+| `quack_clear_cache([catalog])` | Refresh every attached Quack catalog, or only `catalog` when provided. |
 
 ### `ATTACH` options
 
-| Option         | Type    | Default | Description                      |
-|---------------|---------|---------|----------------------------------|
-| `disable_ssl` | BOOLEAN | `false` | Use plain HTTP instead of HTTPS. |
+| Option              | Type    | Default                               | Description                                                                                                                                                                                                                                                                                                                                                                                                  |
+|---------------------|---------|---------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `disable_ssl`       | BOOLEAN | `false`                               | Use plain HTTP instead of HTTPS.                                                                                                                                                                                                                                                                                                                                                                             |
+| `token`             | VARCHAR | quack secret / `rpc_default_token`    | Auth token sent to the server; overrides any matching quack secret.                                                                                                                                                                                                                                                                                                                                          |
+| `schema`            | VARCHAR | all schemas                           | Load only the named remote schema into the attached catalog. This limits catalog visibility, not server authorization.                                                                                                                                                                                                                                                                                       |
+| `client_id`         | VARCHAR | `quack_default_client_id`             | Opaque client identifier; must be empty or at least 4 characters. Defaults to the `quack_default_client_id` setting when omitted — pass `''` to opt a single connection out. The server derives a stable per-client hash `HMAC-SHA256(server_hmac_key, client_id)` (keyed with a private per-server key, so it is not reproducible by clients), exposed as `client_id_hash` in `quack_active_connections()`. |
+| `heartbeat_timeout` | UBIGINT | `quack_default_heartbeat_timeout`     | Logical-client lease timeout in seconds.                                                                                                                                                                                                                                                                                                                                                                     |
+
+The heartbeat works as follows: A `heartbeat_timeout` is set per logical connection. Any valid RPC renews the lease. 
+An otherwise-idle client sends a heartbeat after approximately one third of the accepted timeout,
+with jitter to avoid synchronized traffic.
+Transient heartbeat failures do not immediately invalidate a connection, the server expires it only after the accepted 
+timeout has elapsed without valid traffic.
 
 ---
 
@@ -182,6 +199,7 @@ Fields on each entry:
 |--------------------|--------------------------------------------------------------------|
 | `message_type`      | Request type: `PREPARE_REQUEST`, `FETCH_REQUEST`, etc.             |
 | `rpc_connection_id` | Server-issued connection id (stable across requests in one ATTACH).|
+| `client_id_hash`    | Per-client reconnect hash `HMAC-SHA256(server_hmac_key, client_id)`; NULL if no `client_id`.|
 | `client_query_id`   | Monotonic id assigned by the client; correlates client/server logs.|
 | `query`             | SQL payload for `PREPARE_REQUEST`s.                                |
 | `server`            | HTTP(S) URL on client-side logs; NULL on server-side logs.         |
