@@ -208,6 +208,7 @@ HttpQuackServer::HttpQuackServer(ClientContext &context_p, const QuackUri &uri_p
 	server->set_keep_alive_max_count(1 << 20);
 	server->set_keep_alive_timeout(NumericCast<time_t>(keep_alive_timeout));
 	server->set_tcp_nodelay(true);
+	server->set_socket_options([](socket_t sock) {});
 
 	server->Get("/", [=](const duckdb_httplib::Request &, duckdb_httplib::Response &res) {
 		res.set_content("This is a DuckDB Quack RPC endpoint. Use ATTACH 'quack:...' to connect here.\n", "text/plain");
