@@ -22,8 +22,8 @@ QuackStorageExtensionInfo &QuackStorageExtensionInfo::GetState(const DatabaseIns
 }
 
 QuackServer &QuackStorageExtensionInfo::CreateServer(ClientContext &context, const QuackUri &listen_uri,
-                                                     const string &token) {
-	auto server = make_uniq<HttpQuackServer>(context, listen_uri, token);
+                                                     const string &token, const QuackTlsConfig &tls) {
+	auto server = make_uniq<HttpQuackServer>(context, listen_uri, token, tls);
 
 	auto &actual_uri = server->ListenUri();
 	auto key = actual_uri.CanonicalUri();

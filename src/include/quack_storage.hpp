@@ -17,7 +17,8 @@ class QuackStorageExtensionInfo : public StorageExtensionInfo {
 public:
 	static QuackStorageExtensionInfo &GetState(const DatabaseInstance &instance);
 
-	QuackServer &CreateServer(ClientContext &context, const QuackUri &listen_uri, const string &token);
+	QuackServer &CreateServer(ClientContext &context, const QuackUri &listen_uri, const string &token,
+	                          const QuackTlsConfig &tls);
 	bool StopServer(ClientContext &context, const QuackUri &listen_uri);
 
 	struct ServerSnapshot {

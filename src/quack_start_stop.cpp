@@ -13,6 +13,7 @@ struct QuackStartStopFunctionData : public TableFunctionData {
 	bool finished = false;
 	QuackUri listen_uri;
 	string token;
+	QuackTlsConfig tls;
 };
 
 static unique_ptr<FunctionData> QuackServeBind(ClientContext &context, TableFunctionBindInput &input,
@@ -37,7 +38,24 @@ static unique_ptr<FunctionData> QuackServeBind(ClientContext &context, TableFunc
 	auto allow_other_hostname = input.named_parameters.find("allow_other_hostname") != input.named_parameters.end() &&
 	                            input.named_parameters["allow_other_hostname"].GetValue<bool>();
 
-	bind_data->listen_uri = QuackUri(listen_uri, /* the server will always listen without SSL */ false);
+	// Both halves or neither: a certificate without its key (or the reverse) is a misconfiguration that
+	// would otherwise quietly fall back to serving in plaintext.
+	auto cert_entry = input.named_parameters.find("tls_cert");
+	auto key_entry = input.named_parameters.find("tls_key");
+	auto has_cert = cert_entry != input.named_parameters.end() && !cert_entry->second.IsNull();
+	auto has_key = key_entry != input.named_parameters.end() && !key_entry->second.IsNull();
+	if (has_cert != has_key) {
+		throw InvalidInputException("tls_cert and tls_key must be given together");
+	}
+	if (has_cert) {
+		bind_data->tls.cert_path = cert_entry->second.GetValue<string>();
+		bind_data->tls.key_path = key_entry->second.GetValue<string>();
+		if (bind_data->tls.cert_path.empty() || bind_data->tls.key_path.empty()) {
+			throw InvalidInputException("tls_cert and tls_key must not be empty");
+		}
+	}
+
+	bind_data->listen_uri = QuackUri(listen_uri, bind_data->tls.Enabled());
 	if (!allow_other_hostname && !bind_data->listen_uri.IsLocal()) {
 		throw InvalidInputException(
 		    "Only localhost is allowed as a Quack RPC hostname by default, set allow_other_hostname=true to override. "
@@ -72,8 +90,8 @@ static void QuackServe(ClientContext &context, TableFunctionInput &data_p, DataC
 		return;
 	}
 
-	auto &server =
-	    QuackStorageExtensionInfo::GetState(*context.db).CreateServer(context, bind_data.listen_uri, bind_data.token);
+	auto &server = QuackStorageExtensionInfo::GetState(*context.db)
+	                   .CreateServer(context, bind_data.listen_uri, bind_data.token, bind_data.tls);
 	auto &actual_uri = server.ListenUri();
 	output.data[0].SetValue(0, actual_uri.Uri());
 	output.data[1].SetValue(0, actual_uri.Http());
@@ -89,6 +107,8 @@ TableFunctionSet QuackServeFunction::GetFunction() {
 	fun.named_parameters["disable_ssl"] = LogicalType::BOOLEAN;
 	fun.named_parameters["allow_other_hostname"] = LogicalType::BOOLEAN;
 	fun.named_parameters["token"] = LogicalType::VARCHAR;
+	fun.named_parameters["tls_cert"] = LogicalType::VARCHAR;
+	fun.named_parameters["tls_key"] = LogicalType::VARCHAR;
 	set.AddFunction(fun);
 	fun.arguments.clear();
 	set.AddFunction(fun);

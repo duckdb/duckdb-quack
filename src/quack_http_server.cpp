@@ -17,7 +17,7 @@ namespace duckdb {
 //! httplib hands each accepted socket to the task queue as one task spanning the connection's whole
 //! keep-alive lifetime, so a fixed pool deadlocks once idle connections pin every worker. This pool
 //! grows a thread per connection up to `max_threads` and sheds at the cap (clients retry).
-class ElasticThreadPool final : public duckdb_httplib::TaskQueue {
+class ElasticThreadPool final : public quack_httplib::TaskQueue {
 public:
 	explicit ElasticThreadPool(idx_t max_threads_p) : max_threads(max_threads_p) {
 	}
@@ -186,9 +186,26 @@ void HttpQuackServer::ListenThread(HttpQuackServer *server, const string &listen
 	}
 }
 
-HttpQuackServer::HttpQuackServer(ClientContext &context_p, const QuackUri &uri_p, const string &token_p)
+HttpQuackServer::HttpQuackServer(ClientContext &context_p, const QuackUri &uri_p, const string &token_p,
+                                 const QuackTlsConfig &tls_p)
     : QuackServer(context_p, uri_p, token_p) {
-	server = make_uniq<duckdb_httplib::Server>();
+	if (tls_p.Enabled()) {
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+		auto ssl_server = make_uniq<quack_httplib::SSLServer>(tls_p.cert_path.c_str(), tls_p.key_path.c_str());
+		// SSLServer swallows a bad certificate or key and simply reports itself invalid, which would
+		// otherwise surface much later as a bind failure with no hint at the real cause.
+		if (!ssl_server->is_valid()) {
+			throw IOException("Failed to load the TLS certificate (%s) or private key (%s) - check that both "
+			                  "exist, are readable, are PEM encoded, and belong together",
+			                  tls_p.cert_path, tls_p.key_path);
+		}
+		server = std::move(ssl_server);
+#else
+		throw NotImplementedException("This build of the quack extension was compiled without TLS support");
+#endif
+	} else {
+		server = make_uniq<quack_httplib::Server>();
+	}
 
 	// The elastic pool makes idle cached client connections cheap (one sleeping thread each,
 	// reaped on close) and turns pool exhaustion into load shedding instead of deadlock.
@@ -209,21 +226,21 @@ HttpQuackServer::HttpQuackServer(ClientContext &context_p, const QuackUri &uri_p
 	server->set_keep_alive_timeout(NumericCast<time_t>(keep_alive_timeout));
 	server->set_tcp_nodelay(true);
 
-	server->Get("/", [=](const duckdb_httplib::Request &, duckdb_httplib::Response &res) {
+	server->Get("/", [=](const quack_httplib::Request &, quack_httplib::Response &res) {
 		res.set_content("This is a DuckDB Quack RPC endpoint. Use ATTACH 'quack:...' to connect here.\n", "text/plain");
 	});
 
 	// TODO: this is very liberal, and there might be reasonable cases to restrict to trusted domains (note, this is
 	// only relevant from within a Web browser, since other actors can just ignore the CORS convention
-	server->Options("/quack", [](const duckdb_httplib::Request &, duckdb_httplib::Response &res) {
+	server->Options("/quack", [](const quack_httplib::Request &, quack_httplib::Response &res) {
 		res.set_header("Access-Control-Allow-Origin", "*");
 		res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
 		res.set_header("Access-Control-Allow-Headers", "*");
 		res.status = 204;
 	});
 
-	server->Post("/quack", [&](const duckdb_httplib::Request &, duckdb_httplib::Response &res,
-	                           const duckdb_httplib::ContentReader &content_reader) {
+	server->Post("/quack", [&](const quack_httplib::Request &, quack_httplib::Response &res,
+	                           const quack_httplib::ContentReader &content_reader) {
 		res.set_header("Access-Control-Allow-Origin", "*");
 		MemoryStream stream;
 		content_reader([&](const char *data, size_t data_length) {
@@ -239,7 +256,7 @@ HttpQuackServer::HttpQuackServer(ClientContext &context_p, const QuackUri &uri_p
 			auto size = raw->GetPosition();
 			shared_ptr<QuackMessage> owned(std::move(response));
 			res.set_content_provider(size, "application/vnd.duckdb",
-			                         [owned, data](size_t offset, size_t length, duckdb_httplib::DataSink &sink) {
+			                         [owned, data](size_t offset, size_t length, quack_httplib::DataSink &sink) {
 				                         sink.write(data + offset, length);
 				                         return true;
 			                         });

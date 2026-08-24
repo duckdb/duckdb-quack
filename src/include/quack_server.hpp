@@ -18,6 +18,10 @@
 
 namespace duckdb {
 
+//! httplib lives in a different namespace depending on whether it was compiled with OpenSSL, so spell it
+//! once here rather than at every use site.
+namespace quack_httplib = CPPHTTPLIB_NAMESPACE;
+
 class ClientContext;
 class QuackMessage;
 class Connection;
@@ -29,6 +33,16 @@ class PreparedStatement;
 class EncryptionState;
 class QuackDataStream;
 class ErrorData;
+
+//! Paths to the certificate chain and private key the server presents. Empty means listen in plaintext.
+struct QuackTlsConfig {
+	string cert_path;
+	string key_path;
+
+	bool Enabled() const {
+		return !cert_path.empty();
+	}
+};
 
 enum class QuackQueryState : uint8_t { IDLE, ACTIVE, FINISHED, CANCELLED, QUACK_ERROR };
 
@@ -241,7 +255,8 @@ private:
 
 class HttpQuackServer : public QuackServer {
 public:
-	HttpQuackServer(ClientContext &context_p, const QuackUri &uri_p, const string &token_p);
+	HttpQuackServer(ClientContext &context_p, const QuackUri &uri_p, const string &token_p,
+	                const QuackTlsConfig &tls_p);
 
 	void StopAccepting() override;
 	void Close() override;
@@ -253,7 +268,7 @@ private:
 
 	unique_ptr<QuackMessage> ReadMessage(MemoryStream &read_stream);
 
-	unique_ptr<duckdb_httplib::Server> server;
+	unique_ptr<quack_httplib::Server> server;
 	mutex state_lock;
 	atomic<QuackServerState> server_state {QuackServerState::UNINITIALIZED};
 };
