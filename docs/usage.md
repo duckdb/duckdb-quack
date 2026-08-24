@@ -247,11 +247,57 @@ All settings are regular DuckDB session/global options. Set with
 | Setting                         | Type    | Default                   | Description                                                             |
 |---------------------------------|---------|---------------------------|-------------------------------------------------------------------------|
 | `rpc_authentication_function`   | VARCHAR | `rpc_auth_token`          | Name of a 2-arg scalar function `(sid, token) -> BOOLEAN` used by the server to authenticate clients. |
-| `rpc_authorization_function`    | VARCHAR | `rpc_dummy_authorization` | Name of a 2-arg scalar function `(sid, query) -> BOOLEAN` used by the server to authorize each query. |
+| `rpc_authorization_function`    | VARCHAR | `rpc_dummy_authorization` | Name of a 2-arg scalar function `(sid, query)` used by the server to authorize each query. See [Return values](#authorization-callback-return-values). |
 | `rpc_default_token`             | VARCHAR | *(unset)*                 | Shared secret. The server generates one on `rpc_start`; clients must set it before connecting. |
 
 You can plug in your own auth by creating any scalar function with the
 expected signature and pointing the setting at it.
+
+#### Authorization callback return values
+
+The server interprets the callback's return value as follows
+(`test/sql/authz_return_value.test` pins each case):
+
+| Return | Effect |
+|--------|--------|
+| `true` | Run the client's query unchanged |
+| `false` | Reject with `Authorization failed` |
+| `NULL` | Reject with `Authorization failed` |
+| `VARCHAR` | **Run the returned SQL instead of the client's query** |
+| any other type | Run the client's query unchanged (no rejection) |
+
+The `VARCHAR` form lets a policy *narrow* a query rather than reject it — returning a
+more restrictive statement in place of the one the client sent. That is the only way to
+filter **rows**, which a `BOOLEAN` cannot do.
+
+```sql
+-- illustrative only: see the warnings below before using this shape
+CREATE MACRO authz_narrow(sid, query) AS 'SELECT id, grp FROM t WHERE grp = ''a''';
+SET GLOBAL rpc_authorization_function = 'authz_narrow';
+```
+
+Three things to know before relying on it:
+
+- **A `VARCHAR` return can never deny.** The guard checks only `NULL` and a false
+  `BOOLEAN`, so a policy that always returns SQL cannot reject anything — it can only
+  substitute. To reject, return SQL that errors, or a `BOOLEAN`.
+- **The rewrite applies to query execution only.** `SEND_DATA_REQUEST` (client-side
+  inserts) invokes the same callback with a synthesized `INSERT INTO <schema>.<table>
+  VALUES (NULL)` and applies the deny guard alone. A `VARCHAR` return is ignored there and
+  the insert proceeds — so a policy built entirely on rewriting does not gate writes.
+- **Deciding what to rewrite by matching on the query text is not a security boundary.**
+  Aliases, whitespace, comments and qualified names all defeat substring matching. If the
+  decision matters, parse the query — `json_serialize_sql()` is available inside the
+  callback — rather than matching on the raw string.
+
+Note also that `quack_active_connections()` and the server log report the query **as the
+client sent it**, not the rewritten statement that ran — so a rewrite is invisible to the
+audit trail.
+
+If you rewrite the catalogue queries a client issues on `ATTACH` (`duckdb_tables()`,
+`duckdb_views()`, `information_schema.schemata`), preserve their column list and order:
+the client reads those results positionally and a different projection breaks the
+`ATTACH` with an unrelated-looking error.
 
 ### FETCH batching (server-side)
 

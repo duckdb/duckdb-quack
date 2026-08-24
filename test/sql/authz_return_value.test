@@ -1,0 +1,163 @@
+# name: test/sql/authz_return_value.test
+# description: pins how the server interprets quack_authorization_function's return value
+# group: [sql]
+
+# The callback is documented as `(sid, query) -> BOOLEAN`, but quack_server.cpp treats a
+# VARCHAR return as the SQL to execute. These cases pin what the server does today so the
+# behaviour cannot change silently, whichever way it is meant to go.
+
+include test/template/quack_setup.test_template
+
+# --- BOOLEAN: allow / deny, the documented contract ---
+
+statement ok quack_db:quack_server_con
+CREATE MACRO authz_true(sid, query) AS true;
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_authorization_function = 'authz_true';
+
+query I
+FROM quack_query({server}, 'select 42', token='asdf');
+----
+42
+
+statement ok quack_db:quack_server_con
+CREATE MACRO authz_false(sid, query) AS false;
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_authorization_function = 'authz_false';
+
+statement error
+FROM quack_query({server}, 'select 42', token='asdf');
+----
+
+# --- NULL: fails closed ---
+
+statement ok quack_db:quack_server_con
+CREATE MACRO authz_null(sid, query) AS CAST(NULL AS VARCHAR);
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_authorization_function = 'authz_null';
+
+statement error
+FROM quack_query({server}, 'select 42', token='asdf');
+----
+
+# --- VARCHAR: the returned string is executed in place of the client's query ---
+
+statement ok quack_db:quack_server_con
+CREATE MACRO authz_rewrite(sid, query) AS 'SELECT 99';
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_authorization_function = 'authz_rewrite';
+
+query I
+FROM quack_query({server}, 'select 42', token='asdf');
+----
+99
+
+# Returning the query unchanged is a passthrough.
+statement ok quack_db:quack_server_con
+CREATE MACRO authz_passthrough(sid, query) AS CAST(query AS VARCHAR);
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_authorization_function = 'authz_passthrough';
+
+query I
+FROM quack_query({server}, 'select 42', token='asdf');
+----
+42
+
+# A rewrite can narrow the result: the client asks for every row, the server returns a
+# subset. This is the property that makes the VARCHAR form interesting.
+statement ok quack_db:quack_server_con
+CREATE TABLE t(id INTEGER, grp VARCHAR);
+
+statement ok quack_db:quack_server_con
+INSERT INTO t VALUES (1, 'a'), (2, 'b'), (3, 'a');
+
+statement ok quack_db:quack_server_con
+CREATE MACRO authz_narrow(sid, query) AS
+    'SELECT id, grp FROM t WHERE grp = ''a'' ORDER BY id';
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_authorization_function = 'authz_narrow';
+
+query II
+FROM quack_query({server}, 'SELECT id, grp FROM t ORDER BY id', token='asdf');
+----
+1	a
+3	a
+
+# --- Fail-open cases. Both currently ALLOW; pinned so a change is deliberate. ---
+
+# 1. A VARCHAR return can never deny. quack_server.cpp checks IsNull() or a false BOOLEAN,
+#    so a policy that always returns SQL has no way to reject a query -- it can only
+#    substitute one. Rejecting means returning SQL that itself errors.
+statement ok quack_db:quack_server_con
+CREATE MACRO authz_varchar_deny_attempt(sid, query) AS 'SELECT 1';
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_authorization_function = 'authz_varchar_deny_attempt';
+
+query I
+FROM quack_query({server}, 'DROP TABLE t', token='asdf');
+----
+1
+
+# ...and t is still there: the substitution ran instead of the drop.
+query I quack_db:quack_server_con
+SELECT count(*) FROM t;
+----
+3
+
+# 2. Any other return type is allowed. The guard tests only IsNull() and BOOLEAN, so an
+#    INTEGER return falls through to the client's own query.
+statement ok quack_db:quack_server_con
+CREATE MACRO authz_integer(sid, query) AS 0;
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_authorization_function = 'authz_integer';
+
+query I
+FROM quack_query({server}, 'select 42', token='asdf');
+----
+42
+
+# 3. The rewrite applies to PREPARE_REQUEST only. SEND_DATA_REQUEST calls the same callback
+#    with a synthesized INSERT and applies the deny guard alone, so a VARCHAR return neither
+#    rewrites nor denies there: the insert proceeds.
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_authorization_function = 'quack_nop_authorization';
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+statement ok
+create table rpc.sink(i bigint);
+
+statement ok quack_db:quack_server_con
+CREATE MACRO authz_deny_via_varchar(sid, query) AS 'SELECT error(''denied'')';
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_authorization_function = 'authz_deny_via_varchar';
+
+statement ok
+insert into rpc.sink select * from range(3) t(i);
+
+# The rows landed even though the callback returned a query that errors.
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_authorization_function = 'quack_nop_authorization';
+
+query I quack_db:quack_server_con
+SELECT count(*) FROM sink;
+----
+3
+
+statement ok quack_db:quack_server_con
+RESET GLOBAL quack_authorization_function;
+
+statement ok
+detach rpc;
+
+include test/template/quack_teardown.test_template
