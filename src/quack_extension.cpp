@@ -153,7 +153,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	quack_check_token.SetVolatile();
 	loader.RegisterFunction(quack_check_token);
 
-	ScalarFunction rpc_authorization("quack_nop_authorization",
+	ScalarFunction rpc_authorization(QUACK_DEFAULT_AUTHORIZATION_FUNCTION,
 	                                 {/* session id */ LogicalType::VARCHAR, /* query string */ LogicalType::VARCHAR},
 	                                 LogicalType::VARCHAR, QuackDummyAuthorization);
 	rpc_authorization.SetVolatile();
@@ -180,7 +180,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("quack_authentication_function", "Name of a callback function for authentication",
 	                          LogicalType::VARCHAR, Value("quack_check_token"), nullptr, SetScope::GLOBAL);
 	config.AddExtensionOption("quack_authorization_function", "Name of a callback function for authorization",
-	                          LogicalType::VARCHAR, Value("quack_nop_authorization"), nullptr, SetScope::GLOBAL);
+	                          LogicalType::VARCHAR, Value(QUACK_DEFAULT_AUTHORIZATION_FUNCTION), nullptr,
+	                          SetScope::GLOBAL);
 
 	config.AddExtensionOption("quack_prepare_inline_rows",
 	                          "Rows returned inline in the PREPARE response before the remainder is left to "

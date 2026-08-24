@@ -519,6 +519,17 @@ static Value EvaluateAuthQuery(DatabaseInstance &db, const string &sql, ARGS... 
 	return auth_result_chunk->GetValue(0, 0);
 }
 
+//! Name of the configured authorization callback, or empty while the default no-op is still in place. That
+//! default accepts every statement and returns the query unchanged, so calling it buys nothing and costs a
+//! Connection plus a full parse/bind/execute - per statement, and once per batch on the append path.
+static string GetAuthorizationFunction(DatabaseInstance &db) {
+	auto function_name = GetSettingString(db, "quack_authorization_function");
+	if (function_name == QUACK_DEFAULT_AUTHORIZATION_FUNCTION) {
+		return string();
+	}
+	return function_name;
+}
+
 static constexpr idx_t kTokenBytes = 16; // 128 bits
 
 static string HexEncode(const data_t *bytes, idx_t n) {
@@ -717,16 +728,20 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		auto &prepare_request_message = received_message.Cast<PrepareRequestMessage>();
 		auto &connection = *connection_p;
 
-		// TODO do not do this if there is no fun set
-		auto auth_result = EvaluateAuthQuery(
-		    db, StringUtil::Format("SELECT %s(?, ?)", GetSettingString(db, "quack_authorization_function")),
-		    Value(prepare_request_message.ConnectionId()), Value(prepare_request_message.Query()));
-		if (auth_result.IsNull() ||
-		    (auth_result.type().id() == LogicalTypeId::BOOLEAN && !auth_result.GetValue<bool>())) {
-			return make_uniq<ErrorResponse>("Authorization failed");
+		auto effective_sql = prepare_request_message.Query();
+		auto authorization_function = GetAuthorizationFunction(db);
+		if (!authorization_function.empty()) {
+			auto auth_result = EvaluateAuthQuery(db, StringUtil::Format("SELECT %s(?, ?)", authorization_function),
+			                                     Value(prepare_request_message.ConnectionId()),
+			                                     Value(prepare_request_message.Query()));
+			if (auth_result.IsNull() ||
+			    (auth_result.type().id() == LogicalTypeId::BOOLEAN && !auth_result.GetValue<bool>())) {
+				return make_uniq<ErrorResponse>("Authorization failed");
+			}
+			if (auth_result.type().id() == LogicalTypeId::VARCHAR) {
+				effective_sql = auth_result.GetValue<string>();
+			}
 		}
-		auto effective_sql = (auth_result.type().id() == LogicalTypeId::VARCHAR) ? auth_result.GetValue<string>()
-		                                                                         : prepare_request_message.Query();
 
 		// Stop the previous producer first. This joins its thread, so it frees the statement lock.
 		AbortFetchStream(connection, "superseded by a new query");
@@ -938,17 +953,15 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		auto &send_data_message = received_message.Cast<SendDataRequestMessage>();
 		auto &connection = *connection_p;
 
-		// we never execute this query, but throw it at the authorization function so it can check if this user gets to
-		// insert into this table
-		auto dummy_insert_query =
-		    StringUtil::Format("INSERT INTO %s.%s VALUES (NULL)", SQLIdentifier(send_data_message.SchemaName()),
-		                       SQLIdentifier(send_data_message.TableName()));
-
-		// TODO do not do this if there is no fun set
-		{
-			auto auth_result = EvaluateAuthQuery(
-			    db, StringUtil::Format("SELECT %s(?, ?)", GetSettingString(db, "quack_authorization_function")),
-			    Value(send_data_message.ConnectionId()), Value(dummy_insert_query));
+		auto authorization_function = GetAuthorizationFunction(db);
+		if (!authorization_function.empty()) {
+			// we never execute this query, but throw it at the authorization function so it can check if this user
+			// gets to insert into this table
+			auto dummy_insert_query =
+			    StringUtil::Format("INSERT INTO %s.%s VALUES (NULL)", SQLIdentifier(send_data_message.SchemaName()),
+			                       SQLIdentifier(send_data_message.TableName()));
+			auto auth_result = EvaluateAuthQuery(db, StringUtil::Format("SELECT %s(?, ?)", authorization_function),
+			                                     Value(send_data_message.ConnectionId()), Value(dummy_insert_query));
 			if (auth_result.IsNull() ||
 			    (auth_result.type().id() == LogicalTypeId::BOOLEAN && !auth_result.GetValue<bool>())) {
 				return make_uniq<ErrorResponse>("Authorization failed");

@@ -30,6 +30,11 @@ class EncryptionState;
 class QuackDataStream;
 class ErrorData;
 
+//! Default of the `quack_authorization_function` setting: a no-op callback that accepts every statement and
+//! hands the query back unchanged. quack_extension.cpp registers it and the server compares against it to
+//! detect that no callback of its own has been set, so both sites use this.
+static constexpr const char *QUACK_DEFAULT_AUTHORIZATION_FUNCTION = "quack_nop_authorization";
+
 enum class QuackQueryState : uint8_t { IDLE, ACTIVE, FINISHED, CANCELLED, QUACK_ERROR };
 
 //! An insert stream + its driver thread, taken off a connection so finish/join can run unlocked.
