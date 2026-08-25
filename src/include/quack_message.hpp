@@ -176,8 +176,8 @@ public:
 	    : QuackMessage(TYPE, std::move(connection_id_p)), sql_query(std::move(sql_query_p)), query_uuid(query_uuid_p) {
 	}
 
-	//! Rows the response may carry. Zero makes PREPARE answer before the query gives a row, which is
-	//! what a statement that waits for client data needs. Unset uses the server setting.
+	//! Rows the response may carry. Unset uses the server setting. Zero makes PREPARE answer before
+	//! the query gives a row, which a statement that waits for client data needs.
 	void SetInlineRows(optional_idx inline_rows_p) {
 		inline_rows = inline_rows_p;
 	}
@@ -574,8 +574,8 @@ public:
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<SendDataResponseMessage> Deserialize(Deserializer &deserializer);
 
-	//! Only the answer to a terminal message sets it: the statement has ended by then, and this is
-	//! what it changed. It is not the row count the client sent.
+	//! Only the answer to a terminal message sets it. The statement has ended by then, so this is what
+	//! it changed. It is not the count of rows the client sent.
 	void SetRowCount(optional_idx row_count_p) {
 		row_count = row_count_p;
 	}

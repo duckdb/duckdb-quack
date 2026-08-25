@@ -160,7 +160,7 @@ public:
 		                            dense_index);
 
 		// DEBUG SETTING: lose one batch on purpose. The terminal message announces the full count, so
-		// the server must fail the statement rather than insert what did arrive.
+		// the server must fail the statement. It must not insert only what arrived.
 		if (debug_drop_batch == dense_index) {
 			return true;
 		}
@@ -194,7 +194,7 @@ public:
 	}
 
 	optional_idx Finish(ClientContext &context, idx_t total_batches) override {
-		// Drain every send first: the buffer checks the count when the terminal message arrives.
+		// Drain every send first. The buffer checks the count when the terminal message arrives.
 		queue->Close();
 		queue.reset();
 
@@ -202,10 +202,9 @@ public:
 		auto client_wrapper = quack_catalog.GetClientConnection()->GetClient(context);
 		auto &client = client_wrapper->GetClient();
 
-		// The terminal message is an ordinary SEND_DATA with no chunks. It closes the stream against
-		// the batch count, so a lost batch fails the statement instead of inserting less data. The server
-		// answers it only when the statement has ended, so this one message also reports a failure and
-		// the rows the statement changed, which is not the count we sent.
+		// The terminal message is an ordinary SEND_DATA with no chunks. It closes the stream against the
+		// batch count, so a lost batch fails the statement. The server answers only when the statement
+		// has ended, so the same message reports a failure and the rows the statement changed.
 		auto terminal = make_uniq<SendDataRequestMessage>(quack_catalog.GetConnectionId(), stream_id,
 		                                                  vector<unique_ptr<DataChunkWrapper>>());
 		terminal->SetTotalBatches(total_batches);

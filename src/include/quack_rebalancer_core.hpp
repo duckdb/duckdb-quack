@@ -76,8 +76,8 @@ public:
 	//! With `interrupt` set, capacity freeing fires it. An emitter that cannot fill up returns true.
 	virtual bool TryEmitPrepared(ClientContext &context, idx_t dense_index, unique_ptr<QuackPreparedBatch> &batch,
 	                             optional_ptr<const InterruptState> interrupt) = 0;
-	//! The receiver's own row count, when it reports one. It replaces what the sink counted, which
-	//! for an INSERT is what was sent, not what landed.
+	//! The receiver's own row count, when it reports one. It replaces the count the sink made. For an
+	//! INSERT the sink counts what it sent, not what landed.
 	virtual optional_idx Finish(ClientContext &context, idx_t total_batches) = 0;
 };
 

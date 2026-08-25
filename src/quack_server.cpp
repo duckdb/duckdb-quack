@@ -94,7 +94,7 @@ static void AbortStatement(QuackConnection &connection, const string &reason) {
 			                                       : ErrorData(ExceptionType::INTERRUPT, reason);
 		}
 	}
-	// The statement may hold a scan that waits for a client batch. Errors those streams too.
+	// The statement can hold a scan that waits for a client batch. Error those streams too.
 	connection.insert_streams.DropSession(connection.session_id, reason);
 	AbortDetachedStatement(connection, std::move(detached), reason);
 }
@@ -119,9 +119,9 @@ static void SyncResultCache(QuackConnection &connection, QuackResultStream &stre
 	connection.SyncCachedRows();
 }
 
-//! Runs one client statement with the fetch collector installed, and holds the statement lock for
-//! its duration. A statement that returns rows fills the claim buffer in parallel. A statement that
-//! returns a count leaves that count in batch 1, through the fallback below.
+//! Runs one client statement with the result collector installed. It holds the statement lock for the
+//! full duration. A statement that returns rows fills the claim buffer in parallel. A statement that
+//! returns a count leaves the count in batch 1, through the fallback below.
 static void DriveQuery(QuackConnection &connection, shared_ptr<QuackResultStream> stream, string sql) {
 	try {
 		unique_lock<mutex> guard(connection.statement_lock);
@@ -159,8 +159,8 @@ static void DriveQuery(QuackConnection &connection, shared_ptr<QuackResultStream
 				result_names.push_back(col_name.GetIdentifierName());
 			}
 			stream->SignalBound(result->GetTypes(), std::move(result_names));
-			// A statement that reports a count returns one row holding it. Keep the number here,
-			// while it is still a number: the terminal SEND_DATA answers with it.
+			// A statement that reports a count returns one row that holds it. Keep the number here,
+			// while it is still a number. The terminal SEND_DATA answers with it.
 			bool reports_count = result->GetStatementProperties().return_type == StatementReturnType::CHANGED_ROWS;
 			unique_ptr<FetchResponsePayloadWriter> writer;
 			idx_t rows = 0;
@@ -197,7 +197,7 @@ static void DriveQuery(QuackConnection &connection, shared_ptr<QuackResultStream
 	}
 	// Close against the announced total, so a short stream errors instead of truncating.
 	stream->buffer.Finish(stream->announced_total);
-	// The statement is over, so the streams its scan registered cannot receive anything more.
+	// The statement is over. The streams its scan registered can receive nothing more.
 	connection.insert_streams.DropSession(connection.session_id);
 }
 
@@ -647,8 +647,8 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			connection.statement.stream = stream;
 			connection.statement.uuid = prepare_request_message.QueryUUID();
 			connection.statement.abort_error = ErrorData();
-			// A statement whose source is a client stream binds its result only when it ends, and it
-			// cannot end before the client sends. The scan raises this so PREPARE stops waiting.
+			// A statement that reads a client stream binds its result only when it ends, and it cannot
+			// end before the client sends. The scan raises this, so PREPARE stops waiting.
 			if (auto session_state = QuackSessionState::Get(*connection.duckdb_connection->context)) {
 				weak_ptr<QuackResultStream> weak_stream = stream;
 				session_state->SetClientDataHook([weak_stream]() {
@@ -673,8 +673,8 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 
 		// Put the leading batches in the PREPARE response, so a small result needs one round trip
 		// only. The FETCH indices then move down by the count this drain consumed.
-		// A statement that waits for client data must answer before it has a row, so the client can
-		// start sending. It asks for that with inline_rows = 0.
+		// A statement that waits for client data must answer before it has a row. The client can then
+		// start to send. It asks for that with inline_rows = 0.
 		idx_t max_inline_rows =
 		    prepare_request_message.InlineRows().IsValid()
 		        ? prepare_request_message.InlineRows().GetIndex()
@@ -830,9 +830,9 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		auto &send_data_message = received_message.Cast<SendDataRequestMessage>();
 		auto &connection = *connection_p;
 
-		// The scan registers the stream when the statement binds, so PREPARE must have run. The
-		// statement itself was authorized then, and the id is unguessable, so a batch needs no check
-		// beyond the session that owns the stream.
+		// The scan registers the stream when the statement binds, so PREPARE must have run first. That
+		// PREPARE authorized the statement, and the id is unguessable. A batch needs no check beyond
+		// the session that owns the stream.
 		auto stream = QuackStorageExtensionInfo::GetState(db).InsertStreams().Find(send_data_message.StreamId());
 		if (!stream || stream->session_id != connection.session_id) {
 			return make_uniq<ErrorResponse>("No active data stream '%s'", send_data_message.StreamId());
@@ -870,8 +870,8 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			return make_uniq<ErrorResponse>(stream->buffer.GetError());
 		}
 
-		// The statement runs to its end now. Wait for it here, so one message ends the stream, reports
-		// a failure and reports what the statement changed. The client then needs no FETCH.
+		// The statement runs to its end now. Wait for it here, so one message ends the stream, reports a
+		// failure, and reports what the statement changed. The client then needs no FETCH.
 		shared_ptr<QuackResultStream> fetch_stream;
 		{
 			lock_guard<mutex> guard(connection.statement.lock);

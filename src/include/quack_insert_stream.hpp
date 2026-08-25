@@ -17,8 +17,8 @@
 
 namespace duckdb {
 
-//! The quack session a server-side ClientContext belongs to. The scan reads it, so a stream records
-//! which session may feed it.
+//! The quack session that owns a server-side ClientContext. The scan reads it, so each stream
+//! records which session may feed it.
 class QuackSessionState : public ClientContextState {
 public:
 	explicit QuackSessionState(string session_id_p) : session_id(std::move(session_id_p)) {
@@ -31,8 +31,8 @@ public:
 		return context.registered_state->Get<QuackSessionState>(KEY);
 	}
 
-	//! PREPARE installs this before it runs the statement, and a scan that registers a client data
-	//! stream calls it. It is how PREPARE learns that the statement now waits for the client.
+	//! PREPARE installs this before it runs the statement. A scan calls it when it registers a client
+	//! data stream. PREPARE then knows that the statement waits for the client.
 	void SetClientDataHook(std::function<void()> hook) {
 		lock_guard<mutex> guard(lock);
 		on_client_data = std::move(hook);
@@ -70,9 +70,9 @@ struct QuackInsertStream {
 	QuackChunkClaimBuffer buffer;
 };
 
-//! Maps a stream id to its stream. It lives on the database instance state, because the scan and
-//! the request handler that fills the buffer run on different ClientContexts. The scan creates the
-//! entry when it binds, so the statement can be planned before the client sends a batch.
+//! Maps a stream id to its stream. It lives on the database instance state, because the scan and the
+//! request handler run on different ClientContexts. The scan makes the entry when it binds, so the
+//! statement is planned before the client sends a batch.
 class QuackInsertStreamRegistry {
 public:
 	shared_ptr<QuackInsertStream> Create(const string &id, vector<LogicalType> types, bool ordered, string session_id) {
@@ -88,8 +88,8 @@ public:
 		return entry == streams.end() ? nullptr : entry->second;
 	}
 
-	//! Drop every stream of a session. `reason`, when it is set, errors each buffer first, so a scan
-	//! that waits for a batch wakes instead of holding the statement open.
+	//! Drop every stream of a session. A `reason` errors each buffer first, so a scan that waits for a
+	//! batch wakes up. Without it the statement stays open.
 	void DropSession(const string &session_id, const string &reason = string()) {
 		vector<shared_ptr<QuackInsertStream>> dropped;
 		{

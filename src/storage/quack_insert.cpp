@@ -63,8 +63,8 @@ unique_ptr<GlobalSinkState> QuackInsert::GetGlobalSinkState(ClientContext &conte
 	auto &quack_catalog = table_entry->catalog.Cast<QuackCatalog>();
 	auto &types = children[0].get().GetTypes();
 
-	// The client names the statement, so the server composes no SQL. The stream id is unguessable,
-	// so a batch that carries it needs no authorization of its own.
+	// The client names the statement, so the server composes no SQL. The stream id is unguessable, so
+	// a batch that carries it needs no authorization of its own.
 	auto stream_id = QuackRandomToken(*context.db);
 	auto query_uuid = UUID::GenerateRandomUUID();
 	auto sql =
@@ -73,8 +73,8 @@ unique_ptr<GlobalSinkState> QuackInsert::GetGlobalSinkState(ClientContext &conte
 	                       SQLIdentifier(table_entry->name.GetIdentifierName()), SQLString(stream_id),
 	                       StructPrototype(types), order_mode != AppendOrderMode::UNORDERED ? "true" : "false");
 
-	// inline_rows = 0, because the statement waits for our batches: it has no row to answer with,
-	// and the scan registers the stream while it binds, so PREPARE must land before the first batch.
+	// inline_rows = 0, because the statement waits for our batches and has no row to answer with. The
+	// scan registers the stream while it binds, so PREPARE must land before the first batch.
 	auto client_wrapper = quack_catalog.GetClientConnection()->GetClient(context);
 	auto prepare = make_uniq<PrepareRequestMessage>(quack_catalog.GetConnectionId(), sql, query_uuid);
 	prepare->SetInlineRows(optional_idx(0));

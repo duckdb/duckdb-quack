@@ -48,8 +48,8 @@ struct QuackResultStream {
 		bind_cv.notify_all();
 	}
 
-	//! Raised when a scan of this statement registers a client data stream. The statement cannot
-	//! reach a result until the client sends its batches, so PREPARE must answer now.
+	//! A scan of this statement registered a client data stream. The statement gives no row until the
+	//! client sends its batches, so PREPARE answers now.
 	void SignalClientDataPending() {
 		{
 			lock_guard<mutex> guard(bind_lock);
@@ -58,8 +58,8 @@ struct QuackResultStream {
 		bind_cv.notify_all();
 	}
 
-	//! true = the query is planned, or it waits for the client's data. false = it failed before
-	//! that; the buffer holds the error.
+	//! true = the query is planned, or it waits for client data. false = it failed first. The buffer
+	//! then holds the error.
 	bool WaitBound() {
 		unique_lock<mutex> guard(bind_lock);
 		while (!bound && !client_data_pending && !buffer.HasError() && !buffer.Exhausted()) {
@@ -76,8 +76,8 @@ struct QuackResultStream {
 	vector<LogicalType> types;
 	vector<string> names;
 	bool client_data_pending = false;
-	//! What a statement that reports a count changed. Read by the answer to a terminal SEND_DATA,
-	//! so that answer needs no decode of the payload below.
+	//! The rows a statement changed, kept as a number. The terminal SEND_DATA answers with it, so no
+	//! reader decodes the payload below to find it.
 	optional_idx changed_rows;
 	//! The dense batches PREPARE consumed inline. FETCH subtracts this, so the client-facing indices
 	//! stay dense from 1. PREPARE writes it before the first FETCH arrives.

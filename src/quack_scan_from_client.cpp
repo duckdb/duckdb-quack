@@ -68,8 +68,8 @@ static unique_ptr<FunctionData> QuackScanFromClientBind(ClientContext &context, 
 	}
 	auto stream_id = input.inputs[0].GetValue<string>();
 
-	// The second argument is a prototype value: NULL::STRUCT(a INTEGER, b VARCHAR). Its TYPE carries
-	// the schema, so the statement can be planned before the client sends a batch.
+	// The second argument is a prototype value, for example NULL::STRUCT(a INTEGER, b VARCHAR). Its
+	// TYPE carries the schema, so the statement is planned before the client sends a batch.
 	auto &prototype = input.inputs[1].type();
 	if (prototype.id() != LogicalTypeId::STRUCT) {
 		throw InvalidInputException(

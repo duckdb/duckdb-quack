@@ -16,8 +16,8 @@ SET GLOBAL quack_target_batch_bytes = 16384;
 
 # --- the schema now travels in the statement, not in the first chunk ---
 
-# A zero-row insert sends no chunk at all, so nothing could carry the column types. It still binds,
-# because the statement names them.
+# A zero-row insert sends no chunk, so no chunk can carry the column types. It still binds, because
+# the statement names them.
 statement ok
 create table rpc.no_rows(i bigint, s varchar);
 
@@ -29,7 +29,7 @@ select count(*) from rpc.no_rows;
 ----
 0
 
-# The same for a first batch that reveals nothing about its values.
+# The same for a first batch that shows nothing about its values.
 statement ok
 create table rpc.all_null(i bigint, s varchar);
 
@@ -51,13 +51,13 @@ insert into rpc.counted select i from src;
 ----
 20000
 
-# an insert of nothing reports nothing, and the terminal message still ends the stream
+# An insert of nothing reports zero. The terminal message still ends the stream.
 query I
 insert into rpc.counted select i from src where false;
 ----
 0
 
-# --- a lost batch fails the statement, it does not insert less data ---
+# --- a lost batch fails the statement, and inserts nothing ---
 
 statement ok
 create table rpc.short_stream(i bigint);
@@ -73,13 +73,13 @@ batches received
 statement ok
 SET quack_debug_drop_batch = 0;
 
-# The failed statement is atomic: it left nothing behind.
+# The failed statement is atomic. It left nothing behind.
 query I
 select count(*) from rpc.short_stream;
 ----
 0
 
-# ... and the connection still works.
+# The connection still works after the failure.
 statement ok
 insert into rpc.short_stream select i from src;
 
