@@ -41,6 +41,22 @@ select count(*), count(i), count(s) from rpc.all_null;
 ----
 5000	0	0
 
+# --- the statement reports what the server changed, on the terminal message ---
+
+statement ok
+create table rpc.counted(i bigint);
+
+query I
+insert into rpc.counted select i from src;
+----
+20000
+
+# an insert of nothing reports nothing, and the terminal message still ends the stream
+query I
+insert into rpc.counted select i from src where false;
+----
+0
+
 # --- a lost batch fails the statement, it does not insert less data ---
 
 statement ok

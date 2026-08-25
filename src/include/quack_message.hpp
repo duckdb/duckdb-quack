@@ -574,16 +574,23 @@ public:
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<SendDataResponseMessage> Deserialize(Deserializer &deserializer);
 
+	//! Only the answer to a terminal message sets it: the statement has ended by then, and this is
+	//! what it changed. It is not the row count the client sent.
+	void SetRowCount(optional_idx row_count_p) {
+		row_count = row_count_p;
+	}
 	optional_idx AcceptBudget() const {
 		return accept_budget;
+	}
+	optional_idx RowCount() const {
+		return row_count;
 	}
 
 private:
 	optional_idx accept_budget;
+	optional_idx row_count;
 };
 
-// End-of-stream marker for a client->server stream (connection_id, query_uuid): server drains and
-// replies Success/Error. Used by SEND_DATA inserts today; reusable for future streams (e.g. reads).
 class DisconnectMessage : public QuackMessage {
 public:
 	static constexpr MessageType TYPE = MessageType::DISCONNECT_MESSAGE;

@@ -158,6 +158,12 @@
         "id": 1,
         "name": "accept_budget",
         "type": "optional_idx"
+      },
+      {
+        "id": 2,
+        "name": "row_count",
+        "type": "optional_idx",
+        "default": "optional_idx()"
       }
     ]
   },

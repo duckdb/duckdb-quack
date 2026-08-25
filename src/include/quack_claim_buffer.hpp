@@ -210,6 +210,13 @@ public:
 		return PopStatus::BATCH;
 	}
 
+	//! True when `claim` can be popped, or the stream ended. A consumer that only waits for the end
+	//! of a statement uses it, because it must not take the batch away from the real consumer.
+	bool BatchReadyOrEnd(idx_t claim) {
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		return batches.find(claim) != batches.end() || finished || errored;
+	}
+
 	void WaitForBatch(idx_t claim) {
 		annotated_unique_lock<annotated_mutex> guard(lock);
 		if (batches.find(claim) != batches.end() || finished || errored) {

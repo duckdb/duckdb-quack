@@ -158,11 +158,17 @@ static void DriveQuery(QuackConnection &connection, shared_ptr<QuackFetchStream>
 				result_names.push_back(col_name.GetIdentifierName());
 			}
 			stream->SignalBound(result->GetTypes(), std::move(result_names));
+			// A statement that reports a count returns one row holding it. Keep the number here,
+			// while it is still a number: the terminal SEND_DATA answers with it.
+			bool reports_count = result->GetStatementProperties().return_type == StatementReturnType::CHANGED_ROWS;
 			unique_ptr<FetchResponsePayloadWriter> writer;
 			idx_t rows = 0;
 			while (auto chunk = result->Fetch()) {
 				if (chunk->size() == 0) {
 					continue;
+				}
+				if (reports_count && !stream->changed_rows.IsValid() && chunk->ColumnCount() == 1) {
+					stream->changed_rows = optional_idx(NumericCast<idx_t>(chunk->GetValue(0, 0).GetValue<int64_t>()));
 				}
 				if (!writer) {
 					writer = make_uniq<FetchResponsePayloadWriter>(context, 0);
@@ -865,14 +871,38 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			stream->buffer.PushBatch(send_data_message.BatchIndex().GetIndex(), std::move(owned_chunks));
 		}
 
-		if (send_data_message.TotalBatches().IsValid()) {
-			// The terminal message. Closing against a count makes a short stream fail loudly.
-			stream->buffer.Finish(send_data_message.TotalBatches());
+		if (!send_data_message.TotalBatches().IsValid()) {
+			if (stream->buffer.HasError()) {
+				return make_uniq<ErrorResponse>(stream->buffer.GetError());
+			}
+			return make_uniq<SendDataResponseMessage>(); // accept_budget unset = unbounded (future flow control)
 		}
+
+		// The terminal message. Closing against a count makes a short stream fail loudly.
+		stream->buffer.Finish(send_data_message.TotalBatches());
 		if (stream->buffer.HasError()) {
 			return make_uniq<ErrorResponse>(stream->buffer.GetError());
 		}
-		return make_uniq<SendDataResponseMessage>(); // accept_budget unset = unbounded (future flow control)
+
+		// The statement runs to its end now. Wait for it here, so one message ends the stream, reports
+		// a failure and reports what the statement changed. The client then needs no FETCH.
+		shared_ptr<QuackFetchStream> fetch_stream;
+		{
+			lock_guard<mutex> guard(connection.fetch.lock);
+			fetch_stream = connection.fetch.stream;
+		}
+		auto response = make_uniq<SendDataResponseMessage>();
+		if (fetch_stream) {
+			auto first_batch = fetch_stream->prepare_batches + 1;
+			while (!fetch_stream->buffer.BatchReadyOrEnd(first_batch)) {
+				fetch_stream->buffer.WaitForBatch(first_batch);
+			}
+			if (fetch_stream->buffer.HasError()) {
+				return make_uniq<ErrorResponse>(fetch_stream->buffer.GetError());
+			}
+			response->SetRowCount(fetch_stream->changed_rows);
+		}
+		return std::move(response);
 	}
 	case MessageType::CANCEL_REQUEST: {
 		auto &cancel_request_message = received_message.Cast<CancelRequestMessage>();

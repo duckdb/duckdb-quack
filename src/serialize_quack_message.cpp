@@ -190,11 +190,13 @@ unique_ptr<SendDataRequestMessage> SendDataRequestMessage::Deserialize(Deseriali
 
 void SendDataResponseMessage::Serialize(Serializer &serializer) const {
 	serializer.WriteProperty<optional_idx>(1, "accept_budget", accept_budget);
+	serializer.WritePropertyWithDefault<optional_idx>(2, "row_count", row_count, optional_idx());
 }
 
 unique_ptr<SendDataResponseMessage> SendDataResponseMessage::Deserialize(Deserializer &deserializer) {
 	auto result = duckdb::unique_ptr<SendDataResponseMessage>(new SendDataResponseMessage());
 	deserializer.ReadProperty<optional_idx>(1, "accept_budget", result->accept_budget);
+	deserializer.ReadPropertyWithExplicitDefault<optional_idx>(2, "row_count", result->row_count, optional_idx());
 	return result;
 }
 
