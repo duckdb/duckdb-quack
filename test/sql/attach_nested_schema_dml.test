@@ -1,0 +1,153 @@
+# name: test/sql/attach_nested_schema_dml.test
+# description: reads and DML against tables that live in nested schemas of an attached quack catalog
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+# --- server side: two different parents each holding a schema called "x", plus a table called "t" in
+# each of them. The names alone are ambiguous - only the schema tree tells the two tables apart
+statement ok quack_db:quack_server_con
+create schema a;
+
+statement ok quack_db:quack_server_con
+create schema a.x;
+
+statement ok quack_db:quack_server_con
+create schema b;
+
+statement ok quack_db:quack_server_con
+create schema b.x;
+
+statement ok quack_db:quack_server_con
+create table a.x.t(i int);
+
+statement ok quack_db:quack_server_con
+insert into a.x.t values (1);
+
+statement ok quack_db:quack_server_con
+create table b.x.t(i int);
+
+statement ok quack_db:quack_server_con
+insert into b.x.t values (2), (3);
+
+# a table in a top-level schema, used below as the control for the DML cases
+statement ok quack_db:quack_server_con
+create table a.top_t(i int);
+
+statement ok quack_db:quack_server_con
+insert into a.top_t values (1);
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+# a table reference carries at most three name parts, so the catalog has to be implicit for a table
+# that lives in a nested schema
+statement ok
+use rpc
+
+# --- both "x" schemas exist, each below its own parent
+query II rowsort
+select schema_name, parent_schema from duckdb_schemas() where database_name='rpc' and schema_name='x'
+----
+x	a
+x	b
+
+# they are distinct schemas, not one schema reached by two paths
+query I
+select count(distinct oid) from duckdb_schemas() where database_name='rpc' and schema_name='x'
+----
+2
+
+# --- a read resolves through the full path, so the two same-named tables stay apart
+query I
+from a.x.t
+----
+1
+
+query I rowsort
+from b.x.t
+----
+2
+3
+
+# both tables are reported, each in its own schema
+query I
+select count(distinct schema_oid) from duckdb_tables() where database_name='rpc' and table_name='t'
+----
+2
+
+# --- DML on a table in a top-level schema is pushed down to the server as a whole statement
+statement ok
+update a.top_t set i = 100
+
+query I
+from a.top_t
+----
+100
+
+statement ok
+delete from a.top_t where i = 100
+
+query I
+select count(*) from a.top_t
+----
+0
+
+# --- DML on a table in a NESTED schema is pushed down the same way. This needs the optimizer to keep
+# the whole schema path: resolving "a.x.t" to a (catalog, schema, name) triple reads it as catalog "a",
+# which resolves to no remote catalog and drops the statement onto the local plan path
+statement ok
+update a.x.t set i = 100
+
+query I
+from a.x.t
+----
+100
+
+statement ok
+delete from b.x.t where i = 2
+
+query I
+from b.x.t
+----
+3
+
+# the other same-named table is untouched
+query I
+from a.x.t
+----
+100
+
+# --- ALTER, in a top-level and in a nested schema
+statement ok
+alter table a.top_t rename to top_t2
+
+query I
+select count(*) from duckdb_tables() where database_name='rpc' and table_name='top_t2'
+----
+1
+
+statement ok
+alter table a.x.t rename to t2
+
+# the rename hit the table in a.x, not the same-named one in b.x
+query II rowsort
+select schema_name, table_name from duckdb_tables() where database_name='rpc' and table_name in ('t', 't2')
+----
+x	t
+x	t2
+
+# --- a table two schema levels below the catalog root cannot be named at all: that needs four name
+# parts, which the parser rejects. This is a core limit and is not specific to quack
+statement ok quack_db:quack_server_con
+create schema a.x.deep;
+
+statement error quack_db:quack_server_con
+create table a.x.deep.t(i int);
+----
+<REGEX>:.*syntax error.*
+
+statement ok
+use memory
+
+include test/template/quack_teardown.test_template

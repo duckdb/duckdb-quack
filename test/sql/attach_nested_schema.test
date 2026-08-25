@@ -89,18 +89,20 @@ from s1.nope.leaf
 ----
 <REGEX>:.*nope.*
 
-# --- a table in a nested schema is read over the quack transport, never scanned locally
+# --- a table in a nested schema is read over the quack transport, never scanned locally. The whole
+# statement is pushed down, exactly as for a table in a top-level schema - this needs the pushdown
+# optimizer to keep the full schema path rather than reading "s1.child.leaf" as catalog "s1"
 query II
 explain select count(*) from s1.child.leaf
 ----
-physical_plan	<REGEX>:.*Quack Query.*
+physical_plan	<REGEX>:.*Quack Query By Name.*
 
 query II
 explain select count(*) from s1.child.leaf
 ----
 physical_plan	<!REGEX>:.*Seq Scan.*
 
-# a table in a top-level schema is still pushed down as a single remote query
+# a table in a top-level schema is pushed down as a single remote query
 query II
 explain select count(*) from s1.mid
 ----
