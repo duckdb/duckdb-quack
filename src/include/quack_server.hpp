@@ -28,6 +28,7 @@ struct QuackFetchStream;
 class PreparedStatement;
 class EncryptionState;
 struct QuackInsertStream;
+class QuackInsertStreamRegistry;
 class ErrorData;
 
 enum class QuackQueryState : uint8_t { IDLE, ACTIVE, FINISHED, CANCELLED, QUACK_ERROR };
@@ -37,6 +38,7 @@ struct DetachedInsertStream {
 	shared_ptr<QuackInsertStream> stream;
 	std::thread thread;
 	string id;
+	optional_ptr<QuackInsertStreamRegistry> registry;
 	//! Finish (checking `total_batches` when it is set) + join + deregister; returns any INSERT
 	//! error. Call WITHOUT a lock held.
 	ErrorData FinishAndJoin(optional_idx total_batches = optional_idx());
@@ -47,6 +49,11 @@ struct DetachedInsertStream {
 //! Server-side state for the INSERT a client is currently driving via a SEND_DATA stream on this
 //! connection (one at a time). `lock` is held only briefly — never across a Push or a join.
 struct QuackInsertState {
+	explicit QuackInsertState(QuackInsertStreamRegistry &registry_p) : registry(registry_p) {
+	}
+
+	//! The database instance registry the scan looks the stream up in.
+	QuackInsertStreamRegistry &registry;
 	annotated_mutex lock;
 	shared_ptr<QuackInsertStream> stream DUCKDB_GUARDED_BY(lock);
 	std::thread thread DUCKDB_GUARDED_BY(lock);
@@ -73,7 +80,7 @@ struct QuackFetchState {
 };
 
 struct QuackConnection {
-	explicit QuackConnection(string session_id_p, idx_t heartbeat_timeout_seconds_p);
+	QuackConnection(string session_id_p, idx_t heartbeat_timeout_seconds_p, QuackInsertStreamRegistry &registry);
 	~QuackConnection();
 
 	//! Renew unless the timeout has already elapsed. Once expired, a lease cannot be revived.

@@ -27,15 +27,10 @@ struct QuackInsertStream {
 	QuackChunkClaimBuffer buffer;
 };
 
-//! Maps a stream id to its stream. It is process-global, because the scan has a different
-//! ClientContext than the request handler.
+//! Maps a stream id to its stream. It lives on the database instance state, because the scan and
+//! the request handler that fills the buffer run on different ClientContexts.
 class QuackInsertStreamRegistry {
 public:
-	static QuackInsertStreamRegistry &Get() {
-		static QuackInsertStreamRegistry instance;
-		return instance;
-	}
-
 	static string MakeId(const string &connection_id, hugeint_t query_uuid) {
 		return connection_id + ":" + UUID::ToString(query_uuid);
 	}

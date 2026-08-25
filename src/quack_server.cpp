@@ -35,9 +35,10 @@ static bool LeaseTimeoutElapsed(time_point<steady_clock> last_renewed_at, time_p
 	return static_cast<idx_t>(elapsed_seconds) >= timeout_seconds;
 }
 
-QuackConnection::QuackConnection(string session_id_p, idx_t heartbeat_timeout_seconds_p)
+QuackConnection::QuackConnection(string session_id_p, idx_t heartbeat_timeout_seconds_p,
+                                 QuackInsertStreamRegistry &registry)
     : session_id(std::move(session_id_p)), heartbeat_timeout_seconds(heartbeat_timeout_seconds_p),
-      lease_last_renewed_at(steady_clock::now()) {
+      lease_last_renewed_at(steady_clock::now()), insert(registry) {
 }
 
 bool QuackConnection::LeaseExpiredLocked(time_point<steady_clock> now) {
@@ -71,7 +72,7 @@ ErrorData DetachedInsertStream::FinishAndJoin(optional_idx total_batches) {
 	if (stream->buffer.HasError()) {
 		error = stream->buffer.GetError();
 	}
-	QuackInsertStreamRegistry::Get().Erase(id);
+	registry->Erase(id);
 	return error;
 }
 
@@ -84,12 +85,13 @@ void DetachedInsertStream::AbortAndJoin(const string &reason) {
 	if (thread.joinable()) {
 		thread.join();
 	}
-	QuackInsertStreamRegistry::Get().Erase(id);
+	registry->Erase(id);
 }
 
 DetachedInsertStream QuackInsertState::Detach() {
 	annotated_lock_guard<annotated_mutex> guard(lock);
 	DetachedInsertStream detached;
+	detached.registry = &registry;
 	detached.stream = std::move(stream);
 	detached.thread = std::move(thread);
 	detached.id = std::move(stream_id);
@@ -101,6 +103,7 @@ DetachedInsertStream QuackInsertState::Detach() {
 DetachedInsertStream QuackInsertState::DetachIfUnrelated(const string &msg_stream_id) {
 	annotated_lock_guard<annotated_mutex> guard(lock);
 	DetachedInsertStream detached;
+	detached.registry = &registry;
 	if (!stream || stream_id == msg_stream_id) {
 		return detached; // nothing active, or this message continues the active stream
 	}
@@ -454,7 +457,8 @@ string QuackServer::CreateNewConnection(const string &session_id, const string &
 	if (!db) {
 		throw InternalException("Database was closed");
 	}
-	auto new_connection = make_shared_ptr<QuackConnection>(session_id, heartbeat_timeout_seconds);
+	auto new_connection = make_shared_ptr<QuackConnection>(session_id, heartbeat_timeout_seconds,
+	                                                       QuackStorageExtensionInfo::GetState(*db).InsertStreams());
 	new_connection->client_id_hash = client_id_hash;
 	new_connection->live_caches = live_caches;
 	new_connection->duckdb_connection = make_uniq<Connection>(*db);
@@ -958,7 +962,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 				stream = connection.insert.stream;
 			} else {
 				auto types = incoming_chunks[0]->Chunk().GetTypes();
-				stream = QuackInsertStreamRegistry::Get().Create(stream_id, types, send_data_message.Ordered());
+				stream = connection.insert.registry.Create(stream_id, types, send_data_message.Ordered());
 				connection.insert.stream = stream;
 				connection.insert.stream_id = stream_id;
 				connection.insert.thread = std::thread(RunInsertStatement, std::ref(connection), stream, stream_id,

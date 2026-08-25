@@ -9,6 +9,7 @@
 #include "duckdb/parallel/task_scheduler.hpp"
 
 #include "quack_insert_stream.hpp"
+#include "quack_storage.hpp"
 
 namespace duckdb {
 
@@ -62,7 +63,7 @@ struct QuackScanFromClientLocalState : public LocalTableFunctionState {
 static unique_ptr<FunctionData> QuackScanFromClientBind(ClientContext &context, TableFunctionBindInput &input,
                                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto stream_id = input.inputs[0].GetValue<string>();
-	auto stream = QuackInsertStreamRegistry::Get().Find(stream_id);
+	auto stream = QuackStorageExtensionInfo::GetState(*context.db).InsertStreams().Find(stream_id);
 	if (!stream) {
 		throw InvalidInputException("scan_data_from_quack_client: no active stream '%s' (this is an internal "
 		                            "function driven by the quack server)",
