@@ -1,0 +1,83 @@
+# name: test/sql/attach_insert_client_driven.test
+# description: the client names the statement and the stream; SEND_DATA only carries chunks
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+statement ok
+create table src as select * from range(20000) t(i);
+
+# Small batches, so an insert really produces several SEND_DATA messages.
+statement ok
+SET GLOBAL quack_target_batch_bytes = 16384;
+
+# --- the schema now travels in the statement, not in the first chunk ---
+
+# A zero-row insert sends no chunk at all, so nothing could carry the column types. It still binds,
+# because the statement names them.
+statement ok
+create table rpc.no_rows(i bigint, s varchar);
+
+statement ok
+insert into rpc.no_rows select i, i::varchar from src where false;
+
+query I
+select count(*) from rpc.no_rows;
+----
+0
+
+# The same for a first batch that reveals nothing about its values.
+statement ok
+create table rpc.all_null(i bigint, s varchar);
+
+statement ok
+insert into rpc.all_null select NULL::bigint, NULL::varchar from range(5000);
+
+query III
+select count(*), count(i), count(s) from rpc.all_null;
+----
+5000	0	0
+
+# --- a lost batch fails the statement, it does not insert less data ---
+
+statement ok
+create table rpc.short_stream(i bigint);
+
+statement ok
+SET quack_debug_drop_batch = 1;
+
+statement error
+insert into rpc.short_stream select i from src;
+----
+batches received
+
+statement ok
+SET quack_debug_drop_batch = 0;
+
+# The failed statement is atomic: it left nothing behind.
+query I
+select count(*) from rpc.short_stream;
+----
+0
+
+# ... and the connection still works.
+statement ok
+insert into rpc.short_stream select i from src;
+
+query III
+select count(*), min(i), max(i) from rpc.short_stream;
+----
+20000	0	19999
+
+# --- the internal scan is not callable by hand ---
+
+statement error
+select * from scan_data_from_quack_client('made-up', NULL::STRUCT(i BIGINT));
+----
+internal function
+
+statement ok quack_db:quack_server_con
+call quack_stop('quack:localhost')

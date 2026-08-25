@@ -131,9 +131,10 @@ private:
 class QuackSendDataEmitter : public QuackBatchEmitter {
 public:
 	QuackSendDataEmitter(ClientContext &context, QuackTableCatalogEntry &table_p, string stream_id_p,
-	                     hugeint_t query_uuid_p, idx_t debug_delay_ms_p, bool debug_duplicate_sends_p)
+	                     hugeint_t query_uuid_p, idx_t debug_delay_ms_p, bool debug_duplicate_sends_p,
+	                     idx_t debug_drop_batch_p)
 	    : table(table_p), stream_id(std::move(stream_id_p)), query_uuid(query_uuid_p), debug_delay_ms(debug_delay_ms_p),
-	      debug_duplicate_sends(debug_duplicate_sends_p) {
+	      debug_duplicate_sends(debug_duplicate_sends_p), debug_drop_batch(debug_drop_batch_p) {
 		queue = make_uniq<ManagedAsyncTaskQueue>(context);
 	}
 
@@ -157,6 +158,12 @@ public:
 		auto prepared = unique_ptr_cast<QuackPreparedBatch, QuackPreparedSendData>(std::move(batch));
 		QuackBatchIndexField::Patch(prepared->payload->GetData(), prepared->payload_size, prepared->index_offset,
 		                            dense_index);
+
+		// DEBUG SETTING: lose one batch on purpose. The terminal message announces the full count, so
+		// the server must fail the statement rather than insert what did arrive.
+		if (debug_drop_batch == dense_index) {
+			return true;
+		}
 
 		auto &quack_catalog = table.catalog.Cast<QuackCatalog>();
 		auto payload_size = prepared->payload_size;
@@ -221,15 +228,16 @@ private:
 	hugeint_t query_uuid;
 	idx_t debug_delay_ms;
 	bool debug_duplicate_sends;
+	idx_t debug_drop_batch;
 	//! Regular threads register payloads. Async-pool threads POST them.
 	unique_ptr<ManagedAsyncTaskQueue> queue;
 };
 
 unique_ptr<QuackBatchEmitter> MakeQuackSendDataEmitter(ClientContext &context, QuackTableCatalogEntry &table,
                                                        string stream_id, hugeint_t query_uuid, idx_t debug_delay_ms,
-                                                       bool debug_duplicate_sends) {
+                                                       bool debug_duplicate_sends, idx_t debug_drop_batch) {
 	return make_uniq<QuackSendDataEmitter>(context, table, std::move(stream_id), query_uuid, debug_delay_ms,
-	                                       debug_duplicate_sends);
+	                                       debug_duplicate_sends, debug_drop_batch);
 }
 
 } // namespace duckdb

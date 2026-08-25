@@ -216,6 +216,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "the receiver must drop the duplicate",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
 
+	config.AddExtensionOption("quack_debug_drop_batch",
+	                          "DEBUG SETTING: do not send the SEND_DATA batch with this dense index (0 = off); "
+	                          "the terminal message must then fail the statement instead of inserting less data",
+	                          LogicalType::UBIGINT, Value::UBIGINT(0));
+
 	config.AddExtensionOption("quack_debug_send_delay_ms",
 	                          "DEBUG SETTING: max random delay in ms before a SEND_DATA request goes out, "
 	                          "stressing out-of-order batch arrival on the server",

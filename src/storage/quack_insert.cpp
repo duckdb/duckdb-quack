@@ -58,6 +58,7 @@ unique_ptr<GlobalSinkState> QuackInsert::GetGlobalSinkState(ClientContext &conte
 
 	auto debug_delay_ms = QuackGetUBigintSetting(context, "quack_debug_send_delay_ms", 0);
 	auto debug_duplicate_sends = QuackGetUBigintSetting(context, "quack_debug_duplicate_sends", 0) > 0;
+	auto debug_drop_batch = QuackGetUBigintSetting(context, "quack_debug_drop_batch", 0);
 	auto &quack_catalog = table_entry->catalog.Cast<QuackCatalog>();
 	auto &types = children[0].get().GetTypes();
 
@@ -79,7 +80,7 @@ unique_ptr<GlobalSinkState> QuackInsert::GetGlobalSinkState(ClientContext &conte
 	client_wrapper->GetClient().Request<PrepareResponseMessage>(context, std::move(prepare));
 
 	auto emitter = MakeQuackSendDataEmitter(context, *table_entry, std::move(stream_id), query_uuid, debug_delay_ms,
-	                                        debug_duplicate_sends);
+	                                        debug_duplicate_sends, debug_drop_batch);
 	return MakeQuackRebalancerGlobalState(context, types, order_mode, std::move(emitter));
 }
 

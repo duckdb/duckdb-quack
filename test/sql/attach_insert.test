@@ -19,7 +19,7 @@ select count(*), min(i), max(i), sum(i) from rpc.t;
 ----
 100000	0	99999	4999950000
 
-# --- empty source: client sends no chunks, only the finalize marker
+# --- empty source: the client sends no chunks, only the terminal message
 statement ok
 create table rpc.empty_t(i bigint);
 

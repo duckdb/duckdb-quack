@@ -18,6 +18,6 @@ class QuackTableCatalogEntry;
 //! the dense index at release, and POSTs it. It is the mirror of the server fetch collector.
 unique_ptr<QuackBatchEmitter> MakeQuackSendDataEmitter(ClientContext &context, QuackTableCatalogEntry &table,
                                                        string stream_id, hugeint_t query_uuid, idx_t debug_delay_ms,
-                                                       bool debug_duplicate_sends);
+                                                       bool debug_duplicate_sends, idx_t debug_drop_batch);
 
 } // namespace duckdb
