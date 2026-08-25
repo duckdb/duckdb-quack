@@ -35,7 +35,7 @@ using QuackFetchPayloadBuffer = QuackClaimBuffer<QuackFetchPayload>;
 
 //! Server state for one client-facing result. The fetch collector fills the claim buffer with sealed
 //! payloads, out of order and under a byte limit. The FETCH handlers drain it.
-struct QuackFetchStream {
+struct QuackResultStream {
 	QuackFetchPayloadBuffer buffer;
 
 	void SignalBound(vector<LogicalType> types_p, vector<string> names_p) {
@@ -138,6 +138,6 @@ private:
 
 //! Installed in ClientConfig::get_result_collector, so the query runs in parallel into `stream`.
 unique_ptr<PhysicalOperator> MakeQuackFetchCollector(ClientContext &context, PreparedStatementData &data,
-                                                     shared_ptr<QuackFetchStream> stream);
+                                                     shared_ptr<QuackResultStream> stream);
 
 } // namespace duckdb

@@ -10,13 +10,13 @@ namespace duckdb {
 
 class DatabaseInstance;
 struct QuackConnection;
-struct QuackFetchStream;
+struct QuackResultStream;
 
 //! Keeps a connection's last client query, so a client that reconnects can get the same bytes.
 //! The fetch stream already holds each payload it served, for a transport retry. This cache holds
 //! that retention open after the client acks, and counts what it holds.
 struct QuackResultCache {
-	QuackResultCache(string sql_p, hugeint_t query_uuid_p, shared_ptr<QuackFetchStream> stream_p,
+	QuackResultCache(string sql_p, hugeint_t query_uuid_p, shared_ptr<QuackResultStream> stream_p,
 	                 shared_ptr<atomic<idx_t>> live_caches_p)
 	    : sql(std::move(sql_p)), query_uuid(query_uuid_p), stream(std::move(stream_p)),
 	      last_served_at(Timestamp::GetCurrentTimestamp()), live_caches(std::move(live_caches_p)) {
@@ -34,7 +34,7 @@ struct QuackResultCache {
 	//! UUID the cached query is currently served under.
 	hugeint_t query_uuid;
 	//! Held here too, because an internal query can replace the connection's stream.
-	shared_ptr<QuackFetchStream> stream;
+	shared_ptr<QuackResultStream> stream;
 	//! Rows in the payloads the stream is holding for this cache.
 	idx_t retained_rows = 0;
 	//! Last time this cache served a batch, anchors the quack_result_ttl expiry clock

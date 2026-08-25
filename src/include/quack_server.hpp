@@ -24,7 +24,7 @@ class Connection;
 class MemoryStream;
 class QueryResult;
 class DatabaseInstance;
-struct QuackFetchStream;
+struct QuackResultStream;
 class PreparedStatement;
 class EncryptionState;
 struct QuackInsertStream;
@@ -35,9 +35,9 @@ enum class QuackQueryState : uint8_t { IDLE, ACTIVE, FINISHED, CANCELLED, QUACK_
 
 //! The stream the connection's active query fills, one at a time. The query runs on a background
 //! thread with a rebalancing result collector, and the FETCH handlers drain the stream's buffer.
-struct QuackFetchState {
+struct QuackStatementState {
 	mutex lock;
-	shared_ptr<QuackFetchStream> stream;
+	shared_ptr<QuackResultStream> stream;
 	std::thread thread;
 	hugeint_t uuid = 0;
 	//! A late FETCH for this uuid gets this error. The stream and its payloads can then go away.
@@ -100,7 +100,7 @@ struct QuackConnection {
 
 	//! Where the statement's scan registers the streams that this session's SEND_DATA messages feed.
 	QuackInsertStreamRegistry &insert_streams;
-	QuackFetchState fetch;
+	QuackStatementState statement;
 };
 
 struct QuackConnectionSnapshot {

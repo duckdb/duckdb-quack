@@ -63,7 +63,7 @@ private:
 // producing task, not the thread.
 class QuackFetchBufferEmitter : public QuackBatchEmitter {
 public:
-	QuackFetchBufferEmitter(shared_ptr<QuackFetchStream> stream_p, idx_t debug_delay_ms_p)
+	QuackFetchBufferEmitter(shared_ptr<QuackResultStream> stream_p, idx_t debug_delay_ms_p)
 	    : stream(std::move(stream_p)), debug_delay_ms(debug_delay_ms_p) {
 	}
 
@@ -99,7 +99,7 @@ public:
 	}
 
 private:
-	shared_ptr<QuackFetchStream> stream;
+	shared_ptr<QuackResultStream> stream;
 	idx_t debug_delay_ms;
 };
 
@@ -109,12 +109,12 @@ private:
 // The data leaves through the stream's claim buffer, so the statement's own result stays empty.
 class QuackFetchCollector : public PhysicalResultCollector {
 public:
-	QuackFetchCollector(PhysicalPlan &physical_plan, PreparedStatementData &data, shared_ptr<QuackFetchStream> stream_p,
-	                    AppendOrderMode order_mode_p)
+	QuackFetchCollector(PhysicalPlan &physical_plan, PreparedStatementData &data,
+	                    shared_ptr<QuackResultStream> stream_p, AppendOrderMode order_mode_p)
 	    : PhysicalResultCollector(physical_plan, data), stream(std::move(stream_p)), order_mode(order_mode_p) {
 	}
 
-	shared_ptr<QuackFetchStream> stream;
+	shared_ptr<QuackResultStream> stream;
 	AppendOrderMode order_mode;
 
 public:
@@ -176,7 +176,7 @@ public:
 };
 
 unique_ptr<PhysicalOperator> MakeQuackFetchCollector(ClientContext &context, PreparedStatementData &data,
-                                                     shared_ptr<QuackFetchStream> stream) {
+                                                     shared_ptr<QuackResultStream> stream) {
 	// The stream carries the FIRST statement that returns a result, as core does for a result chain.
 	// Every other statement keeps the default collector.
 	if (data.properties.return_type != StatementReturnType::QUERY_RESULT || stream->Bound()) {

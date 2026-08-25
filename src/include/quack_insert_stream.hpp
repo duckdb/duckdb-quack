@@ -56,7 +56,7 @@ private:
 };
 
 //! Server state for one client data stream. The SEND_DATA handler fills the buffer, and
-//! scan_data_from_quack_client drains it. It is the mirror of QuackFetchStream.
+//! scan_data_from_quack_client drains it. It is the mirror of QuackResultStream.
 struct QuackInsertStream {
 	QuackInsertStream(vector<LogicalType> types_p, bool ordered_p, string session_id_p)
 	    : types(std::move(types_p)), ordered(ordered_p), session_id(std::move(session_id_p)) {
