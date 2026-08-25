@@ -76,9 +76,6 @@ struct QuackResultStream {
 	vector<LogicalType> types;
 	vector<string> names;
 	bool client_data_pending = false;
-	//! The rows a statement changed, kept as a number. The terminal SEND_DATA answers with it, so no
-	//! reader decodes the payload below to find it.
-	optional_idx changed_rows;
 	//! The dense batches PREPARE consumed inline. FETCH subtracts this, so the client-facing indices
 	//! stay dense from 1. PREPARE writes it before the first FETCH arrives.
 	idx_t prepare_batches = 0;

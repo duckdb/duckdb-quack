@@ -403,7 +403,8 @@ private:
 
 // One dense batch of data for a client stream that scan_data_from_quack_client drains. Batches
 // arrive in any order, and the server puts them back in order by index. The client ends the stream
-// with a chunk-less message that carries total_batches, so a short stream fails.
+// with a chunk-less message that carries total_batches, so a short stream fails. The statement's
+// result (its row count, or RETURNING rows) is fetched like any other result.
 class SendDataRequestMessage : public QuackMessage {
 public:
 	static constexpr MessageType TYPE = MessageType::SEND_DATA_REQUEST;
@@ -574,21 +575,12 @@ public:
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<SendDataResponseMessage> Deserialize(Deserializer &deserializer);
 
-	//! Only the answer to a terminal message sets it. The statement has ended by then, so this is what
-	//! it changed. It is not the count of rows the client sent.
-	void SetRowCount(optional_idx row_count_p) {
-		row_count = row_count_p;
-	}
 	optional_idx AcceptBudget() const {
 		return accept_budget;
-	}
-	optional_idx RowCount() const {
-		return row_count;
 	}
 
 private:
 	optional_idx accept_budget;
-	optional_idx row_count;
 };
 
 class DisconnectMessage : public QuackMessage {

@@ -107,7 +107,6 @@ static unique_ptr<FunctionData> QuackScanFromClientBind(ClientContext &context, 
 	bind_data->stream_id = std::move(stream_id);
 	// The stream exists now, so the client may send. PREPARE waits for this.
 	if (auto statement = session_state->Statement()) {
-		bind_data->stream->result = statement;
 		statement->SignalClientDataPending();
 	}
 	return std::move(bind_data);

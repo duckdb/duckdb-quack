@@ -158,17 +158,11 @@ static void DriveQuery(QuackConnection &connection, shared_ptr<QuackResultStream
 				result_names.push_back(col_name.GetIdentifierName());
 			}
 			stream->SignalBound(result->GetTypes(), std::move(result_names));
-			// A statement that reports a count returns one row that holds it. Keep the number here,
-			// while it is still a number. The terminal SEND_DATA answers with it.
-			bool reports_count = result->GetStatementProperties().return_type == StatementReturnType::CHANGED_ROWS;
 			unique_ptr<FetchResponsePayloadWriter> writer;
 			idx_t rows = 0;
 			while (auto chunk = result->Fetch()) {
 				if (chunk->size() == 0) {
 					continue;
-				}
-				if (reports_count && !stream->changed_rows.IsValid() && chunk->ColumnCount() == 1) {
-					stream->changed_rows = optional_idx(NumericCast<idx_t>(chunk->GetValue(0, 0).GetValue<int64_t>()));
 				}
 				if (!writer) {
 					writer = make_uniq<FetchResponsePayloadWriter>(context, 0);
@@ -845,26 +839,13 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		}
 
 		// The terminal message. Closing against a count makes a short stream fail loudly; a repeat
-		// closes against the same count and gets the same answer.
+		// closes against the same count and gets the same answer. The statement's result, and any
+		// later failure, come back through FETCH.
 		stream->buffer.Finish(send_data_message.TotalBatches());
 		if (stream->buffer.HasError()) {
 			return make_uniq<ErrorResponse>(stream->buffer.GetError());
 		}
-
-		// Wait for the statement to end, so one message reports a failure and the changed rows. The
-		// stream names its statement, so a later statement is not the one this waits on.
-		auto response = make_uniq<SendDataResponseMessage>();
-		if (auto result = stream->result.lock()) {
-			auto first_batch = result->prepare_batches + 1;
-			while (!result->buffer.BatchReadyOrEnd(first_batch)) {
-				result->buffer.WaitForBatch(first_batch);
-			}
-			if (result->buffer.HasError()) {
-				return make_uniq<ErrorResponse>(result->buffer.GetError());
-			}
-			response->SetRowCount(result->changed_rows);
-		}
-		return std::move(response);
+		return make_uniq<SendDataResponseMessage>();
 	}
 	case MessageType::CANCEL_REQUEST: {
 		auto &cancel_request_message = received_message.Cast<CancelRequestMessage>();

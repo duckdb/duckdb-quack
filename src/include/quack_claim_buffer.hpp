@@ -210,12 +210,6 @@ public:
 		return PopStatus::BATCH;
 	}
 
-	//! True when `claim` is ready, or the stream ended. A waiter that must not take the batch uses it.
-	bool BatchReadyOrEnd(idx_t claim) {
-		annotated_lock_guard<annotated_mutex> guard(lock);
-		return batches.find(claim) != batches.end() || finished || errored;
-	}
-
 	void WaitForBatch(idx_t claim) {
 		annotated_unique_lock<annotated_mutex> guard(lock);
 		if (batches.find(claim) != batches.end() || finished || errored) {

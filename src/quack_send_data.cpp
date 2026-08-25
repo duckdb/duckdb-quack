@@ -216,13 +216,23 @@ public:
 		auto &client = client_wrapper->GetClient();
 
 		// The terminal message is an ordinary SEND_DATA with no chunks. It closes the stream against the
-		// batch count, so a lost batch fails the statement. The server answers only when the statement
-		// has ended, so the same message reports a failure and the rows the statement changed.
+		// batch count, so a lost batch fails the statement.
 		auto terminal = make_uniq<SendDataRequestMessage>(quack_catalog.GetConnectionId(), stream_id,
 		                                                  vector<unique_ptr<DataChunkWrapper>>());
 		terminal->SetTotalBatches(total_batches);
-		auto response = client.Request<SendDataResponseMessage>(context, std::move(terminal));
-		return response->RowCount();
+		client.Request<SendDataResponseMessage>(context, std::move(terminal));
+
+		// The statement's result is one row: the rows it changed. Fetch it like any result, so a
+		// failure after the last batch surfaces here too.
+		auto fetch = make_uniq<FetchRequestMessage>(quack_catalog.GetConnectionId(), query_uuid, 1, 1);
+		auto response = client.Request<FetchResponseMessage>(context, std::move(fetch));
+		for (auto &wrapper : response->MutableResults()) {
+			auto &chunk = wrapper->Chunk();
+			if (chunk.size() > 0 && chunk.ColumnCount() > 0) {
+				return optional_idx(NumericCast<idx_t>(chunk.GetValue(0, 0).GetValue<int64_t>()));
+			}
+		}
+		return optional_idx();
 	}
 
 private:

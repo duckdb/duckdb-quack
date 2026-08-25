@@ -62,8 +62,6 @@ struct QuackInsertStream {
 	bool ordered;
 	//! Only this session may push to the stream.
 	string session_id;
-	//! The statement that drains this stream; the terminal SEND_DATA waits on it.
-	weak_ptr<QuackResultStream> result;
 	QuackChunkClaimBuffer buffer;
 };
 
