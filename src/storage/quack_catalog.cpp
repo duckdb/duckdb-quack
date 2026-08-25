@@ -245,15 +245,15 @@ string QuackCatalog::GetDBPath() {
 
 void QuackCatalog::DropSchema(ClientContext &context, DropInfo &info) {
 	// the resolved path is [catalog, parent schemas..., schema]; drop it remotely under the name the server
-	// knows it by (everything but the local catalog alias)
-	auto &path = info.GetQualifiedName().Path();
-	if (path.empty()) {
+	// knows it by - the local schema path is exactly the remote qualification, only the ATTACH alias is local
+	auto remote_name = info.GetQualifiedName();
+	remote_name.StripCatalog();
+	auto &schema_path = remote_name.Path();
+	if (schema_path.empty()) {
 		throw InternalException("DropSchema called without a schema name");
 	}
-	vector<Identifier> schema_path(path.begin() + (path.size() > 1 ? 1 : 0), path.end());
 	auto drop_info = info.Copy();
-	drop_info->SetQualifiedName(
-	    QualifiedName(vector<Identifier>(schema_path.begin(), schema_path.end() - 1), schema_path.back()));
+	drop_info->SetQualifiedName(remote_name);
 	auto &transaction = QuackTransaction::Get(context, *this);
 	transaction.Query(drop_info->ToString());
 

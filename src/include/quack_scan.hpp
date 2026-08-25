@@ -9,11 +9,9 @@ namespace duckdb {
 struct QuackScanBindData : FunctionData {
 	bool Equals(const FunctionData &other_p) const override {
 		auto &other = other_p.Cast<QuackScanBindData>();
-		// compare the whole path, not QualifiedName::operator== - that only looks at Catalog()/Schema()/Name(),
-		// which skips the components in between once a nested schema path is deeper than three
 		return other.client_connection->ConnectionId() == client_connection->ConnectionId() &&
 		       other.client_connection->ServerURI() == client_connection->ServerURI() &&
-		       other.qualified_table_name.Path() == qualified_table_name.Path() && other.column_names == column_names &&
+		       other.qualified_table_name == qualified_table_name && other.column_names == column_names &&
 		       other.column_types == column_types;
 	}
 	unique_ptr<FunctionData> Copy() const override {
