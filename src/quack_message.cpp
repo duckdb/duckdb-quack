@@ -57,9 +57,6 @@ MessageType EnumUtil::FromString<MessageType>(const char *value) {
 	if (StringUtil::Equals(value, "CANCEL_REQUEST")) {
 		return MessageType::CANCEL_REQUEST;
 	}
-	if (StringUtil::Equals(value, "FINALIZE")) {
-		return MessageType::FINALIZE;
-	}
 	if (StringUtil::Equals(value, "ACKNOWLEDGEMENT")) {
 		return MessageType::ACKNOWLEDGEMENT;
 	}
@@ -98,8 +95,6 @@ const char *EnumUtil::ToChars<MessageType>(MessageType value) {
 		return "DISCONNECT_MESSAGE";
 	case MessageType::CANCEL_REQUEST:
 		return "CANCEL_REQUEST";
-	case MessageType::FINALIZE:
-		return "FINALIZE";
 	case MessageType::ACKNOWLEDGEMENT:
 		return "ACKNOWLEDGEMENT";
 	case MessageType::HEARTBEAT_REQUEST:
@@ -154,8 +149,6 @@ unique_ptr<QuackMessage> QuackMessage::Deserialize(Deserializer &deserializer, M
 		return DisconnectMessage::Deserialize(deserializer);
 	case MessageType::CANCEL_REQUEST:
 		return CancelRequestMessage::Deserialize(deserializer);
-	case MessageType::FINALIZE:
-		return FinalizeMessage::Deserialize(deserializer);
 	case MessageType::ACKNOWLEDGEMENT:
 		return AcknowledgementMessage::Deserialize(deserializer);
 	case MessageType::HEARTBEAT_REQUEST:
@@ -351,10 +344,9 @@ QuackChunkPayloadWriter::SealedPayload QuackChunkPayloadWriter::Seal() {
 //===--------------------------------------------------------------------===//
 // FetchResponsePayloadWriter
 //===--------------------------------------------------------------------===//
-SendDataPayloadWriter::SendDataPayloadWriter(ClientContext &context, string connection_id, const string &schema_name,
-                                             const string &table_name, hugeint_t query_uuid_p, bool ordered_p,
+SendDataPayloadWriter::SendDataPayloadWriter(ClientContext &context, string connection_id, const string &stream_id,
                                              idx_t capacity_hint)
-    : QuackChunkPayloadWriter(context, capacity_hint), query_uuid(query_uuid_p), ordered(ordered_p) {
+    : QuackChunkPayloadWriter(context, capacity_hint) {
 	// The same client_query_id that QuackClient::EncodeRequest adds, taken when the message opens.
 	MessageHeader header(MessageType::SEND_DATA_REQUEST, std::move(connection_id));
 	if (context.transaction.HasActiveTransaction()) {
@@ -367,15 +359,14 @@ SendDataPayloadWriter::SendDataPayloadWriter(ClientContext &context, string conn
 
 	OpenMessage(header);
 	// The body prefix, field by field, as the generated Serialize writes it.
-	Body().WritePropertyWithDefault<string>(1, "schema_name", schema_name);
-	Body().WritePropertyWithDefault<string>(2, "table_name", table_name);
-	BeginChunkList(3, "chunks");
+	Body().WritePropertyWithDefault<string>(1, "stream_id", stream_id);
+	BeginChunkList(2, "chunks");
 }
 
 void SendDataPayloadWriter::WriteTail() {
-	Body().WriteProperty<hugeint_t>(4, "query_uuid", query_uuid);
-	Body().WritePropertyWithDefault<bool>(5, "ordered", ordered);
-	WriteBatchIndexField(6, "batch_index_fixed");
+	// total_batches keeps its default here: only the terminal message sets it, and that message
+	// carries no chunks, so this writer never builds it.
+	WriteBatchIndexField(4, "batch_index_fixed");
 }
 
 FetchResponsePayloadWriter::FetchResponsePayloadWriter(ClientContext &context, idx_t capacity_hint)

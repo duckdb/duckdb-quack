@@ -86,12 +86,11 @@ struct QuackPreparedSendData : public QuackPreparedBatch {
 //! The buffer is the wire message, so a cut needs no second serialization.
 class QuackSendDataFragmentBuilder : public QuackFragmentBuilder {
 public:
-	QuackSendDataFragmentBuilder(ClientContext &context, QuackTableCatalogEntry &table, hugeint_t query_uuid,
-	                             bool ordered, idx_t size_hint) {
+	QuackSendDataFragmentBuilder(ClientContext &context, QuackTableCatalogEntry &table, const string &stream_id,
+	                             idx_t size_hint) {
 		auto &quack_catalog = table.catalog.Cast<QuackCatalog>();
 		connection_id = quack_catalog.GetConnectionId();
-		writer = make_uniq<SendDataPayloadWriter>(context, connection_id, table.schema.name.GetIdentifierName(),
-		                                          table.name.GetIdentifierName(), query_uuid, ordered, size_hint);
+		writer = make_uniq<SendDataPayloadWriter>(context, connection_id, stream_id, size_hint);
 	}
 
 	void Append(ClientContext &context, DataChunk &chunk) override {
@@ -131,9 +130,9 @@ private:
 // costs an 8-byte patch. Finish drains the sends, then FINALIZE carries the batch count.
 class QuackSendDataEmitter : public QuackBatchEmitter {
 public:
-	QuackSendDataEmitter(ClientContext &context, QuackTableCatalogEntry &table_p, hugeint_t query_uuid_p,
-	                     bool ordered_p, idx_t debug_delay_ms_p, bool debug_duplicate_sends_p)
-	    : table(table_p), query_uuid(query_uuid_p), ordered(ordered_p), debug_delay_ms(debug_delay_ms_p),
+	QuackSendDataEmitter(ClientContext &context, QuackTableCatalogEntry &table_p, string stream_id_p,
+	                     hugeint_t query_uuid_p, idx_t debug_delay_ms_p, bool debug_duplicate_sends_p)
+	    : table(table_p), stream_id(std::move(stream_id_p)), query_uuid(query_uuid_p), debug_delay_ms(debug_delay_ms_p),
 	      debug_duplicate_sends(debug_duplicate_sends_p) {
 		queue = make_uniq<ManagedAsyncTaskQueue>(context);
 	}
@@ -149,7 +148,7 @@ public:
 	}
 
 	unique_ptr<QuackFragmentBuilder> OpenFragment(ClientContext &context, idx_t size_hint) override {
-		return make_uniq<QuackSendDataFragmentBuilder>(context, table, query_uuid, ordered, size_hint);
+		return make_uniq<QuackSendDataFragmentBuilder>(context, table, stream_id, size_hint);
 	}
 
 	//! Always true: the queue does not refuse work. ApplyBackpressure holds the producer thread.
@@ -187,23 +186,39 @@ public:
 		return true;
 	}
 
-	void Finish(ClientContext &context, idx_t total_batches) override {
-		// Drain every send before FINALIZE, so the server has all the batches before the count.
+	optional_idx Finish(ClientContext &context, idx_t total_batches) override {
+		// Drain every send first: the buffer checks the count when the terminal message arrives.
 		queue->Close();
 		queue.reset();
 
 		auto &quack_catalog = table.catalog.Cast<QuackCatalog>();
 		auto client_wrapper = quack_catalog.GetClientConnection()->GetClient(context);
 		auto &client = client_wrapper->GetClient();
-		auto finalize_msg = make_uniq<FinalizeMessage>(quack_catalog.GetConnectionId(), query_uuid);
-		finalize_msg->SetTotalBatches(total_batches);
-		client.Request<SuccessResponse>(context, std::move(finalize_msg));
+
+		// The terminal message is an ordinary SEND_DATA with no chunks. It closes the stream against
+		// the batch count, so a lost batch fails the statement instead of inserting less data.
+		auto terminal = make_uniq<SendDataRequestMessage>(quack_catalog.GetConnectionId(), stream_id,
+		                                                  vector<unique_ptr<DataChunkWrapper>>());
+		terminal->SetTotalBatches(total_batches);
+		client.Request<SendDataResponseMessage>(context, std::move(terminal));
+
+		// The statement now runs to its end on the server. Its result is one row: the rows it
+		// changed, which is not the same as the rows we sent (ON CONFLICT drops some).
+		auto fetch = make_uniq<FetchRequestMessage>(quack_catalog.GetConnectionId(), query_uuid, 1, 1);
+		auto response = client.Request<FetchResponseMessage>(context, std::move(fetch));
+		for (auto &wrapper : response->MutableResults()) {
+			auto &chunk = wrapper->Chunk();
+			if (chunk.size() > 0 && chunk.ColumnCount() > 0) {
+				return optional_idx(NumericCast<idx_t>(chunk.GetValue(0, 0).GetValue<int64_t>()));
+			}
+		}
+		return optional_idx();
 	}
 
 private:
 	QuackTableCatalogEntry &table;
+	string stream_id;
 	hugeint_t query_uuid;
-	bool ordered;
 	idx_t debug_delay_ms;
 	bool debug_duplicate_sends;
 	//! Regular threads register payloads. Async-pool threads POST them.
@@ -211,9 +226,10 @@ private:
 };
 
 unique_ptr<QuackBatchEmitter> MakeQuackSendDataEmitter(ClientContext &context, QuackTableCatalogEntry &table,
-                                                       hugeint_t query_uuid, bool ordered, idx_t debug_delay_ms,
+                                                       string stream_id, hugeint_t query_uuid, idx_t debug_delay_ms,
                                                        bool debug_duplicate_sends) {
-	return make_uniq<QuackSendDataEmitter>(context, table, query_uuid, ordered, debug_delay_ms, debug_duplicate_sends);
+	return make_uniq<QuackSendDataEmitter>(context, table, std::move(stream_id), query_uuid, debug_delay_ms,
+	                                       debug_duplicate_sends);
 }
 
 } // namespace duckdb

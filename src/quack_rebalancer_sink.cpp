@@ -1,12 +1,32 @@
 #include "quack_rebalancer_sink.hpp"
 
+#include "duckdb/common/encryption_state.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/database.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/parallel/base_pipeline_event.hpp"
 #include "duckdb/parallel/executor_task.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 
 namespace duckdb {
+
+string QuackRandomToken(DatabaseInstance &db) {
+	static constexpr idx_t TOKEN_BYTES = 16; // 128 bits
+	auto encryption_util = db.GetEncryptionUtil(false);
+	auto metadata =
+	    make_uniq<EncryptionStateMetadata>(EncryptionTypes::GCM, TOKEN_BYTES, EncryptionTypes::EncryptionVersion::NONE);
+	auto rng = encryption_util->CreateEncryptionState(std::move(metadata));
+
+	data_t bytes[TOKEN_BYTES];
+	rng->GenerateRandomData(bytes, TOKEN_BYTES);
+	string hex(TOKEN_BYTES * 2, '\0');
+	const char *digits = "0123456789abcdef";
+	for (idx_t i = 0; i < TOKEN_BYTES; i++) {
+		hex[i * 2] = digits[bytes[i] >> 4];
+		hex[i * 2 + 1] = digits[bytes[i] & 0x0F];
+	}
+	return hex;
+}
 
 idx_t QuackGetUBigintSetting(ClientContext &context, const char *name, idx_t default_value) {
 	Value val;
@@ -277,7 +297,10 @@ public:
 	}
 
 	void FinishEvent() override {
-		gstate.core->FinalizeFinish(context);
+		auto reported = gstate.core->FinalizeFinish(context);
+		if (reported.IsValid()) {
+			gstate.row_count = reported.GetIndex();
+		}
 	}
 
 private:
@@ -292,7 +315,10 @@ SinkFinalizeType QuackRebalancerFinalize(Pipeline &pipeline, Event &event, Clien
 	// A single batch emits here. Several batches, or one that parks on capacity, go to the event
 	// tasks: those emit in parallel, and they can yield when the delivery buffer is full.
 	if (core.TaskCount() <= 1 && core.ExecuteTasks(context) == QuackEmitProgress::DONE) {
-		core.FinalizeFinish(context);
+		auto reported = core.FinalizeFinish(context);
+		if (reported.IsValid()) {
+			gstate.row_count = reported.GetIndex();
+		}
 	} else {
 		event.InsertEvent(make_shared_ptr<QuackEmitRemainingEvent>(gstate, pipeline, context));
 	}

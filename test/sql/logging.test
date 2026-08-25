@@ -198,12 +198,13 @@ select count(*) > 1 from duckdb_logs_parsed('Quack') where message_type = 'SEND_
 ----
 true
 
-# every SEND_DATA_REQUEST is now visible as a data-sized HTTP POST (was ~1-2 of N before the fix).
-# The threshold must only stay above a control message: the last batch can be much smaller than
-# the batch target.
+# Every SEND_DATA_REQUEST that carries data is now visible as a data-sized HTTP POST (was ~1-2 of N
+# before the fix). The threshold must only stay above a control message: the last batch can be much
+# smaller than the batch target. One SEND_DATA_REQUEST carries no data: the terminal message, which
+# ends the stream and holds the batch count only.
 query I
 select
-  (select count(*) from duckdb_logs_parsed('Quack') where message_type = 'SEND_DATA_REQUEST')
+  (select count(*) from duckdb_logs_parsed('Quack') where message_type = 'SEND_DATA_REQUEST') - 1
   = (select count(*) from duckdb_logs_parsed('HTTP')
        where request.type = 'POST' and request.request_body_length > 5000)
 ----

@@ -76,7 +76,9 @@ public:
 	//! With `interrupt` set, capacity freeing fires it. An emitter that cannot fill up returns true.
 	virtual bool TryEmitPrepared(ClientContext &context, idx_t dense_index, unique_ptr<QuackPreparedBatch> &batch,
 	                             optional_ptr<const InterruptState> interrupt) = 0;
-	virtual void Finish(ClientContext &context, idx_t total_batches) = 0;
+	//! The receiver's own row count, when it reports one. It replaces what the sink counted, which
+	//! for an INSERT is what was sent, not what landed.
+	virtual optional_idx Finish(ClientContext &context, idx_t total_batches) = 0;
 };
 
 //! BLOCKED = a batch is parked on delivery capacity and stays queued. The caller must yield with a
@@ -136,7 +138,7 @@ public:
 		return task_manager.TaskCount() + parked_tasks.size();
 	}
 	//! Verify the accounting, then let the emitter close the stream.
-	void FinalizeFinish(ClientContext &context);
+	optional_idx FinalizeFinish(ClientContext &context);
 
 	BatchMemoryManager &MemoryManager() {
 		return memory_manager;

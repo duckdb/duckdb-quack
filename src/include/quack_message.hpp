@@ -30,7 +30,6 @@ enum class MessageType : uint8_t {
 	SUCCESS_RESPONSE = 10,
 	DISCONNECT_MESSAGE = 11,
 	CANCEL_REQUEST = 12,
-	FINALIZE = 13,
 	SEND_DATA_RESPONSE = 14,
 	ACKNOWLEDGEMENT = 15,
 	HEARTBEAT_REQUEST = 16,
@@ -177,6 +176,15 @@ public:
 	    : QuackMessage(TYPE, std::move(connection_id_p)), sql_query(std::move(sql_query_p)), query_uuid(query_uuid_p) {
 	}
 
+	//! Rows the response may carry. Zero makes PREPARE answer before the query gives a row, which is
+	//! what a statement that waits for client data needs. Unset uses the server setting.
+	void SetInlineRows(optional_idx inline_rows_p) {
+		inline_rows = inline_rows_p;
+	}
+	optional_idx InlineRows() const {
+		return inline_rows;
+	}
+
 public:
 	const string &Query() const {
 		return sql_query;
@@ -197,6 +205,7 @@ protected:
 private:
 	string sql_query;
 	hugeint_t query_uuid;
+	optional_idx inline_rows;
 };
 
 class PrepareResponseMessage : public QuackMessage {
@@ -392,18 +401,16 @@ private:
 	optional_idx total_batches;
 };
 
-// One dense batch of insert data, keyed by (connection_id, query_uuid). Batches arrive in any
-// order, and the server puts them back in order by index. `ordered` says if the INSERT must keep
-// that order.
+// One dense batch of data for a client stream that scan_data_from_quack_client drains. Batches
+// arrive in any order, and the server puts them back in order by index. The client ends the stream
+// with a chunk-less message that carries total_batches, so a short stream fails.
 class SendDataRequestMessage : public QuackMessage {
 public:
 	static constexpr MessageType TYPE = MessageType::SEND_DATA_REQUEST;
 
-	SendDataRequestMessage(string connection_id_p, string schema_name_p, string table_name_p,
-	                       vector<unique_ptr<DataChunkWrapper>> chunks_p, hugeint_t query_uuid_p, bool ordered_p)
-	    : QuackMessage(TYPE, std::move(connection_id_p)), schema_name(std::move(schema_name_p)),
-	      table_name(std::move(table_name_p)), chunks(std::move(chunks_p)), query_uuid(query_uuid_p),
-	      ordered(ordered_p) {
+	SendDataRequestMessage(string connection_id_p, string stream_id_p, vector<unique_ptr<DataChunkWrapper>> chunks_p)
+	    : QuackMessage(TYPE, std::move(connection_id_p)), stream_id(std::move(stream_id_p)),
+	      chunks(std::move(chunks_p)) {
 	}
 
 	void Serialize(Serializer &serializer) const override;
@@ -417,24 +424,22 @@ public:
 	void SetBatchIndex(optional_idx batch_index_p) {
 		batch_index = batch_index_p;
 	}
+	//! The batch count of the whole stream. Only the terminal message sets it.
+	void SetTotalBatches(optional_idx total_batches_p) {
+		total_batches = total_batches_p;
+	}
 
 	vector<unique_ptr<DataChunkWrapper>> &Chunks() {
 		return chunks;
 	}
-	const string &SchemaName() const {
-		return schema_name;
-	}
-	const string &TableName() const {
-		return table_name;
-	}
-	hugeint_t QueryUUID() const {
-		return query_uuid;
+	const string &StreamId() const {
+		return stream_id;
 	}
 	optional_idx BatchIndex() const {
 		return batch_index;
 	}
-	bool Ordered() const {
-		return ordered;
+	optional_idx TotalBatches() const {
+		return total_batches;
 	}
 
 protected:
@@ -442,14 +447,12 @@ protected:
 	}
 
 private:
-	string schema_name;
-	string table_name;
+	string stream_id;
 	//! The chunks of the batch, after the decode.
 	vector<unique_ptr<DataChunkWrapper>> chunks;
-	hugeint_t query_uuid;
-	//! True if the INSERT must keep the stream order. It is equal on every message of one stream.
-	bool ordered = false;
-	//! The dense batch index (1,2,3,...).
+	//! Set on the terminal message only. The server closes the stream against it.
+	optional_idx total_batches;
+	//! The dense batch index (1,2,3,...). Unset on the terminal message.
 	optional_idx batch_index;
 };
 
@@ -520,8 +523,7 @@ protected:
 //! Builds SEND_DATA_REQUEST payloads, as FetchResponsePayloadWriter does for the fetch answer.
 class SendDataPayloadWriter : public QuackChunkPayloadWriter {
 public:
-	SendDataPayloadWriter(ClientContext &context, string connection_id, const string &schema_name,
-	                      const string &table_name, hugeint_t query_uuid, bool ordered, idx_t capacity_hint);
+	SendDataPayloadWriter(ClientContext &context, string connection_id, const string &stream_id, idx_t capacity_hint);
 
 	//! Captured when the message opens, because the POST runs with no ClientContext.
 	optional_idx ClientQueryId() const {
@@ -535,8 +537,6 @@ protected:
 	}
 
 private:
-	hugeint_t query_uuid;
-	bool ordered;
 	optional_idx client_query_id;
 };
 
@@ -584,36 +584,6 @@ private:
 
 // End-of-stream marker for a client->server stream (connection_id, query_uuid): server drains and
 // replies Success/Error. Used by SEND_DATA inserts today; reusable for future streams (e.g. reads).
-class FinalizeMessage : public QuackMessage {
-public:
-	static constexpr MessageType TYPE = MessageType::FINALIZE;
-
-	explicit FinalizeMessage(string connection_id_p, hugeint_t query_uuid_p)
-	    : QuackMessage(TYPE, std::move(connection_id_p)), query_uuid(query_uuid_p) {};
-
-	void Serialize(Serializer &serializer) const override;
-	static unique_ptr<FinalizeMessage> Deserialize(Deserializer &deserializer);
-
-	//! The dense batches the client sent. A short stream then fails, and inserts nothing.
-	void SetTotalBatches(optional_idx total_batches_p) {
-		total_batches = total_batches_p;
-	}
-	hugeint_t QueryUUID() const {
-		return query_uuid;
-	}
-	optional_idx TotalBatches() const {
-		return total_batches;
-	}
-
-protected:
-	FinalizeMessage() : QuackMessage(TYPE) {
-	}
-
-private:
-	hugeint_t query_uuid;
-	optional_idx total_batches;
-};
-
 class DisconnectMessage : public QuackMessage {
 public:
 	static constexpr MessageType TYPE = MessageType::DISCONNECT_MESSAGE;

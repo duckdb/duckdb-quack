@@ -38,7 +38,7 @@ static bool LeaseTimeoutElapsed(time_point<steady_clock> last_renewed_at, time_p
 QuackConnection::QuackConnection(string session_id_p, idx_t heartbeat_timeout_seconds_p,
                                  QuackInsertStreamRegistry &registry)
     : session_id(std::move(session_id_p)), heartbeat_timeout_seconds(heartbeat_timeout_seconds_p),
-      lease_last_renewed_at(steady_clock::now()), insert(registry) {
+      lease_last_renewed_at(steady_clock::now()), insert_streams(registry) {
 }
 
 bool QuackConnection::LeaseExpiredLocked(time_point<steady_clock> now) {
@@ -56,67 +56,6 @@ bool QuackConnection::TryRenewLease() {
 	}
 	lease_last_renewed_at = now;
 	return true;
-}
-
-//! Finish + join + deregister a detached insert stream; returns any INSERT error. Call WITHOUT the lock.
-//! A valid `total_batches` makes a short stream fail, instead of inserting less data.
-ErrorData DetachedInsertStream::FinishAndJoin(optional_idx total_batches) {
-	ErrorData error;
-	if (!stream) {
-		return error;
-	}
-	stream->buffer.Finish(total_batches);
-	if (thread.joinable()) {
-		thread.join();
-	}
-	if (stream->buffer.HasError()) {
-		error = stream->buffer.GetError();
-	}
-	registry->Erase(id);
-	return error;
-}
-
-//! Roll the INSERT back + join + deregister a detached insert stream. Call WITHOUT the lock.
-void DetachedInsertStream::AbortAndJoin(const string &reason) {
-	if (!stream) {
-		return;
-	}
-	stream->buffer.SetError(ErrorData(ExceptionType::INVALID_INPUT, reason));
-	if (thread.joinable()) {
-		thread.join();
-	}
-	registry->Erase(id);
-}
-
-DetachedInsertStream QuackInsertState::Detach() {
-	annotated_lock_guard<annotated_mutex> guard(lock);
-	DetachedInsertStream detached;
-	detached.registry = &registry;
-	detached.stream = std::move(stream);
-	detached.thread = std::move(thread);
-	detached.id = std::move(stream_id);
-	stream.reset();
-	stream_id.clear();
-	return detached;
-}
-
-DetachedInsertStream QuackInsertState::DetachIfUnrelated(const string &msg_stream_id) {
-	annotated_lock_guard<annotated_mutex> guard(lock);
-	DetachedInsertStream detached;
-	detached.registry = &registry;
-	if (!stream || stream_id == msg_stream_id) {
-		return detached; // nothing active, or this message continues the active stream
-	}
-	detached.stream = std::move(stream);
-	detached.thread = std::move(thread);
-	detached.id = std::move(stream_id);
-	stream.reset();
-	stream_id.clear();
-	return detached;
-}
-
-ErrorData QuackInsertState::Finalize(optional_idx total_batches) {
-	return Detach().FinishAndJoin(total_batches);
 }
 
 //! A fetch stream and its producer thread, taken off the connection so an abort can run unlocked.
@@ -154,6 +93,8 @@ static void AbortFetchStream(QuackConnection &connection, const string &reason) 
 			                                   : ErrorData(ExceptionType::INTERRUPT, reason);
 		}
 	}
+	// The statement may hold a scan that waits for a client batch. Errors those streams too.
+	connection.insert_streams.DropSession(connection.session_id, reason);
 	AbortDetachedFetch(connection, std::move(detached), reason);
 }
 
@@ -177,9 +118,10 @@ static void SyncFetchCache(QuackConnection &connection, QuackFetchStream &stream
 	connection.SyncCachedRows();
 }
 
-//! Runs the client's query with the fetch collector installed, and holds the statement lock for
-//! the full duration. The query fills the stream's claim buffer in parallel.
-static void RunFetchQuery(QuackConnection &connection, shared_ptr<QuackFetchStream> stream, string sql) {
+//! Runs one client statement with the fetch collector installed, and holds the statement lock for
+//! its duration. A statement that returns rows fills the claim buffer in parallel. A statement that
+//! returns a count leaves that count in batch 1, through the fallback below.
+static void DriveQuery(QuackConnection &connection, shared_ptr<QuackFetchStream> stream, string sql) {
 	try {
 		unique_lock<mutex> guard(connection.statement_lock);
 		auto &context = *connection.duckdb_connection->context;
@@ -248,44 +190,13 @@ static void RunFetchQuery(QuackConnection &connection, shared_ptr<QuackFetchStre
 	}
 	// Close against the announced total, so a short stream errors instead of truncating.
 	stream->buffer.Finish(stream->announced_total);
+	// The statement is over, so the streams its scan registered cannot receive anything more.
+	connection.insert_streams.DropSession(connection.session_id);
 }
 
 QuackConnection::~QuackConnection() {
-	// Abort and join the INSERT and the fetch collector before the members go away.
-	insert.Detach().AbortAndJoin("connection closed during insert");
+	// Abort and join the query driver before the members go away.
 	AbortFetchStream(*this, "connection closed during fetch");
-}
-
-//! Background thread: runs the INSERT that drains `stream` via scan_data_from_quack_client, holding
-//! the statement lock for the statement's duration (one transactional statement -> atomic).
-static void RunInsertStatement(QuackConnection &connection, shared_ptr<QuackInsertStream> stream, string stream_id,
-                               string schema_name, string table_name) {
-	try {
-		unique_lock<mutex> lock(connection.statement_lock);
-		auto sql = StringUtil::Format("INSERT INTO %s.%s SELECT * FROM scan_data_from_quack_client(%s)",
-		                              SQLIdentifier(schema_name), SQLIdentifier(table_name), SQLString(stream_id));
-		auto result = connection.duckdb_connection->Query(sql);
-		if (result->HasError()) {
-			stream->buffer.SetError(result->GetErrorObject());
-		}
-	} catch (std::exception &ex) {
-		stream->buffer.SetError(ErrorData(ex));
-	}
-	// Make sure the consumer side is released even on an unexpected early return.
-	stream->buffer.Finish();
-}
-
-//! Stream id a SEND_DATA/FINALIZE belongs to, or "" for any other message.
-static string StreamIdForMessage(QuackMessage &msg) {
-	if (msg.Type() == MessageType::SEND_DATA_REQUEST) {
-		auto &m = msg.Cast<SendDataRequestMessage>();
-		return QuackInsertStreamRegistry::MakeId(m.ConnectionId(), m.QueryUUID());
-	}
-	if (msg.Type() == MessageType::FINALIZE) {
-		auto &m = msg.Cast<FinalizeMessage>();
-		return QuackInsertStreamRegistry::MakeId(m.ConnectionId(), m.QueryUUID());
-	}
-	return string();
 }
 
 void QuackServer::ValidateToken(const string &token) {
@@ -307,7 +218,6 @@ void QuackServer::CleanupExpiredConnection(QuackConnection &connection) {
 	if (connection.duckdb_connection) {
 		connection.duckdb_connection->Interrupt();
 	}
-	connection.insert.Detach().AbortAndJoin("connection heartbeat lease expired");
 	// Interrupt() cannot wake a producer that is parked on the buffer capacity. Abort and join it
 	// here, not in ~QuackConnection, so the connection is quiet before the handler continues.
 	AbortFetchStream(connection, "connection heartbeat lease expired");
@@ -462,7 +372,10 @@ string QuackServer::CreateNewConnection(const string &session_id, const string &
 	new_connection->client_id_hash = client_id_hash;
 	new_connection->live_caches = live_caches;
 	new_connection->duckdb_connection = make_uniq<Connection>(*db);
-	new_connection->duckdb_connection->context->config.enable_progress_bar = false;
+	auto &connection_context = *new_connection->duckdb_connection->context;
+	// scan_data_from_quack_client reads this, so a stream records the session that may feed it.
+	connection_context.registered_state->Insert(QuackSessionState::KEY, make_shared_ptr<QuackSessionState>(session_id));
+	connection_context.config.enable_progress_bar = false;
 	// new_connection->duckdb_connection->context->config.streaming_buffer_size = 10 * 1000000; // 10 MB
 	active_connections[session_id] = std::move(new_connection);
 	return session_id;
@@ -526,14 +439,7 @@ static string ComputeClientHash(const string &server_hmac_key, const string &cli
 }
 
 string QuackServer::GenerateRandomToken(DatabaseInstance &db) {
-	auto encryption_util = db.GetEncryptionUtil(false);
-	auto metadata =
-	    make_uniq<EncryptionStateMetadata>(EncryptionTypes::GCM, kTokenBytes, EncryptionTypes::EncryptionVersion::NONE);
-	auto rng = encryption_util->CreateEncryptionState(std::move(metadata));
-
-	data_t bytes[kTokenBytes];
-	rng->GenerateRandomData(bytes, kTokenBytes);
-	return HexEncode(bytes, kTokenBytes);
+	return QuackRandomToken(db);
 }
 
 string QuackServer::GenerateSessionId() {
@@ -571,7 +477,6 @@ bool ServerSupportsMessage(MessageType type) {
 	case MessageType::SEND_DATA_REQUEST:
 	case MessageType::DISCONNECT_MESSAGE:
 	case MessageType::CANCEL_REQUEST:
-	case MessageType::FINALIZE:
 	case MessageType::ACKNOWLEDGEMENT:
 	case MessageType::HEARTBEAT_REQUEST:
 		return true;
@@ -657,12 +562,6 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
 
 unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db, QuackMessage &received_message,
                                                             optional_ptr<QuackConnection> connection_p) {
-	if (connection_p && received_message.Type() != MessageType::HEARTBEAT_REQUEST) {
-		// A message unrelated to the active insert stream means it was abandoned (client source failed, no
-		// FINALIZE) — abort it so it rolls back and releases the statement lock.
-		connection_p->insert.DetachIfUnrelated(StreamIdForMessage(received_message))
-		    .AbortAndJoin("insert stream abandoned");
-	}
 	switch (received_message.Type()) {
 	case MessageType::CONNECTION_REQUEST: {
 		auto &connection_request_message = received_message.Cast<ConnectionRequestMessage>();
@@ -756,7 +655,17 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			connection.fetch.stream = stream;
 			connection.fetch.uuid = prepare_request_message.QueryUUID();
 			connection.fetch.abort_error = ErrorData();
-			connection.fetch.thread = std::thread(RunFetchQuery, std::ref(connection), stream, effective_sql);
+			// A statement whose source is a client stream binds its result only when it ends, and it
+			// cannot end before the client sends. The scan raises this so PREPARE stops waiting.
+			if (auto session_state = QuackSessionState::Get(*connection.duckdb_connection->context)) {
+				weak_ptr<QuackFetchStream> weak_stream = stream;
+				session_state->SetClientDataHook([weak_stream]() {
+					if (auto live = weak_stream.lock()) {
+						live->SignalClientDataPending();
+					}
+				});
+			}
+			connection.fetch.thread = std::thread(DriveQuery, std::ref(connection), stream, effective_sql);
 		}
 		AbortDetachedFetch(connection, std::move(superseded), "superseded by a new query");
 
@@ -772,8 +681,12 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 
 		// Put the leading batches in the PREPARE response, so a small result needs one round trip
 		// only. The FETCH indices then move down by the count this drain consumed.
+		// A statement that waits for client data must answer before it has a row, so the client can
+		// start sending. It asks for that with inline_rows = 0.
 		idx_t max_inline_rows =
-		    QuackGetUBigintSetting(db, "quack_prepare_inline_rows", QUACK_PREPARE_INLINE_ROWS_DEFAULT);
+		    prepare_request_message.InlineRows().IsValid()
+		        ? prepare_request_message.InlineRows().GetIndex()
+		        : QuackGetUBigintSetting(db, "quack_prepare_inline_rows", QUACK_PREPARE_INLINE_ROWS_DEFAULT);
 		vector<unique_ptr<DataChunkWrapper>> results;
 		idx_t inline_rows = 0;
 		idx_t consumed = 0;
@@ -925,87 +838,41 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		auto &send_data_message = received_message.Cast<SendDataRequestMessage>();
 		auto &connection = *connection_p;
 
-		// we never execute this query, but throw it at the authorization function so it can check if this user gets to
-		// insert into this table
-		auto dummy_insert_query =
-		    StringUtil::Format("INSERT INTO %s.%s VALUES (NULL)", SQLIdentifier(send_data_message.SchemaName()),
-		                       SQLIdentifier(send_data_message.TableName()));
-
-		// TODO do not do this if there is no fun set
-		{
-			auto auth_result = EvaluateAuthQuery(
-			    db, StringUtil::Format("SELECT %s(?, ?)", GetSettingString(db, "quack_authorization_function")),
-			    Value(send_data_message.ConnectionId()), Value(dummy_insert_query));
-			if (auth_result.IsNull() ||
-			    (auth_result.type().id() == LogicalTypeId::BOOLEAN && !auth_result.GetValue<bool>())) {
-				return make_uniq<ErrorResponse>("Authorization failed");
-			}
+		// The scan registers the stream when the statement binds, so PREPARE must have run. The
+		// statement itself was authorized then, and the id is unguessable, so a batch needs no check
+		// beyond the session that owns the stream.
+		auto stream = QuackStorageExtensionInfo::GetState(db).InsertStreams().Find(send_data_message.StreamId());
+		if (!stream || stream->session_id != connection.session_id) {
+			return make_uniq<ErrorResponse>("No active data stream '%s'", send_data_message.StreamId());
 		}
 
-		// The stream and its INSERT thread start on the first message. Batches arrive in any order,
-		// so any message can be the one that creates them.
-		auto stream_id =
-		    QuackInsertStreamRegistry::MakeId(send_data_message.ConnectionId(), send_data_message.QueryUUID());
 		auto &incoming_chunks = send_data_message.Chunks();
-		if (!send_data_message.BatchIndex().IsValid()) {
-			return make_uniq<ErrorResponse>("send_data_request is missing its batch index");
-		}
-		if (incoming_chunks.empty()) {
-			// The rebalancer never cuts an empty batch, but do not fail if one arrives.
-			return make_uniq<SendDataResponseMessage>();
-		}
-
-		shared_ptr<QuackInsertStream> stream;
-		{
-			annotated_lock_guard<annotated_mutex> guard(connection.insert.lock);
-			if (connection.insert.stream) {
-				stream = connection.insert.stream;
-			} else {
-				auto types = incoming_chunks[0]->Chunk().GetTypes();
-				stream = connection.insert.registry.Create(stream_id, types, send_data_message.Ordered());
-				connection.insert.stream = stream;
-				connection.insert.stream_id = stream_id;
-				connection.insert.thread = std::thread(RunInsertStatement, std::ref(connection), stream, stream_id,
-				                                       send_data_message.SchemaName(), send_data_message.TableName());
+		if (!incoming_chunks.empty()) {
+			if (!send_data_message.BatchIndex().IsValid()) {
+				return make_uniq<ErrorResponse>("send_data_request is missing its batch index");
 			}
+			// Reference the chunks from the message. DataChunkWrapper.Deserialize uses DataChunk::Reference()
+			// internally, so the underlying VectorBuffers are ref-counted and outlive the message.
+			vector<unique_ptr<DataChunk>> owned_chunks;
+			owned_chunks.reserve(incoming_chunks.size());
+			for (auto &wrapper : incoming_chunks) {
+				auto owned = make_uniq<DataChunk>();
+				owned->InitializeEmpty(wrapper->Chunk().GetTypes());
+				owned->Reference(wrapper->Chunk());
+				owned_chunks.push_back(std::move(owned));
+			}
+			// The claim buffer drops a duplicate index, so a retry of the same batch is safe.
+			stream->buffer.PushBatch(send_data_message.BatchIndex().GetIndex(), std::move(owned_chunks));
 		}
 
-		// Reference the chunks from the message. DataChunkWrapper.Deserialize uses DataChunk::Reference()
-		// internally, so the underlying VectorBuffers are ref-counted and outlive the message.
-		vector<unique_ptr<DataChunk>> owned_chunks;
-		owned_chunks.reserve(incoming_chunks.size());
-		for (auto &wrapper : incoming_chunks) {
-			auto owned = make_uniq<DataChunk>();
-			owned->InitializeEmpty(wrapper->Chunk().GetTypes());
-			owned->Reference(wrapper->Chunk());
-			owned_chunks.push_back(std::move(owned));
+		if (send_data_message.TotalBatches().IsValid()) {
+			// The terminal message. Closing against a count makes a short stream fail loudly.
+			stream->buffer.Finish(send_data_message.TotalBatches());
 		}
-
-		// The claim buffer drops a duplicate index, so a retry of the same batch is safe.
-		stream->buffer.PushBatch(send_data_message.BatchIndex().GetIndex(), std::move(owned_chunks));
-
 		if (stream->buffer.HasError()) {
-			auto error = connection.insert.Finalize();
-			return make_uniq<ErrorResponse>(error);
+			return make_uniq<ErrorResponse>(stream->buffer.GetError());
 		}
 		return make_uniq<SendDataResponseMessage>(); // accept_budget unset = unbounded (future flow control)
-	}
-	case MessageType::FINALIZE: {
-		auto &finalize_message = received_message.Cast<FinalizeMessage>();
-		auto &connection = *connection_p;
-		auto stream_id =
-		    QuackInsertStreamRegistry::MakeId(finalize_message.ConnectionId(), finalize_message.QueryUUID());
-		{
-			annotated_lock_guard<annotated_mutex> guard(connection.insert.lock);
-			if (connection.insert.stream_id != stream_id) {
-				return make_uniq<SuccessResponse>(); // no matching stream (e.g. a zero-row insert)
-			}
-		}
-		auto error = connection.insert.Finalize(finalize_message.TotalBatches());
-		if (error.HasError()) {
-			return make_uniq<ErrorResponse>(error);
-		}
-		return make_uniq<SuccessResponse>();
 	}
 	case MessageType::CANCEL_REQUEST: {
 		auto &cancel_request_message = received_message.Cast<CancelRequestMessage>();

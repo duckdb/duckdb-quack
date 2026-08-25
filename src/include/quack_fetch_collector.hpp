@@ -48,13 +48,24 @@ struct QuackFetchStream {
 		bind_cv.notify_all();
 	}
 
-	//! true = the query is planned. false = it failed before that; the buffer holds the error.
+	//! Raised when a scan of this statement registers a client data stream. The statement cannot
+	//! reach a result until the client sends its batches, so PREPARE must answer now.
+	void SignalClientDataPending() {
+		{
+			lock_guard<mutex> guard(bind_lock);
+			client_data_pending = true;
+		}
+		bind_cv.notify_all();
+	}
+
+	//! true = the query is planned, or it waits for the client's data. false = it failed before
+	//! that; the buffer holds the error.
 	bool WaitBound() {
 		unique_lock<mutex> guard(bind_lock);
-		while (!bound && !buffer.HasError() && !buffer.Exhausted()) {
+		while (!bound && !client_data_pending && !buffer.HasError() && !buffer.Exhausted()) {
 			bind_cv.wait_for(guard, std::chrono::milliseconds(50));
 		}
-		return bound;
+		return bound || client_data_pending;
 	}
 
 	bool Bound() {
@@ -64,6 +75,7 @@ struct QuackFetchStream {
 
 	vector<LogicalType> types;
 	vector<string> names;
+	bool client_data_pending = false;
 	//! The dense batches PREPARE consumed inline. FETCH subtracts this, so the client-facing indices
 	//! stay dense from 1. PREPARE writes it before the first FETCH arrives.
 	idx_t prepare_batches = 0;

@@ -48,6 +48,12 @@
         "id": 2,
         "name": "query_uuid",
         "type": "hugeint_t"
+      },
+      {
+        "id": 3,
+        "name": "inline_rows",
+        "type": "optional_idx",
+        "default": "optional_idx()"
       }
     ]
   },
@@ -117,31 +123,22 @@
     "members": [
       {
         "id": 1,
-        "name": "schema_name",
+        "name": "stream_id",
         "type": "string"
       },
       {
         "id": 2,
-        "name": "table_name",
-        "type": "string"
-      },
-      {
-        "id": 3,
         "name": "chunks",
         "type": "vector<unique_ptr<DataChunkWrapper>>"
       },
       {
+        "id": 3,
+        "name": "total_batches",
+        "type": "optional_idx",
+        "default": "optional_idx()"
+      },
+      {
         "id": 4,
-        "name": "query_uuid",
-        "type": "hugeint_t"
-      },
-      {
-        "id": 5,
-        "name": "ordered",
-        "type": "bool"
-      },
-      {
-        "id": 6,
         "name": "batch_index_fixed",
         "type": "string",
         "serialize_property": "EncodeBatchIndexFixed()",
@@ -161,22 +158,6 @@
         "id": 1,
         "name": "accept_budget",
         "type": "optional_idx"
-      }
-    ]
-  },
-  {
-    "class": "FinalizeMessage",
-    "members": [
-      {
-        "id": 1,
-        "name": "query_uuid",
-        "type": "hugeint_t"
-      },
-      {
-        "id": 2,
-        "name": "total_batches",
-        "type": "optional_idx",
-        "default": "optional_idx()"
       }
     ]
   },

@@ -5,12 +5,31 @@
 
 #include "duckdb/common/types/uuid.hpp"
 
+#include "quack_client.hpp"
+#include "quack_message.hpp"
 #include "quack_send_data.hpp"
 #include "storage/quack_catalog.hpp"
 #include "storage/quack_insert.hpp"
 #include "storage/quack_table.hpp"
 
 using namespace duckdb;
+
+namespace {
+
+//! The scan takes its schema from a prototype value, so the statement can be planned before any
+//! batch arrives: NULL::STRUCT(col0 INTEGER, col1 VARCHAR).
+string StructPrototype(const vector<LogicalType> &types) {
+	string result = "STRUCT(";
+	for (idx_t i = 0; i < types.size(); i++) {
+		if (i > 0) {
+			result += ", ";
+		}
+		result += StringUtil::Format("col%llu %s", i, types[i].ToString());
+	}
+	return result + ")";
+}
+
+} // namespace
 
 QuackInsert::QuackInsert(PhysicalPlan &physical_plan, LogicalOperator &op, TableCatalogEntry &table)
     : PhysicalOperator(physical_plan, PhysicalOperatorType::EXTENSION, op.types, 1), table(&table), schema(nullptr) {
@@ -39,10 +58,29 @@ unique_ptr<GlobalSinkState> QuackInsert::GetGlobalSinkState(ClientContext &conte
 
 	auto debug_delay_ms = QuackGetUBigintSetting(context, "quack_debug_send_delay_ms", 0);
 	auto debug_duplicate_sends = QuackGetUBigintSetting(context, "quack_debug_duplicate_sends", 0) > 0;
+	auto &quack_catalog = table_entry->catalog.Cast<QuackCatalog>();
+	auto &types = children[0].get().GetTypes();
+
+	// The client names the statement, so the server composes no SQL. The stream id is unguessable,
+	// so a batch that carries it needs no authorization of its own.
+	auto stream_id = QuackRandomToken(*context.db);
 	auto query_uuid = UUID::GenerateRandomUUID();
-	auto emitter = MakeQuackSendDataEmitter(context, *table_entry, query_uuid, order_mode != AppendOrderMode::UNORDERED,
-	                                        debug_delay_ms, debug_duplicate_sends);
-	return MakeQuackRebalancerGlobalState(context, children[0].get().GetTypes(), order_mode, std::move(emitter));
+	auto sql =
+	    StringUtil::Format("INSERT INTO %s.%s SELECT * FROM scan_data_from_quack_client(%s, NULL::%s, ordered := %s)",
+	                       SQLIdentifier(table_entry->schema.name.GetIdentifierName()),
+	                       SQLIdentifier(table_entry->name.GetIdentifierName()), SQLString(stream_id),
+	                       StructPrototype(types), order_mode != AppendOrderMode::UNORDERED ? "true" : "false");
+
+	// inline_rows = 0, because the statement waits for our batches: it has no row to answer with,
+	// and the scan registers the stream while it binds, so PREPARE must land before the first batch.
+	auto client_wrapper = quack_catalog.GetClientConnection()->GetClient(context);
+	auto prepare = make_uniq<PrepareRequestMessage>(quack_catalog.GetConnectionId(), sql, query_uuid);
+	prepare->SetInlineRows(optional_idx(0));
+	client_wrapper->GetClient().Request<PrepareResponseMessage>(context, std::move(prepare));
+
+	auto emitter = MakeQuackSendDataEmitter(context, *table_entry, std::move(stream_id), query_uuid, debug_delay_ms,
+	                                        debug_duplicate_sends);
+	return MakeQuackRebalancerGlobalState(context, types, order_mode, std::move(emitter));
 }
 
 unique_ptr<LocalSinkState> QuackInsert::GetLocalSinkState(ExecutionContext &context) const {

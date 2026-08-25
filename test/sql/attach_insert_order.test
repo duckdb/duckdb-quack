@@ -372,10 +372,11 @@ statement ok
 insert into dup_sends select 'dup', count(*) from duckdb_logs_parsed('Quack')
 where message_type = 'SEND_DATA_REQUEST' and server is not null and server != '';
 
-# the setting really did send every batch two times
+# The setting really did send every batch two times. Each count also holds the terminal message,
+# which carries the batch count and no chunks, and which is sent one time: dup = 2 * base - 1.
 query I
-select (select n from dup_sends where label = 'dup') = 2 * (select n from dup_sends where label = 'base')
-   and (select n from dup_sends where label = 'base') > 1;
+select (select n from dup_sends where label = 'dup') = 2 * (select n from dup_sends where label = 'base') - 1
+   and (select n from dup_sends where label = 'base') > 2;
 ----
 true
 

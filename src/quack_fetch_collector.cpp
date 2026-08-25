@@ -90,11 +90,12 @@ public:
 		return true;
 	}
 
-	void Finish(ClientContext &context, idx_t total_batches) override {
+	optional_idx Finish(ClientContext &context, idx_t total_batches) override {
 		// Do NOT finish the buffer here. The claimed statement can sit in the middle of a
 		// multi-statement query, and the client must not see the stream end while more statements run.
-		// RunFetchQuery closes the stream, and it checks the count against this total.
+		// DriveQuery closes the stream, and it checks the count against this total.
 		stream->announced_total = total_batches;
+		return optional_idx();
 	}
 
 private:

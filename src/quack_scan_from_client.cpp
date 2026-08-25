@@ -62,29 +62,50 @@ struct QuackScanFromClientLocalState : public LocalTableFunctionState {
 
 static unique_ptr<FunctionData> QuackScanFromClientBind(ClientContext &context, TableFunctionBindInput &input,
                                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto session_state = QuackSessionState::Get(context);
+	if (!session_state) {
+		throw InvalidInputException("scan_data_from_quack_client is an internal function driven by the quack server");
+	}
 	auto stream_id = input.inputs[0].GetValue<string>();
-	auto stream = QuackStorageExtensionInfo::GetState(*context.db).InsertStreams().Find(stream_id);
-	if (!stream) {
-		throw InvalidInputException("scan_data_from_quack_client: no active stream '%s' (this is an internal "
-		                            "function driven by the quack server)",
-		                            stream_id);
+
+	// The second argument is a prototype value: NULL::STRUCT(a INTEGER, b VARCHAR). Its TYPE carries
+	// the schema, so the statement can be planned before the client sends a batch.
+	auto &prototype = input.inputs[1].type();
+	if (prototype.id() != LogicalTypeId::STRUCT) {
+		throw InvalidInputException(
+		    "scan_data_from_quack_client: the second argument must be a STRUCT prototype, for example "
+		    "NULL::STRUCT(a INTEGER)");
+	}
+	bool ordered = true;
+	auto named = input.named_parameters.find("ordered");
+	if (named != input.named_parameters.end()) {
+		ordered = named->second.GetValue<bool>();
+	}
+
+	vector<LogicalType> types;
+	for (auto &child : StructType::GetChildTypes(prototype)) {
+		names.push_back(Identifier(child.first));
+		return_types.push_back(child.second);
+		types.push_back(child.second);
+	}
+	if (types.empty()) {
+		throw InvalidInputException("scan_data_from_quack_client: the STRUCT prototype has no columns");
 	}
 
 	// Unordered streams signal NO_ORDER so the planner picks PhysicalInsert(parallel=true) instead of
 	// PhysicalBatchInsert. Mutates a query-scoped by-value copy — never touches the global catalog entry.
-	if (!stream->ordered) {
+	if (!ordered) {
 		input.table_function.order_preservation_type = OrderPreservationType::NO_ORDER;
 	}
 
 	auto bind_data = make_uniq<QuackScanFromClientBindData>();
+	bind_data->types = types;
+	bind_data->stream = QuackStorageExtensionInfo::GetState(*context.db)
+	                        .InsertStreams()
+	                        .Create(stream_id, std::move(types), ordered, session_state->session_id);
 	bind_data->stream_id = std::move(stream_id);
-	bind_data->types = stream->types;
-	bind_data->stream = std::move(stream);
-
-	for (idx_t i = 0; i < bind_data->types.size(); i++) {
-		return_types.push_back(bind_data->types[i]);
-		names.push_back(Identifier("col" + to_string(i)));
-	}
+	// The stream exists now, so the client may send. PREPARE waits for this.
+	session_state->SignalClientData();
 	return std::move(bind_data);
 }
 
@@ -222,9 +243,10 @@ static OperatorPartitionData QuackScanFromClientGetPartitionData(ClientContext &
 }
 
 TableFunction QuackScanFromClientFunction::GetFunction() {
-	TableFunction fun("scan_data_from_quack_client", {LogicalType::VARCHAR}, QuackScanFromClient,
+	TableFunction fun("scan_data_from_quack_client", {LogicalType::VARCHAR, LogicalType::ANY}, QuackScanFromClient,
 	                  QuackScanFromClientBind, QuackScanFromClientInitGlobal, QuackScanFromClientInitLocal);
 	fun.get_partition_data = QuackScanFromClientGetPartitionData;
+	fun.named_parameters["ordered"] = LogicalType::BOOLEAN;
 	return fun;
 }
 

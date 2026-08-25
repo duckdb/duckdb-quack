@@ -115,19 +115,6 @@ unique_ptr<FetchResponseMessage> FetchResponseMessage::Deserialize(Deserializer 
 	return result;
 }
 
-void FinalizeMessage::Serialize(Serializer &serializer) const {
-	serializer.WriteProperty<hugeint_t>(1, "query_uuid", query_uuid);
-	serializer.WritePropertyWithDefault<optional_idx>(2, "total_batches", total_batches, optional_idx());
-}
-
-unique_ptr<FinalizeMessage> FinalizeMessage::Deserialize(Deserializer &deserializer) {
-	auto result = duckdb::unique_ptr<FinalizeMessage>(new FinalizeMessage());
-	deserializer.ReadProperty<hugeint_t>(1, "query_uuid", result->query_uuid);
-	deserializer.ReadPropertyWithExplicitDefault<optional_idx>(2, "total_batches", result->total_batches,
-	                                                           optional_idx());
-	return result;
-}
-
 void HeartbeatRequestMessage::Serialize(Serializer &serializer) const {
 }
 
@@ -153,12 +140,14 @@ MessageHeader MessageHeader::Deserialize(Deserializer &deserializer) {
 void PrepareRequestMessage::Serialize(Serializer &serializer) const {
 	serializer.WritePropertyWithDefault<string>(1, "sql_query", sql_query);
 	serializer.WriteProperty<hugeint_t>(2, "query_uuid", query_uuid);
+	serializer.WritePropertyWithDefault<optional_idx>(3, "inline_rows", inline_rows, optional_idx());
 }
 
 unique_ptr<PrepareRequestMessage> PrepareRequestMessage::Deserialize(Deserializer &deserializer) {
 	auto result = duckdb::unique_ptr<PrepareRequestMessage>(new PrepareRequestMessage());
 	deserializer.ReadPropertyWithDefault<string>(1, "sql_query", result->sql_query);
 	deserializer.ReadProperty<hugeint_t>(2, "query_uuid", result->query_uuid);
+	deserializer.ReadPropertyWithExplicitDefault<optional_idx>(3, "inline_rows", result->inline_rows, optional_idx());
 	return result;
 }
 
@@ -182,22 +171,19 @@ unique_ptr<PrepareResponseMessage> PrepareResponseMessage::Deserialize(Deseriali
 }
 
 void SendDataRequestMessage::Serialize(Serializer &serializer) const {
-	serializer.WritePropertyWithDefault<string>(1, "schema_name", schema_name);
-	serializer.WritePropertyWithDefault<string>(2, "table_name", table_name);
-	serializer.WritePropertyWithDefault<vector<unique_ptr<DataChunkWrapper>>>(3, "chunks", chunks);
-	serializer.WriteProperty<hugeint_t>(4, "query_uuid", query_uuid);
-	serializer.WritePropertyWithDefault<bool>(5, "ordered", ordered);
-	serializer.WritePropertyWithDefault<string>(6, "batch_index_fixed", EncodeBatchIndexFixed());
+	serializer.WritePropertyWithDefault<string>(1, "stream_id", stream_id);
+	serializer.WritePropertyWithDefault<vector<unique_ptr<DataChunkWrapper>>>(2, "chunks", chunks);
+	serializer.WritePropertyWithDefault<optional_idx>(3, "total_batches", total_batches, optional_idx());
+	serializer.WritePropertyWithDefault<string>(4, "batch_index_fixed", EncodeBatchIndexFixed());
 }
 
 unique_ptr<SendDataRequestMessage> SendDataRequestMessage::Deserialize(Deserializer &deserializer) {
 	auto result = duckdb::unique_ptr<SendDataRequestMessage>(new SendDataRequestMessage());
-	deserializer.ReadPropertyWithDefault<string>(1, "schema_name", result->schema_name);
-	deserializer.ReadPropertyWithDefault<string>(2, "table_name", result->table_name);
-	deserializer.ReadPropertyWithDefault<vector<unique_ptr<DataChunkWrapper>>>(3, "chunks", result->chunks);
-	deserializer.ReadProperty<hugeint_t>(4, "query_uuid", result->query_uuid);
-	deserializer.ReadPropertyWithDefault<bool>(5, "ordered", result->ordered);
-	auto batch_index_fixed = deserializer.ReadPropertyWithDefault<string>(6, "batch_index_fixed");
+	deserializer.ReadPropertyWithDefault<string>(1, "stream_id", result->stream_id);
+	deserializer.ReadPropertyWithDefault<vector<unique_ptr<DataChunkWrapper>>>(2, "chunks", result->chunks);
+	deserializer.ReadPropertyWithExplicitDefault<optional_idx>(3, "total_batches", result->total_batches,
+	                                                           optional_idx());
+	auto batch_index_fixed = deserializer.ReadPropertyWithDefault<string>(4, "batch_index_fixed");
 	result->ApplyBatchIndexFixed(std::move(batch_index_fixed));
 	return result;
 }
