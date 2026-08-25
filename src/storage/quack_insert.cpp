@@ -7,6 +7,7 @@
 
 #include "quack_client.hpp"
 #include "quack_message.hpp"
+#include "quack_random.hpp"
 #include "quack_send_data.hpp"
 #include "storage/quack_catalog.hpp"
 #include "storage/quack_insert.hpp"

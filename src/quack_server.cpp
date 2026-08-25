@@ -16,6 +16,7 @@
 #include "quack_server.hpp"
 #include "quack_message.hpp"
 #include "quack_log.hpp"
+#include "quack_random.hpp"
 #include "quack_result_cache.hpp"
 #include "quack_storage.hpp"
 #include "quack_insert_stream.hpp"
@@ -214,7 +215,7 @@ void QuackServer::ValidateToken(const string &token) {
 QuackServer::QuackServer(ClientContext &context_p, const QuackUri &uri_p, const string &token_p)
     : db_ptr(context_p.db), uri(uri_p), token(token_p) {
 	ValidateToken(token);
-	server_hmac_key = GenerateRandomToken(*context_p.db);
+	server_hmac_key = QuackRandomToken(*context_p.db);
 }
 
 QuackServer::~QuackServer() {
@@ -425,31 +426,16 @@ static Value EvaluateAuthQuery(DatabaseInstance &db, const string &sql, ARGS... 
 	return auth_result_chunk->GetValue(0, 0);
 }
 
-static constexpr idx_t kTokenBytes = 16; // 128 bits
-
-static string HexEncode(const data_t *bytes, idx_t n) {
-	string result(n * 2, '\0');
-	for (idx_t i = 0; i < n; i++) {
-		result[2 * i] = Blob::HEX_TABLE[bytes[i] >> 4];
-		result[2 * i + 1] = Blob::HEX_TABLE[bytes[i] & 0x0F];
-	}
-	return result;
-}
-
 // Derive a stable, per-client reconnect identifier as HMAC-SHA256(server_hmac_key, client_id)
 static string ComputeClientHash(const string &server_hmac_key, const string &client_id) {
 	unsigned char digest[duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES];
 	duckdb_mbedtls::MbedTlsWrapper::Hmac256(server_hmac_key.data(), server_hmac_key.size(), client_id.data(),
 	                                        client_id.size(), reinterpret_cast<char *>(digest));
-	return HexEncode(digest, duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES);
-}
-
-string QuackServer::GenerateRandomToken(DatabaseInstance &db) {
-	return QuackRandomToken(db);
+	return QuackHexEncode(digest, duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES);
 }
 
 string QuackServer::GenerateSessionId() {
-	data_t bytes[kTokenBytes];
+	data_t bytes[QUACK_TOKEN_BYTES];
 	{
 		std::lock_guard<std::mutex> lock(session_id_rng_mutex);
 		if (!session_id_rng) {
@@ -458,14 +444,14 @@ string QuackServer::GenerateSessionId() {
 				throw InternalException("Database was closed");
 			}
 			auto encryption_util = db->GetEncryptionUtil(false);
-			auto metadata = make_uniq<EncryptionStateMetadata>(EncryptionTypes::GCM, kTokenBytes,
+			auto metadata = make_uniq<EncryptionStateMetadata>(EncryptionTypes::GCM, QUACK_TOKEN_BYTES,
 			                                                   EncryptionTypes::EncryptionVersion::NONE);
 			session_id_rng = encryption_util->CreateEncryptionState(std::move(metadata));
 		}
 		// Generate under the mutex: the RNG state is shared across concurrent CONNECTION_REQUESTs.
-		session_id_rng->GenerateRandomData(bytes, kTokenBytes);
+		session_id_rng->GenerateRandomData(bytes, QUACK_TOKEN_BYTES);
 	}
-	return HexEncode(bytes, kTokenBytes);
+	return QuackHexEncode(bytes, QUACK_TOKEN_BYTES);
 }
 
 static string ExtractQuery(QuackMessage &msg) {

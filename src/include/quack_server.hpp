@@ -151,7 +151,6 @@ public:
 	string GenerateSessionId();
 
 	//! Generate a fresh CSPRNG-backed 128-bit token, hex-encoded (32 chars).
-	static string GenerateRandomToken(DatabaseInstance &db);
 
 	//! Throw InvalidInputException if `token` doesn't meet requirements(currently, length >= 4)
 	static void ValidateToken(const string &token);

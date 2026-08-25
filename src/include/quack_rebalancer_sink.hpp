@@ -90,8 +90,4 @@ SinkFinalizeType QuackRebalancerFinalize(Pipeline &pipeline, Event &event, Clien
 idx_t QuackGetUBigintSetting(ClientContext &context, const char *name, idx_t default_value);
 idx_t QuackGetUBigintSetting(DatabaseInstance &db, const char *name, idx_t default_value);
 
-//! 128 random bits, hex encoded. Server tokens, session ids and client stream ids all use it, so an
-//! id cannot be guessed from another one.
-string QuackRandomToken(DatabaseInstance &db);
-
 } // namespace duckdb

@@ -1,6 +1,7 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/client_context.hpp"
 
+#include "quack_random.hpp"
 #include "quack_startstop.hpp"
 #include "quack_storage.hpp"
 
@@ -57,7 +58,7 @@ static unique_ptr<FunctionData> QuackServeBind(ClientContext &context, TableFunc
 	if (input.named_parameters.find("token") != input.named_parameters.end()) {
 		bind_data->token = input.named_parameters["token"].GetValue<string>();
 	} else {
-		bind_data->token = QuackServer::GenerateRandomToken(*context.db);
+		bind_data->token = QuackRandomToken(*context.db);
 	}
 	// Validate at bind-time: a length error here fails before the listener
 	// thread is spawned, instead of leaving a half-built server behind.
