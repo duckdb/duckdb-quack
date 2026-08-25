@@ -127,24 +127,37 @@ private:
 // Send-data emitter
 //===--------------------------------------------------------------------===//
 // Sends one dense batch as one SEND_DATA_REQUEST. The payload is serialized already, so a release
-// costs an 8-byte patch. Finish drains the sends, then FINALIZE carries the batch count.
+// costs an 8-byte patch. Finish drains the sends, then a chunk-less terminal SEND_DATA carries the
+// batch count.
 class QuackSendDataEmitter : public QuackBatchEmitter {
 public:
 	QuackSendDataEmitter(ClientContext &context, QuackTableCatalogEntry &table_p, string stream_id_p,
 	                     hugeint_t query_uuid_p, idx_t debug_delay_ms_p, bool debug_duplicate_sends_p,
 	                     idx_t debug_drop_batch_p)
-	    : table(table_p), stream_id(std::move(stream_id_p)), query_uuid(query_uuid_p), debug_delay_ms(debug_delay_ms_p),
-	      debug_duplicate_sends(debug_duplicate_sends_p), debug_drop_batch(debug_drop_batch_p) {
+	    : context(context.shared_from_this()), table(table_p), stream_id(std::move(stream_id_p)),
+	      query_uuid(query_uuid_p), debug_delay_ms(debug_delay_ms_p), debug_duplicate_sends(debug_duplicate_sends_p),
+	      debug_drop_batch(debug_drop_batch_p) {
 		queue = make_uniq<ManagedAsyncTaskQueue>(context);
 	}
 
 	~QuackSendDataEmitter() override {
-		// Finish does not run on an error path. Drain quietly, so no POST outlives the operator.
-		if (queue) {
-			try {
-				queue->Close();
-			} catch (...) { // NOLINT: a destructor must not throw
+		// Finish does not run on an error path. Drain, then cancel the server statement, which
+		// otherwise waits for a batch until the next statement.
+		if (!queue) {
+			return;
+		}
+		try {
+			queue->Close();
+		} catch (...) { // NOLINT: a destructor must not throw
+		}
+		try {
+			if (auto live = context.lock()) {
+				auto &quack_catalog = table.catalog.Cast<QuackCatalog>();
+				auto client_wrapper = quack_catalog.GetClientConnection()->GetClient(*live);
+				auto cancel = make_uniq<CancelRequestMessage>(quack_catalog.GetConnectionId(), query_uuid);
+				client_wrapper->GetClient().Request<SuccessResponse>(*live, std::move(cancel));
 			}
+		} catch (...) { // NOLINT: best effort
 		}
 	}
 
@@ -213,6 +226,7 @@ public:
 	}
 
 private:
+	weak_ptr<ClientContext> context;
 	QuackTableCatalogEntry &table;
 	string stream_id;
 	hugeint_t query_uuid;

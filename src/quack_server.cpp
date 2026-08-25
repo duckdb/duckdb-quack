@@ -1,4 +1,3 @@
-#include "duckdb/common/encryption_state.hpp"
 #include "duckdb/common/render_tree.hpp"
 #include "duckdb/common/types/blob.hpp"
 #include "duckdb/logging/logger.hpp"
@@ -197,8 +196,6 @@ static void DriveQuery(QuackConnection &connection, shared_ptr<QuackResultStream
 	}
 	// Close against the announced total, so a short stream errors instead of truncating.
 	stream->buffer.Finish(stream->announced_total);
-	// The statement is over. The streams its scan registered can receive nothing more.
-	connection.insert_streams.DropSession(connection.session_id);
 }
 
 QuackConnection::~QuackConnection() {
@@ -435,23 +432,11 @@ static string ComputeClientHash(const string &server_hmac_key, const string &cli
 }
 
 string QuackServer::GenerateSessionId() {
-	data_t bytes[QUACK_TOKEN_BYTES];
-	{
-		std::lock_guard<std::mutex> lock(session_id_rng_mutex);
-		if (!session_id_rng) {
-			auto db = db_ptr.lock();
-			if (!db) {
-				throw InternalException("Database was closed");
-			}
-			auto encryption_util = db->GetEncryptionUtil(false);
-			auto metadata = make_uniq<EncryptionStateMetadata>(EncryptionTypes::GCM, QUACK_TOKEN_BYTES,
-			                                                   EncryptionTypes::EncryptionVersion::NONE);
-			session_id_rng = encryption_util->CreateEncryptionState(std::move(metadata));
-		}
-		// Generate under the mutex: the RNG state is shared across concurrent CONNECTION_REQUESTs.
-		session_id_rng->GenerateRandomData(bytes, QUACK_TOKEN_BYTES);
+	auto db = db_ptr.lock();
+	if (!db) {
+		throw InternalException("Database was closed");
 	}
-	return QuackHexEncode(bytes, QUACK_TOKEN_BYTES);
+	return QuackRandomToken(*db);
 }
 
 static string ExtractQuery(QuackMessage &msg) {
@@ -647,15 +632,10 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			connection.statement.stream = stream;
 			connection.statement.uuid = prepare_request_message.QueryUUID();
 			connection.statement.abort_error = ErrorData();
-			// A statement that reads a client stream binds its result only when it ends, and it cannot
-			// end before the client sends. The scan raises this, so PREPARE stops waiting.
+			// A statement that reads a client stream cannot bind its result before the client sends.
+			// The scan finds the stream here and raises it, so PREPARE stops waiting.
 			if (auto session_state = QuackSessionState::Get(*connection.duckdb_connection->context)) {
-				weak_ptr<QuackResultStream> weak_stream = stream;
-				session_state->SetClientDataHook([weak_stream]() {
-					if (auto live = weak_stream.lock()) {
-						live->SignalClientDataPending();
-					}
-				});
+				session_state->SetStatement(stream);
 			}
 			connection.statement.thread = std::thread(DriveQuery, std::ref(connection), stream, effective_sql);
 		}
@@ -864,29 +844,25 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			return make_uniq<SendDataResponseMessage>(); // accept_budget unset = unbounded (future flow control)
 		}
 
-		// The terminal message. Closing against a count makes a short stream fail loudly.
+		// The terminal message. Closing against a count makes a short stream fail loudly; a repeat
+		// closes against the same count and gets the same answer.
 		stream->buffer.Finish(send_data_message.TotalBatches());
 		if (stream->buffer.HasError()) {
 			return make_uniq<ErrorResponse>(stream->buffer.GetError());
 		}
 
-		// The statement runs to its end now. Wait for it here, so one message ends the stream, reports a
-		// failure, and reports what the statement changed. The client then needs no FETCH.
-		shared_ptr<QuackResultStream> fetch_stream;
-		{
-			lock_guard<mutex> guard(connection.statement.lock);
-			fetch_stream = connection.statement.stream;
-		}
+		// Wait for the statement to end, so one message reports a failure and the changed rows. The
+		// stream names its statement, so a later statement is not the one this waits on.
 		auto response = make_uniq<SendDataResponseMessage>();
-		if (fetch_stream) {
-			auto first_batch = fetch_stream->prepare_batches + 1;
-			while (!fetch_stream->buffer.BatchReadyOrEnd(first_batch)) {
-				fetch_stream->buffer.WaitForBatch(first_batch);
+		if (auto result = stream->result.lock()) {
+			auto first_batch = result->prepare_batches + 1;
+			while (!result->buffer.BatchReadyOrEnd(first_batch)) {
+				result->buffer.WaitForBatch(first_batch);
 			}
-			if (fetch_stream->buffer.HasError()) {
-				return make_uniq<ErrorResponse>(fetch_stream->buffer.GetError());
+			if (result->buffer.HasError()) {
+				return make_uniq<ErrorResponse>(result->buffer.GetError());
 			}
-			response->SetRowCount(fetch_stream->changed_rows);
+			response->SetRowCount(result->changed_rows);
 		}
 		return std::move(response);
 	}

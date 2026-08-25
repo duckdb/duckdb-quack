@@ -26,7 +26,6 @@ class QueryResult;
 class DatabaseInstance;
 struct QuackResultStream;
 class PreparedStatement;
-class EncryptionState;
 struct QuackInsertStream;
 class QuackInsertStreamRegistry;
 class ErrorData;
@@ -150,8 +149,6 @@ public:
 
 	string GenerateSessionId();
 
-	//! Generate a fresh CSPRNG-backed 128-bit token, hex-encoded (32 chars).
-
 	//! Throw InvalidInputException if `token` doesn't meet requirements(currently, length >= 4)
 	static void ValidateToken(const string &token);
 
@@ -189,9 +186,6 @@ protected:
 	//! Min-heap of the expiry-queue slots, at most one per connection with a cache
 	mutex cache_expiry_mutex;
 	std::priority_queue<CacheExpiryEntry, vector<CacheExpiryEntry>, CacheExpiresLater> cache_expiry_queue;
-
-	mutex session_id_rng_mutex;
-	shared_ptr<EncryptionState> session_id_rng;
 
 	QuackUri uri;
 

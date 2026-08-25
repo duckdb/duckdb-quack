@@ -88,6 +88,45 @@ select count(*), min(i), max(i) from rpc.short_stream;
 ----
 20000	0	19999
 
+# --- the schema travels as SQL text, so every type must survive that round trip ---
+
+statement ok
+create table rpc.typed(d decimal(18,3), l bigint[], s struct(a integer, b varchar), m enum ('sad', 'ok', 'happy'), t timestamptz, b blob);
+
+statement ok
+insert into rpc.typed
+select (i / 7)::decimal(18,3), [i, i + 1], {'a': i::integer, 'b': i::varchar}, (['sad', 'ok', 'happy'])[i % 3 + 1],
+       ('2026-01-01 00:00:00'::timestamp + interval (i) second)::timestamptz, ('\x00' || i::varchar)::blob
+from src;
+
+query IIIIII
+select count(*), sum(d), sum(l[2]), sum(s.a), count(*) filter (where m = 'happy'), max(t)::varchar from rpc.typed;
+----
+20000	28570000.000	200010000	199990000	6666	2026-01-01 05:33:19+00
+
+# --- a source that fails on the client leaves no statement behind on the server ---
+
+statement ok
+create table rpc.failed_source(i bigint);
+
+statement error
+insert into rpc.failed_source select (i::varchar || 'x')::bigint from src;
+----
+Conversion Error
+
+query I
+select count(*) from rpc.failed_source;
+----
+0
+
+statement ok
+insert into rpc.failed_source select i from src;
+
+query I
+select count(*) from rpc.failed_source;
+----
+20000
+
 # --- the internal scan is not callable by hand ---
 
 statement error

@@ -8,6 +8,7 @@
 #include "duckdb/parallel/async_result.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 
+#include "quack_fetch_collector.hpp"
 #include "quack_insert_stream.hpp"
 #include "quack_storage.hpp"
 
@@ -105,7 +106,10 @@ static unique_ptr<FunctionData> QuackScanFromClientBind(ClientContext &context, 
 	                        .Create(stream_id, std::move(types), ordered, session_state->session_id);
 	bind_data->stream_id = std::move(stream_id);
 	// The stream exists now, so the client may send. PREPARE waits for this.
-	session_state->SignalClientData();
+	if (auto statement = session_state->Statement()) {
+		bind_data->stream->result = statement;
+		statement->SignalClientDataPending();
+	}
 	return std::move(bind_data);
 }
 

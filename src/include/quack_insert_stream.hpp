@@ -17,8 +17,10 @@
 
 namespace duckdb {
 
-//! The quack session that owns a server-side ClientContext. The scan reads it, so each stream
-//! records which session may feed it.
+struct QuackResultStream;
+
+//! The quack session that owns a server-side ClientContext: which session may feed a stream, and
+//! which statement drains it.
 class QuackSessionState : public ClientContextState {
 public:
 	explicit QuackSessionState(string session_id_p) : session_id(std::move(session_id_p)) {
@@ -31,28 +33,21 @@ public:
 		return context.registered_state->Get<QuackSessionState>(KEY);
 	}
 
-	//! PREPARE installs this before it runs the statement. A scan calls it when it registers a client
-	//! data stream. PREPARE then knows that the statement waits for the client.
-	void SetClientDataHook(std::function<void()> hook) {
+	//! PREPARE sets this before the statement runs.
+	void SetStatement(shared_ptr<QuackResultStream> stream) {
 		lock_guard<mutex> guard(lock);
-		on_client_data = std::move(hook);
+		statement = std::move(stream);
 	}
-	void SignalClientData() {
-		std::function<void()> hook;
-		{
-			lock_guard<mutex> guard(lock);
-			hook = on_client_data;
-		}
-		if (hook) {
-			hook();
-		}
+	shared_ptr<QuackResultStream> Statement() {
+		lock_guard<mutex> guard(lock);
+		return statement.lock();
 	}
 
 	string session_id;
 
 private:
 	mutex lock;
-	std::function<void()> on_client_data;
+	weak_ptr<QuackResultStream> statement;
 };
 
 //! Server state for one client data stream. The SEND_DATA handler fills the buffer, and
@@ -67,16 +62,22 @@ struct QuackInsertStream {
 	bool ordered;
 	//! Only this session may push to the stream.
 	string session_id;
+	//! The statement that drains this stream; the terminal SEND_DATA waits on it.
+	weak_ptr<QuackResultStream> result;
 	QuackChunkClaimBuffer buffer;
 };
 
 //! Maps a stream id to its stream. It lives on the database instance state, because the scan and the
 //! request handler run on different ClientContexts. The scan makes the entry when it binds, so the
-//! statement is planned before the client sends a batch.
+//! statement is planned before the client sends a batch. An entry stays until the session's next
+//! statement, so a repeated terminal message still finds its outcome.
 class QuackInsertStreamRegistry {
 public:
 	shared_ptr<QuackInsertStream> Create(const string &id, vector<LogicalType> types, bool ordered, string session_id) {
 		annotated_lock_guard<annotated_mutex> guard(lock);
+		if (streams.find(id) != streams.end()) {
+			throw InvalidInputException("scan_data_from_quack_client: a data stream '%s' already exists", id);
+		}
 		auto stream = make_shared_ptr<QuackInsertStream>(std::move(types), ordered, std::move(session_id));
 		streams[id] = stream;
 		return stream;
