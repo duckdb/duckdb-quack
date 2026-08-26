@@ -34,6 +34,26 @@ FROM remote.hello;
 
 This should show the content of the remote table `hello` on the client side.
 
+### Starting the server from a secret
+
+The server can take its token from a `quack` secret instead of the `token` parameter.
+Without arguments, `quack_serve` uses the default secret; `secret = 'name'` picks a specific
+one. When the chosen secret is scoped to a concrete endpoint, that endpoint is what the server
+listens on:
+
+```sql
+CREATE SECRET s1 (TYPE quack, TOKEN 'super_secret', SCOPE 'quack:localhost:9494');
+CALL quack_serve(secret = 's1');   -- listens on quack:localhost:9494 with token 'super_secret'
+```
+
+```sql
+CREATE SECRET (TYPE quack, TOKEN 'super_secret');
+CALL quack_serve();                -- default secret, listens on quack:localhost
+```
+
+If no secret matches and no `token` is given, `quack_serve` generates a random token and
+returns it in the `auth_token` column.
+
 We can also copy data from client to server:
 
 ```sql
