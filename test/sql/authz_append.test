@@ -1,0 +1,67 @@
+# name: test/sql/authz_append.test
+# description: the authorization callback still gates the append (SEND_DATA) path
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+statement ok
+create table rpc.t(i bigint);
+
+# The source has to be local. A remote-executable source (range(), a remote table) is pushed down to one
+# server-side statement instead, which authorizes through PREPARE and never reaches the append path.
+statement ok
+create table local_src(i bigint);
+
+statement ok
+insert into local_src select * from range(1000);
+
+# The default callback (quack_nop_authorization) accepts everything, so the server skips it here.
+statement ok
+insert into rpc.t select * from local_src;
+
+query I
+select count(*) from rpc.t;
+----
+1000
+
+# The append path never shows the callback the statement the client ran - it probes with a synthetic
+# "INSERT INTO <schema>.<table> VALUES (NULL)" instead. Rejecting that probe must stop the append.
+statement ok quack_db:quack_server_con
+CREATE MACRO authz_no_append(sid, query) AS NOT (query LIKE 'INSERT INTO %VALUES (NULL)');
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_authorization_function = 'authz_no_append';
+
+statement error
+insert into rpc.t select * from local_src;
+----
+Authorization failed
+
+# The rejected append is atomic: no rows leaked through.
+query I
+select count(*) from rpc.t;
+----
+1000
+
+# Reads are untouched by this callback, so the connection is still usable.
+query I
+select max(i) from rpc.t;
+----
+999
+
+# Back on the default the callback is skipped again and appends resume.
+statement ok quack_db:quack_server_con
+RESET GLOBAL quack_authorization_function;
+
+statement ok
+insert into rpc.t select * from local_src;
+
+query I
+select count(*) from rpc.t;
+----
+2000
+
+include test/template/quack_teardown.test_template
