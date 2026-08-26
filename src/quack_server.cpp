@@ -171,6 +171,28 @@ static void AbortFetchStream(QuackConnection &connection, const string &reason) 
 	AbortDetachedFetch(connection, std::move(detached), reason);
 }
 
+//! Like AbortFetchStream, but only aborts if the connection's current fetch stream is still the one
+//! identified by `uuid`. Returns false (touching nothing) if a newer query has since taken the slot,
+//! so a timeout decision made for one query can never abort a query started after it. Call WITHOUT
+//! the statement lock.
+static bool AbortFetchStreamIfUuid(QuackConnection &connection, hugeint_t uuid, const string &reason) {
+	DetachedFetchStream detached;
+	{
+		lock_guard<mutex> guard(connection.fetch.lock);
+		if (connection.fetch.uuid != uuid || !connection.fetch.stream) {
+			return false;
+		}
+		detached.stream = std::move(connection.fetch.stream);
+		detached.thread = std::move(connection.fetch.thread);
+		// the abort reason must not hide a real failure
+		connection.fetch.abort_error = detached.stream->buffer.HasError()
+		                                   ? detached.stream->buffer.GetError()
+		                                   : ErrorData(ExceptionType::INTERRUPT, reason);
+	}
+	AbortDetachedFetch(connection, std::move(detached), reason);
+	return true;
+}
+
 //! Update the cache with what its stream holds. Drops the cache when the result grows past
 //! quack_cache_max_rows, because it is then too large to keep for a reconnect.
 static void SyncFetchCache(QuackConnection &connection, QuackFetchStream &stream, DatabaseInstance &db) {
@@ -312,9 +334,89 @@ QuackServer::QuackServer(ClientContext &context_p, const QuackUri &uri_p, const 
     : db_ptr(context_p.db), uri(uri_p), token(token_p) {
 	ValidateToken(token);
 	server_hmac_key = GenerateRandomToken(*context_p.db);
+	StartReaper();
 }
 
 QuackServer::~QuackServer() {
+	StopReaper();
+}
+
+void QuackServer::StartReaper() {
+	reaper_thread = std::thread([this] { ReaperLoop(); });
+}
+
+void QuackServer::StopReaper() {
+	{
+		std::lock_guard<std::mutex> lock(reaper_mutex);
+		reaper_stop = true;
+	}
+	reaper_cv.notify_all();
+	if (reaper_thread.joinable()) {
+		reaper_thread.join();
+	}
+}
+
+//! One query is reaped if its ACTIVE query is older than the deadline. Decision and abort are split
+//! so the abort (which joins the producer thread) never runs under connection.lock, and the abort is
+//! uuid-guarded so it cannot touch a query started since the decision. Internal catalogue traffic
+//! (uuid {0,0}) is sub-millisecond and so never reaches a multi-second deadline.
+void QuackServer::ReapConnectionIfOverdue(QuackConnection &connection, timestamp_t now, int64_t deadline_us) {
+	hugeint_t uuid {0, 0};
+	{
+		std::unique_lock<std::mutex> lock(connection.lock);
+		if (connection.query_state != QuackQueryState::ACTIVE || connection.query_started_at.value == 0) {
+			return;
+		}
+		if (now.value - connection.query_started_at.value <= deadline_us) {
+			return;
+		}
+		uuid = connection.query_uuid;
+	}
+	// Interrupt() lives inside the abort; guarded so a superseding query is never aborted.
+	if (!AbortFetchStreamIfUuid(connection, uuid, "Interrupted: query exceeded quack_query_timeout")) {
+		return;
+	}
+	std::unique_lock<std::mutex> lock(connection.lock);
+	if (connection.query_state == QuackQueryState::ACTIVE && connection.query_uuid == uuid) {
+		connection.query_state = QuackQueryState::QUACK_ERROR;
+		connection.ClearResultCache();
+	}
+}
+
+void QuackServer::ReaperLoop() {
+	while (true) {
+		{
+			std::unique_lock<std::mutex> lock(reaper_mutex);
+			// Wake once a second, or immediately on shutdown.
+			reaper_cv.wait_for(lock, std::chrono::seconds(1), [this] { return reaper_stop; });
+			if (reaper_stop) {
+				return;
+			}
+		}
+		auto db = db_ptr.lock();
+		if (!db) {
+			continue;
+		}
+		idx_t timeout_seconds = QuackGetUBigintSetting(*db, "quack_query_timeout", 0);
+		if (timeout_seconds == 0) {
+			continue;
+		}
+		// Copy the shared_ptrs out under the lock, then work unlocked: an abort joins a producer
+		// thread and must not run while active_connections_mutex is held.
+		vector<shared_ptr<QuackConnection>> connections;
+		{
+			std::lock_guard<std::mutex> lock(active_connections_mutex);
+			connections.reserve(active_connections.size());
+			for (auto &entry : active_connections) {
+				connections.push_back(entry.second);
+			}
+		}
+		auto now = Timestamp::GetCurrentTimestamp();
+		auto deadline_us = static_cast<int64_t>(timeout_seconds) * 1000000LL; // query_started_at is micros
+		for (auto &connection : connections) {
+			ReapConnectionIfOverdue(*connection, now, deadline_us);
+		}
+	}
 }
 
 void QuackServer::CleanupExpiredConnection(QuackConnection &connection) {

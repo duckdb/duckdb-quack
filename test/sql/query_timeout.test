@@ -1,0 +1,27 @@
+# name: test/sql/query_timeout.test
+# description: quack_query_timeout interrupts a query that runs past the deadline
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+# Arm a 2-second timeout on the SERVER database — the reaper reads the server's config.
+# GLOBAL scope + a live read each tick means it applies without restarting the server.
+statement ok quack_db:quack_server_con
+SET quack_query_timeout=2;
+
+statement ok
+ATTACH {server} AS remote (TOKEN 'asdf');
+
+# A query that would run for 8s server-side is interrupted by the reaper within a few seconds.
+statement error
+FROM quack_query_by_name('remote', 'SELECT sleep_ms(8000)');
+----
+Interrupt
+
+# The same connection is reusable, and a query that finishes inside the deadline is untouched.
+query I
+FROM quack_query_by_name('remote', 'SELECT sleep_ms(200)');
+----
+NULL
+
+include test/template/quack_teardown.test_template

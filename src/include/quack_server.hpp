@@ -1,5 +1,6 @@
 #pragma once
 
+#include <condition_variable>
 #include <queue>
 #include <thread>
 
@@ -233,6 +234,22 @@ private:
 	static void CleanupExpiredConnection(QuackConnection &connection);
 	//! Destroys reaped caches on a one-shot detached thread so no response waits on their teardown
 	void DestroyCachesDetached(vector<unique_ptr<QuackResultCache>> doomed);
+
+	//! Background thread: interrupts any query that has run past quack_query_timeout. This also
+	//! reclaims a query whose client has disconnected — the server keeps running it otherwise,
+	//! because the heartbeat lease is only evaluated when a fresh message arrives on the connection.
+	void StartReaper();
+	void StopReaper();
+	void ReaperLoop();
+	//! Interrupt `connection`'s running query if it started more than `deadline_us` before `now`.
+	//! A no-op unless the connection has an ACTIVE query old enough; identity-checked so a query
+	//! started since the deadline was computed is never touched.
+	static void ReapConnectionIfOverdue(QuackConnection &connection, timestamp_t now, int64_t deadline_us);
+
+	std::thread reaper_thread;
+	std::mutex reaper_mutex;
+	std::condition_variable reaper_cv;
+	bool reaper_stop = false;
 
 	string token;
 	//! Per-server random key that seeds the HMAC for client_id_hash.
