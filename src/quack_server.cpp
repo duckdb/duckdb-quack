@@ -379,7 +379,8 @@ void QuackServer::ReapConnectionIfOverdue(QuackConnection &connection, time_poin
 		// sentinel for internal catalogue traffic (quack_catalog.cpp) and is reused across queries,
 		// so a decision made for one {0,0} query could abort the next. Skip it: every real client
 		// query carries a random uuid, so the timeout still covers all of them.
-		if (connection.query_uuid == hugeint_t {0, 0}) {
+		bool is_internal_catalogue_query = connection.query_uuid == hugeint_t {0, 0};
+		if (is_internal_catalogue_query) {
 			return;
 		}
 		// Whole seconds off a monotonic clock: no overflow, and a backward step just reads as young.
