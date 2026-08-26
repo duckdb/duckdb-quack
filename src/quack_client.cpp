@@ -6,6 +6,7 @@
 #include "duckdb/parallel/task_scheduler.hpp"
 
 #include "quack_client.hpp"
+#include "quack_secret.hpp"
 #include "quack_uri.hpp"
 
 namespace duckdb {
@@ -274,12 +275,9 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 	ValidateHeartbeatTimeout(heartbeat_timeout_seconds);
 	// if no token is provided fetch it from the secret manager
 	if (token.empty()) {
-		auto &secret_manager = SecretManager::Get(context);
-		auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
-		auto match = secret_manager.LookupSecret(transaction, uri.Uri(), "quack");
-		if (match.HasMatch()) {
-			const auto &kv = dynamic_cast<const KeyValueSecret &>(*match.secret_entry->secret);
-			token = kv.TryGetValue("token", true).ToString();
+		auto secret = QuackSecret::Find(context, nullptr, uri.Uri());
+		if (secret) {
+			token = QuackSecret::GetToken(*secret);
 		}
 	}
 	if (token.empty()) {

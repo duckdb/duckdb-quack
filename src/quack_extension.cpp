@@ -24,6 +24,7 @@
 #include "quack_rebalancer_sink.hpp"
 #include "quack_scan.hpp"
 #include "quack_scan_from_client.hpp"
+#include "quack_secret.hpp"
 #include "quack_cancel.hpp"
 #include "quack_startstop.hpp"
 #include "quack_storage.hpp"
@@ -33,8 +34,6 @@
 #include "include/quack_uri.hpp"
 
 namespace duckdb {
-
-static constexpr const char *QUACK_SECRET_TYPE = "quack";
 
 static void ValidateHeartbeatTimeoutSetting(ClientContext &, SetScope, Value &parameter) {
 	if (parameter.IsNull()) {
@@ -63,13 +62,13 @@ static unique_ptr<BaseSecret> CreateQuackSecretFromConfig(ClientContext &, Creat
 
 static void RegisterQuackSecretType(ExtensionLoader &loader) {
 	SecretType secret_type;
-	secret_type.name = Identifier(QUACK_SECRET_TYPE);
+	secret_type.name = Identifier(QuackSecret::TYPE);
 	secret_type.deserializer = KeyValueSecret::Deserialize<KeyValueSecret>;
 	secret_type.default_provider = "config";
 	secret_type.extension = "quack";
 	loader.RegisterSecretType(secret_type);
 
-	CreateSecretFunction config_fun = {QUACK_SECRET_TYPE, "config", CreateQuackSecretFromConfig};
+	CreateSecretFunction config_fun = {QuackSecret::TYPE, "config", CreateQuackSecretFromConfig};
 	config_fun.named_parameters["token"] = LogicalType::VARCHAR;
 	loader.RegisterFunction(config_fun);
 }

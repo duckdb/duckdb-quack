@@ -54,6 +54,21 @@ CALL quack_serve();                -- default secret, listens on quack:localhost
 If no secret matches and no `token` is given, `quack_serve` generates a random token and
 returns it in the `auth_token` column.
 
+### Connecting through a secret
+
+The client side mirrors this. `ATTACH` takes a `SECRET` name, and a bare `quack:` path takes its
+endpoint from that secret, so both ends of the connection can be described by the same secret:
+
+```sql
+CREATE SECRET s1 (TYPE quack, TOKEN 'super_secret', SCOPE 'quack:localhost:9494');
+ATTACH 'quack:' AS remote (TYPE quack, SECRET s1);   -- connects to quack:localhost:9494
+```
+
+Without a `SECRET` name the default secret is used: the one whose scope matches the path, or - when
+the path names no host - the only `quack` secret there is. A path given explicitly always wins over
+the scope of the secret, and a secret scoped to nothing more specific than `quack:` leaves the
+default host in place.
+
 We can also copy data from client to server:
 
 ```sql

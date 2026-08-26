@@ -1,8 +1,6 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/client_context.hpp"
-#include "duckdb/main/secret/secret.hpp"
-#include "duckdb/main/secret/secret_manager.hpp"
-
+#include "quack_secret.hpp"
 #include "quack_startstop.hpp"
 #include "quack_storage.hpp"
 
@@ -16,73 +14,6 @@ struct QuackStartStopFunctionData : public TableFunctionData {
 	QuackUri listen_uri;
 	string token;
 };
-
-//! Locate the quack secret that supplies the server's token. An explicit `secret` name is looked up by name;
-//! otherwise we fall back to the best scope match for the listen URI, i.e. the default quack secret.
-static unique_ptr<SecretEntry> FindServeSecret(ClientContext &context, optional_ptr<const Value> secret_name,
-                                               const string &listen_uri) {
-	auto &secret_manager = SecretManager::Get(context);
-	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
-	if (!secret_name) {
-		auto match = secret_manager.LookupSecret(transaction, listen_uri, "quack");
-		if (!match.HasMatch()) {
-			return nullptr;
-		}
-		return std::move(match.secret_entry);
-	}
-	if (secret_name->IsNull()) {
-		throw InvalidInputException("secret cannot be NULL");
-	}
-	auto name = secret_name->GetValue<string>();
-	auto entry = secret_manager.GetSecretByName(transaction, name);
-	if (!entry) {
-		throw InvalidInputException("Secret with name \"%s\" not found", name);
-	}
-	if (entry->secret->GetType() != "quack") {
-		throw InvalidInputException("Secret \"%s\" has type \"%s\" - quack_serve requires a secret of type \"quack\"",
-		                            name, entry->secret->GetType().GetIdentifierName());
-	}
-	return entry;
-}
-
-//! A secret scope is a match prefix, but a fully-qualified one (`quack:localhost:9000`) doubles as an endpoint:
-//! that is what we listen on when quack_serve() is called without an explicit URI. The catch-all `quack:` scope
-//! names no endpoint, so it is skipped and the caller keeps the default.
-static bool TryGetSecretEndpoint(const SecretEntry &entry, const string &secret_name, string &result) {
-	bool found = false;
-	QuackUri endpoint;
-	for (auto &scope : entry.secret->GetScope()) {
-		auto trimmed = scope;
-		StringUtil::Trim(trimmed);
-		if (trimmed.empty() || trimmed == "quack:" || trimmed == "quack://") {
-			// catch-all scope: matches every server, so it points at none
-			continue;
-		}
-		QuackUri scope_uri(trimmed, /* the server will always listen without SSL */ false);
-		if (found && scope_uri.CanonicalUri() != endpoint.CanonicalUri()) {
-			throw InvalidInputException(
-			    "Secret \"%s\" is scoped to multiple endpoints (%s and %s) - pass the listen URI to quack_serve "
-			    "explicitly to choose one",
-			    secret_name, endpoint.Uri(), scope_uri.Uri());
-		}
-		endpoint = scope_uri;
-		found = true;
-	}
-	if (found) {
-		result = endpoint.Uri();
-	}
-	return found;
-}
-
-static string TokenFromSecret(const SecretEntry &entry) {
-	auto &kv_secret = dynamic_cast<const KeyValueSecret &>(*entry.secret);
-	Value token_value;
-	if (!kv_secret.TryGetValue("token", token_value) || token_value.IsNull()) {
-		throw InvalidInputException("Quack secret \"%s\" does not contain a token",
-		                            entry.secret->GetName().GetIdentifierName());
-	}
-	return token_value.ToString();
-}
 
 static unique_ptr<FunctionData> QuackServeBind(ClientContext &context, TableFunctionBindInput &input,
                                                vector<LogicalType> &return_types, vector<Identifier> &names) {
@@ -119,12 +50,15 @@ static unique_ptr<FunctionData> QuackServeBind(ClientContext &context, TableFunc
 	unique_ptr<SecretEntry> secret;
 	if (!has_token) {
 		// An explicit name selects the secret; without one we use the default secret for this endpoint (if any).
-		secret = FindServeSecret(context, has_secret_name ? &secret_entry->second : nullptr, listen_uri);
+		// Without a URI the secret decides where we listen, so a lone secret counts as the default one.
+		secret = QuackSecret::Find(context, has_secret_name ? &secret_entry->second : nullptr, listen_uri,
+		                           explicit_uri ? QuackSecret::DefaultLookup::SCOPE_MATCH_ONLY
+		                                        : QuackSecret::DefaultLookup::ALLOW_SINGLE_SECRET);
 	}
 	if (secret && !explicit_uri) {
 		// No URI was given: a fully-qualified secret scope tells us where to listen.
 		string secret_endpoint;
-		if (TryGetSecretEndpoint(*secret, secret->secret->GetName().GetIdentifierName(), secret_endpoint)) {
+		if (QuackSecret::TryGetEndpoint(*secret, secret_endpoint)) {
 			listen_uri = secret_endpoint;
 		}
 	}
@@ -146,7 +80,7 @@ static unique_ptr<FunctionData> QuackServeBind(ClientContext &context, TableFunc
 	if (has_token) {
 		bind_data->token = token_entry->second.GetValue<string>();
 	} else if (secret) {
-		bind_data->token = TokenFromSecret(*secret);
+		bind_data->token = QuackSecret::GetToken(*secret);
 	} else {
 		bind_data->token = QuackServer::GenerateRandomToken(*context.db);
 	}

@@ -17,6 +17,7 @@ add_library(
   quack_result_cache.cpp
   quack_scan.cpp
   quack_scan_from_client.cpp
+  quack_secret.cpp
   quack_server.cpp
   quack_start_stop.cpp
   quack_storage.cpp
