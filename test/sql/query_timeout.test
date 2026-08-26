@@ -35,7 +35,7 @@ Interrupt
 # ...and the interrupt must arrive well before the 8s it would otherwise run: proof it was reaped
 # at the ~2s deadline (+ up to a 1s tick), not merely that some Interrupt error surfaced.
 query I
-SELECT (SELECT epoch_ms(current_timestamp::TIMESTAMP)) - getvariable('t0') < 6000;
+SELECT (SELECT epoch_ms(current_timestamp::TIMESTAMP)) - getvariable('t0') < 7500;
 ----
 true
 

@@ -174,33 +174,36 @@ static void AbortFetchStream(QuackConnection &connection, const string &reason) 
 //! Like AbortFetchStream, but only aborts if the connection's current fetch stream is still the one
 //! identified by `uuid`. Returns false (touching nothing) if a newer query has since taken the slot.
 //!
-//! Unlike AbortFetchStream, the wake (SetError) and Interrupt() happen WHILE fetch.lock is held. A
-//! new PREPARE cannot install a producer until fetch.lock is released, so the connection's running
-//! statement is provably this `uuid` at the moment we interrupt it — never a newer query that raced
-//! in behind us. (The generic AbortFetchStream is called on the same thread that then installs the
-//! next producer, so it has no such race; the reaper fires asynchronously against a live connection,
-//! so it must interrupt under the lock.) The producer join runs after the lock is released. Call
-//! WITHOUT the statement lock.
+//! Unlike AbortFetchStream, Interrupt() happens WHILE fetch.lock is held. A new PREPARE cannot
+//! install a producer until fetch.lock is released, so the connection's running statement is provably
+//! this `uuid` at the moment we interrupt it — never a newer query that raced in behind us. (The
+//! generic AbortFetchStream is called on the same thread that then installs the next producer, so it
+//! has no such race; the reaper fires asynchronously against a live connection, so it must interrupt
+//! under the lock.) SetError and the producer join run after the lock is released. Call WITHOUT the
+//! statement lock.
 static bool AbortFetchStreamIfUuid(QuackConnection &connection, hugeint_t uuid, const string &reason) {
+	shared_ptr<QuackFetchStream> stream;
 	std::thread producer;
 	{
 		lock_guard<mutex> guard(connection.fetch.lock);
 		if (connection.fetch.uuid != uuid || !connection.fetch.stream) {
 			return false;
 		}
-		auto stream = std::move(connection.fetch.stream);
+		stream = std::move(connection.fetch.stream);
 		producer = std::move(connection.fetch.thread);
 		// the abort reason must not hide a real failure
 		connection.fetch.abort_error =
 		    stream->buffer.HasError() ? stream->buffer.GetError() : ErrorData(ExceptionType::INTERRUPT, reason);
-		auto was_finished = stream->buffer.Finished();
-		// SetError releases a producer parked on buffer capacity; Interrupt() stops one that is
-		// executing. Both under fetch.lock, so the running statement is still `uuid`.
-		stream->buffer.SetError(ErrorData(ExceptionType::INTERRUPT, reason));
-		if (!was_finished && connection.duckdb_connection) {
+		// Interrupt() stays under fetch.lock — that is what proves the running statement is still
+		// `uuid`. It is a non-blocking atomic CAS, safe to hold the lock across.
+		if (!stream->buffer.Finished() && connection.duckdb_connection) {
 			connection.duckdb_connection->Interrupt();
 		}
 	}
+	// SetError releases a producer parked on buffer capacity. It targets the captured `stream`, which
+	// a new PREPARE can never re-install, so it stays uuid-safe outside the lock — and is kept out so
+	// the executor reschedule it can trigger does not run under fetch.lock.
+	stream->buffer.SetError(ErrorData(ExceptionType::INTERRUPT, reason));
 	if (producer.joinable()) {
 		producer.join();
 	}
