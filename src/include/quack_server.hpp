@@ -24,6 +24,7 @@ class Connection;
 class MemoryStream;
 class QueryResult;
 class DatabaseInstance;
+struct QuackFetchStream;
 class PreparedStatement;
 class EncryptionState;
 class QuackDataStream;
@@ -64,6 +65,17 @@ struct QuackInsertState {
 	shared_ptr<QuackDataStream> StreamForDeadRangeOrBuffer(const string &sid, idx_t lo, idx_t hi);
 };
 
+//! The stream the connection's active query fills, one at a time. The query runs on a background
+//! thread with a rebalancing result collector, and the FETCH handlers drain the stream's buffer.
+struct QuackFetchState {
+	mutex lock;
+	shared_ptr<QuackFetchStream> stream;
+	std::thread thread;
+	hugeint_t uuid = 0;
+	//! A late FETCH for this uuid gets this error. The stream and its payloads can then go away.
+	ErrorData abort_error;
+};
+
 struct QuackConnection {
 	explicit QuackConnection(string session_id_p, idx_t heartbeat_timeout_seconds_p);
 	~QuackConnection();
@@ -73,23 +85,24 @@ struct QuackConnection {
 	//! True if the lease timeout has elapsed, latching the expiry ("cannot be revived").
 	bool LeaseExpiredLocked(time_point<steady_clock> now) DUCKDB_REQUIRES(lease_lock);
 
+	//! Guards the session state below and the result cache. Never held across a statement.
 	mutex lock;
+	//! Held for a whole statement, because `duckdb_connection` runs one at a time. The fetch
+	//! producer and the insert driver take it. Request handlers must not.
+	mutex statement_lock;
 	unique_ptr<Connection> duckdb_connection;
-	unique_ptr<QueryResult> duckdb_query_result;
 	//! Replay cache of the last client query's result stream, null unless quack_enable_reconnects.
 	unique_ptr<QuackResultCache> result_cache;
 	//! The owning server's live-cache counter, handed to every cache this connection creates.
 	shared_ptr<atomic<idx_t>> live_caches;
 	//! Rows held by result_cache
 	atomic<idx_t> cached_rows {DConstants::INVALID_INDEX};
-	//! Monotonic counter assigned per FETCH batch — enables order-preserving parallel scans on
-	idx_t next_batch_index = 1;
 	//! Current query UUID
 	hugeint_t query_uuid;
 	string session_id;
 
 	void SyncCachedRows() {
-		cached_rows = result_cache ? result_cache->retained.Count() : DConstants::INVALID_INDEX;
+		cached_rows = result_cache ? result_cache->retained_rows : DConstants::INVALID_INDEX;
 	}
 
 	//! The only way to drop the cache, keeps the lock-free cached_rows mirror in sync with the drop
@@ -113,11 +126,13 @@ struct QuackConnection {
 	bool lease_expired DUCKDB_GUARDED_BY(lease_lock) = false;
 
 	string sql_query;
-	QuackQueryState query_state = QuackQueryState::IDLE;
+	//! Read unlocked by the cache sweep and the connection listing, so it must be atomic.
+	atomic<QuackQueryState> query_state {QuackQueryState::IDLE};
 	timestamp_t query_started_at {0};
 
 	//! The INSERT this connection is currently driving via a client SEND_DATA stream (one at a time).
 	QuackInsertState insert;
+	QuackFetchState fetch;
 };
 
 struct QuackConnectionSnapshot {

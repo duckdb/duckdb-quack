@@ -215,15 +215,20 @@ SET preserve_insertion_order=true;
 # Async FETCH POSTs run on ASYNC-pool threads via PostRaw(nullptr, ...); the logger stamped at
 # client checkout must make them visible in the HTTP transport log, not just the Quack log.
 
-# small fetch batches so one scan makes many async FETCH round-trips
+# small batches, so one scan makes many async FETCH round trips
 statement ok quack_db:quack_server_con
-set global quack_fetch_batch_rows=2048;
+set global quack_prepare_inline_rows=2048;
+
+statement ok quack_db:quack_server_con
+set global quack_target_batch_bytes=65536;
 
 statement ok
 CALL truncate_duckdb_logs();
 
+# hash() makes the batches hard to compress. They are cut on SERIALIZED bytes, so a plain range()
+# would give one batch, PREPARE would inline it, and no FETCH would run.
 query I
-select count(*) from quack_query({server}, 'from range(50000)')
+select count(*) from quack_query({server}, 'select hash(range) h from range(50000)')
 ----
 50000
 
@@ -244,7 +249,10 @@ select
 true
 
 statement ok quack_db:quack_server_con
-reset global quack_fetch_batch_rows;
+reset global quack_prepare_inline_rows;
+
+statement ok quack_db:quack_server_con
+reset global quack_target_batch_bytes;
 
 # --- HTTP logging (context-less teardown scope) ---
 # A pooled client's DISCONNECT POST is context-less and must not be logged under the

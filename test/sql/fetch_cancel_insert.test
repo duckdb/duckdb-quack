@@ -1,0 +1,69 @@
+# name: test/sql/fetch_cancel_insert.test
+# description: cancelling a scan whose producer is parked on the fetch buffer frees the connection for later INSERTs
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+# The client stops the scan. The producer then fills the small buffer and parks, and it holds the
+# connection lock. CANCEL must abort the stream, or the next statement waits for ever.
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_fetch_producer_buffer_bytes = 262144;
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_target_batch_bytes = 65536;
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_prepare_inline_rows = 1;
+
+statement ok quack_db:quack_server_con
+CREATE TABLE big AS SELECT range AS i, hash(range) AS pad FROM range(1000000);
+
+statement ok quack_db:quack_server_con
+CREATE TABLE sink_t(i BIGINT);
+
+statement ok
+ATTACH {server} AS remote (TOKEN 'asdf');
+
+statement ok
+ATTACH {server} AS remote2 (TOKEN 'asdf');
+
+# stop a large scan after one row: the producer continues until it parks
+query I
+SELECT count(*) FROM (SELECT * FROM quack_query_by_name('remote', 'SELECT i, pad FROM big') LIMIT 1);
+----
+1
+
+statement ok
+SELECT sleep_ms(200);
+
+statement ok
+SET VARIABLE conn_id = (
+  SELECT connection_id
+  FROM quack_query_by_name('remote2',
+    'SELECT connection_id FROM quack_active_connections()
+     WHERE state = ''active'' AND query LIKE ''%FROM big%''
+     LIMIT 1')
+);
+
+statement ok
+FROM quack_cancel('remote2', getvariable('conn_id'));
+
+# without the abort in CANCEL, this INSERT waits for ever on the connection lock
+statement ok
+INSERT INTO remote.sink_t VALUES (1);
+
+query I
+SELECT count(*) FROM remote.sink_t;
+----
+1
+
+statement ok quack_db:quack_server_con
+RESET GLOBAL quack_fetch_producer_buffer_bytes;
+
+statement ok quack_db:quack_server_con
+RESET GLOBAL quack_target_batch_bytes;
+
+statement ok quack_db:quack_server_con
+RESET GLOBAL quack_prepare_inline_rows;
+
+include test/template/quack_teardown.test_template

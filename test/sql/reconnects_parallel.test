@@ -4,12 +4,16 @@
 
 include test/template/quack_setup.test_template
 
-# One chunk per FETCH batch forces ack_sent machinery is engaged.
+# A one-batch PREPARE drain and small batches of a scrambled column make a parallel scan that needs
+# many FETCHes. This is what puts the exactly-once ACK machinery to work.
 statement ok quack_db:quack_server_con
-SET GLOBAL quack_fetch_batch_rows = 1;
+SET GLOBAL quack_prepare_inline_rows = 1;
 
 statement ok quack_db:quack_server_con
-CREATE TABLE big AS SELECT range AS i FROM range(300000);
+SET GLOBAL quack_target_batch_bytes = 65536;
+
+statement ok quack_db:quack_server_con
+CREATE TABLE big AS SELECT range AS i, (range * 48271) % 1000000007 AS r FROM range(300000);
 
 statement ok
 CREATE SECRET (TYPE quack, TOKEN 'asdf');
@@ -24,10 +28,20 @@ statement ok
 CALL enable_logging('Quack');
 
 # --- reconnects disabled: full parallel consumption completes and NO ACK is sent ---
-query I
-SELECT count(*) FROM remote.big;
+# CTAS moves all the data. An aggregate would be pushed down and give one row, with no FETCH.
+statement ok
+CREATE OR REPLACE TABLE local_1 AS SELECT i, r FROM remote.big;
+
+query II
+SELECT count(*), sum(r) FROM local_1;
 ----
-300000
+300000	147413745176582
+
+# make sure the scan above really used more than one FETCH
+query I
+SELECT count(*) > 1 FROM duckdb_logs_parsed('Quack') WHERE message_type = 'FETCH_REQUEST';
+----
+true
 
 query I
 SELECT count(*) FROM duckdb_logs_parsed('Quack') WHERE message_type = 'ACKNOWLEDGEMENT';
@@ -38,10 +52,13 @@ statement ok
 SET quack_enable_reconnects = true;
 
 # --- reconnects enabled: full parallel consumption sends EXACTLY ONE ACK ---
-query I
-SELECT count(*) FROM remote.big;
+statement ok
+CREATE OR REPLACE TABLE local_2 AS SELECT i, r FROM remote.big;
+
+query II
+SELECT count(*), sum(r) FROM local_2;
 ----
-300000
+300000	147413745176582
 
 query I
 SELECT count(*) FROM duckdb_logs_parsed('Quack')
@@ -50,10 +67,13 @@ WHERE message_type = 'ACKNOWLEDGEMENT' AND response_type = 'SUCCESS_RESPONSE';
 1
 
 # A second query sends its own single ACK: exactly one per completed query, never zero, never two.
+statement ok
+CREATE OR REPLACE TABLE local_3 AS SELECT i, r FROM remote.big;
+
 query I
-SELECT sum(i) FROM remote.big;
+SELECT sum(r) FROM local_3;
 ----
-44999850000
+147413745176582
 
 query I
 SELECT count(*) FROM duckdb_logs_parsed('Quack')
@@ -62,7 +82,10 @@ WHERE message_type = 'ACKNOWLEDGEMENT' AND response_type = 'SUCCESS_RESPONSE';
 2
 
 statement ok quack_db:quack_server_con
-RESET GLOBAL quack_fetch_batch_rows;
+RESET GLOBAL quack_prepare_inline_rows;
+
+statement ok quack_db:quack_server_con
+RESET GLOBAL quack_target_batch_bytes;
 
 statement ok
 DETACH remote;
