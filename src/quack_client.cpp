@@ -54,12 +54,7 @@ void QuackClient::EncodeRequest(optional_ptr<ClientContext> context, QuackMessag
 
 unique_ptr<QuackMessage> QuackClient::DecodeResponse(const string &response_body) {
 	MemoryStream read_stream((data_ptr_t)response_body.data(), response_body.size());
-	auto message = QuackMessage::FromMemoryStream(read_stream);
-	if (message->Type() == MessageType::FETCH_RESPONSE) {
-		// the chunks travel as a raw blob after the message; the stream stands right on it
-		message->Cast<FetchResponseMessage>().DecodeChunks(read_stream);
-	}
-	return message;
+	return QuackMessage::FromMemoryStream(read_stream);
 }
 
 Logger &QuackClient::GetRequestLogger(optional_ptr<ClientContext> context) {

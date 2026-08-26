@@ -173,6 +173,8 @@ unique_ptr<QuackMessage> QuackMessage::DeserializeMessage(BinaryDeserializer &de
 	auto result = Deserialize(deserializer, header.type);
 	result->SetHeader(std::move(header));
 	deserializer.End();
+	// a chunk-carrying message continues with its raw blob, from right after the message
+	result->DecodeBlob(deserializer);
 	return result;
 }
 
@@ -259,10 +261,9 @@ idx_t QuackPrependHeader(MemoryStream &payload, const QuackMessage &header_messa
 	return body_start;
 }
 
-vector<unique_ptr<DataChunk>> DecodeQuackChunkBlob(MemoryStream &stream, idx_t chunk_count) {
+vector<unique_ptr<DataChunk>> DecodeQuackChunkBlob(BinaryDeserializer &deserializer, idx_t chunk_count) {
 	vector<unique_ptr<DataChunk>> chunks;
 	chunks.reserve(chunk_count);
-	BinaryDeserializer deserializer(stream);
 	for (idx_t i = 0; i < chunk_count; i++) {
 		auto chunk = make_uniq<DataChunk>();
 		deserializer.Begin();
@@ -273,12 +274,12 @@ vector<unique_ptr<DataChunk>> DecodeQuackChunkBlob(MemoryStream &stream, idx_t c
 	return chunks;
 }
 
-void SendDataRequestMessage::DecodeChunks(MemoryStream &stream) {
-	chunks = DecodeQuackChunkBlob(stream, chunk_count);
+void SendDataRequestMessage::DecodeBlob(BinaryDeserializer &deserializer) {
+	chunks = DecodeQuackChunkBlob(deserializer, chunk_count);
 }
 
-void FetchResponseMessage::DecodeChunks(MemoryStream &stream) {
-	results = DecodeQuackChunkBlob(stream, chunk_count);
+void FetchResponseMessage::DecodeBlob(BinaryDeserializer &deserializer) {
+	results = DecodeQuackChunkBlob(deserializer, chunk_count);
 }
 
 void DataChunkWrapper::Serialize(Serializer &serializer) const {

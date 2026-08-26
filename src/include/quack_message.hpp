@@ -10,6 +10,7 @@
 
 namespace duckdb {
 
+class BinaryDeserializer;
 class ClientContext;
 
 //! Quack wire-protocol version. Client and server agree on it during the connection handshake.
@@ -116,6 +117,10 @@ public:
 	static unique_ptr<QuackMessage> Deserialize(Deserializer &deserializer, MessageType message_type);
 	static MessageHeader DeserializeHeader(BinaryDeserializer &deserializer);
 	static unique_ptr<QuackMessage> DeserializeMessage(BinaryDeserializer &deserializer, MessageHeader header);
+
+	//! Reads the raw blob that follows this message on the wire. A no-op for a message with none.
+	virtual void DecodeBlob(BinaryDeserializer &) {
+	}
 
 	const MessageType &Type() const {
 		return header.type;
@@ -356,8 +361,7 @@ public:
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<FetchResponseMessage> Deserialize(Deserializer &deserializer);
 
-	//! Reads chunk_count chunks from the stream, which stands right after this message.
-	void DecodeChunks(MemoryStream &stream);
+	void DecodeBlob(BinaryDeserializer &deserializer) override;
 
 	vector<unique_ptr<DataChunk>> &MutableResults() {
 		return results;
@@ -408,8 +412,7 @@ public:
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<SendDataRequestMessage> Deserialize(Deserializer &deserializer);
 
-	//! Reads chunk_count chunks from the stream, which stands right after this message.
-	void DecodeChunks(MemoryStream &stream);
+	void DecodeBlob(BinaryDeserializer &deserializer) override;
 
 	void SetChunkCount(idx_t chunk_count_p) {
 		chunk_count = chunk_count_p;
@@ -492,9 +495,9 @@ private:
 //! would need; the decode copies, so nothing needs that today.)
 idx_t QuackPrependHeader(MemoryStream &payload, const QuackMessage &header_message);
 
-//! Reads chunk_count chunks from the stream's current position: the mirror of
+//! Reads chunk_count chunks from the deserializer's current position: the mirror of
 //! QuackChunkPayloadWriter::AppendChunk. The chunks are self-describing, so no types are needed.
-vector<unique_ptr<DataChunk>> DecodeQuackChunkBlob(MemoryStream &stream, idx_t chunk_count);
+vector<unique_ptr<DataChunk>> DecodeQuackChunkBlob(BinaryDeserializer &deserializer, idx_t chunk_count);
 
 //! Carries a serialized payload. The HTTP layer finds it with RawPayload() and sends the bytes
 //! from RawPayloadStart() as they are. Never Cast<> this to the payload's message type: only the

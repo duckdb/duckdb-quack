@@ -512,12 +512,8 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
 
 	SweepExpiredCaches(*db);
 
-	// now deserialize the actual message
+	// now deserialize the actual message, and any raw chunk blob that follows it
 	auto received_message = QuackMessage::DeserializeMessage(deserializer, header);
-	if (received_message->Type() == MessageType::SEND_DATA_REQUEST) {
-		// the chunks travel as a raw blob after the message; the stream stands right on it
-		received_message->Cast<SendDataRequestMessage>().DecodeChunks(read_stream);
-	}
 	if (connection) {
 		// Only supported, structurally valid messages for an existing session renew its lease.
 		if (!RenewConnectionLease(header.connection_id, connection)) {
@@ -679,7 +675,8 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 				// decodes them.
 				MemoryStream payload_stream(entry.payload->GetData(), entry.payload_size);
 				payload_stream.SetPosition(QUACK_PAYLOAD_HEADER_BYTES);
-				for (auto &chunk : DecodeQuackChunkBlob(payload_stream, entry.chunk_count)) {
+				BinaryDeserializer payload_deserializer(payload_stream);
+				for (auto &chunk : DecodeQuackChunkBlob(payload_deserializer, entry.chunk_count)) {
 					results.push_back(make_uniq<DataChunkWrapper>(*chunk));
 				}
 				if (retain_result) {
