@@ -1,6 +1,6 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/client_context.hpp"
-
+#include "quack_secret.hpp"
 #include "quack_startstop.hpp"
 #include "quack_storage.hpp"
 
@@ -23,10 +23,9 @@ static unique_ptr<FunctionData> QuackServeBind(ClientContext &context, TableFunc
 #endif
 
 	auto bind_data = make_uniq<QuackStartStopFunctionData>();
-	string listen_uri;
-	if (input.inputs.empty()) {
-		listen_uri = "quack:localhost";
-	} else {
+	bool explicit_uri = !input.inputs.empty();
+	string listen_uri = "quack:localhost";
+	if (explicit_uri) {
 		auto &uri_value = input.inputs[0];
 		if (uri_value.IsNull() || uri_value.GetValue<string>().empty()) {
 			throw InvalidInputException("Invalid listen string specified");
@@ -36,6 +35,33 @@ static unique_ptr<FunctionData> QuackServeBind(ClientContext &context, TableFunc
 
 	auto allow_other_hostname = input.named_parameters.find("allow_other_hostname") != input.named_parameters.end() &&
 	                            input.named_parameters["allow_other_hostname"].GetValue<bool>();
+
+	// Every server has a token: either user-supplied, taken from a secret, or auto-generated. The
+	// authn callback (default token-check or a user-defined function) decides what to do with it;
+	// the server itself doesn't care which path is in use.
+	auto token_entry = input.named_parameters.find("token");
+	auto secret_entry = input.named_parameters.find("secret");
+	bool has_token = token_entry != input.named_parameters.end();
+	bool has_secret_name = secret_entry != input.named_parameters.end();
+	if (has_token && has_secret_name) {
+		throw InvalidInputException("Cannot specify both token and secret - the secret supplies the token");
+	}
+
+	unique_ptr<SecretEntry> secret;
+	if (!has_token) {
+		// An explicit name selects the secret; without one we use the default secret for this endpoint (if any).
+		// Without a URI the secret decides where we listen, so a lone secret counts as the default one.
+		secret = QuackSecret::Find(context, has_secret_name ? &secret_entry->second : nullptr, listen_uri,
+		                           explicit_uri ? QuackSecret::DefaultLookup::SCOPE_MATCH_ONLY
+		                                        : QuackSecret::DefaultLookup::ALLOW_SINGLE_SECRET);
+	}
+	if (secret && !explicit_uri) {
+		// No URI was given: a fully-qualified secret scope tells us where to listen.
+		string secret_endpoint;
+		if (QuackSecret::TryGetEndpoint(*secret, secret_endpoint)) {
+			listen_uri = secret_endpoint;
+		}
+	}
 
 	bind_data->listen_uri = QuackUri(listen_uri, /* the server will always listen without SSL */ false);
 	if (!allow_other_hostname && !bind_data->listen_uri.IsLocal()) {
@@ -51,11 +77,10 @@ static unique_ptr<FunctionData> QuackServeBind(ClientContext &context, TableFunc
 	names.emplace_back("listen_url");
 	names.emplace_back("auth_token");
 
-	// Every server has a token: either user-supplied or auto-generated. The
-	// authn callback (default token-check or a user-defined function) decides
-	// what to do with it; the server itself doesn't care which path is in use.
-	if (input.named_parameters.find("token") != input.named_parameters.end()) {
-		bind_data->token = input.named_parameters["token"].GetValue<string>();
+	if (has_token) {
+		bind_data->token = token_entry->second.GetValue<string>();
+	} else if (secret) {
+		bind_data->token = QuackSecret::GetToken(*secret);
 	} else {
 		bind_data->token = QuackServer::GenerateRandomToken(*context.db);
 	}
@@ -89,6 +114,7 @@ TableFunctionSet QuackServeFunction::GetFunction() {
 	fun.named_parameters["disable_ssl"] = LogicalType::BOOLEAN;
 	fun.named_parameters["allow_other_hostname"] = LogicalType::BOOLEAN;
 	fun.named_parameters["token"] = LogicalType::VARCHAR;
+	fun.named_parameters["secret"] = LogicalType::VARCHAR;
 	set.AddFunction(fun);
 	fun.arguments.clear();
 	set.AddFunction(fun);
