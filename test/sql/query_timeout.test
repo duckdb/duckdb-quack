@@ -1,16 +1,27 @@
 # name: test/sql/query_timeout.test
-# description: quack_query_timeout interrupts a query that runs past the deadline
+# description: quack_query_timeout interrupts a query that runs past the deadline, and only then
 # group: [sql]
 
 include test/template/quack_setup.test_template
+
+statement ok
+ATTACH {server} AS remote (TOKEN 'asdf');
+
+# Off by default: a query that outlives a reaper tick still completes untouched.
+query I
+SELECT current_setting('quack_query_timeout');
+----
+0
+
+query I
+FROM quack_query_by_name('remote', 'SELECT sleep_ms(1500)');
+----
+NULL
 
 # Arm a 2-second timeout on the SERVER database — the reaper reads the server's config.
 # GLOBAL scope + a live read each tick means it applies without restarting the server.
 statement ok quack_db:quack_server_con
 SET quack_query_timeout=2;
-
-statement ok
-ATTACH {server} AS remote (TOKEN 'asdf');
 
 # A query that would run for 8s server-side is interrupted by the reaper within a few seconds.
 statement error
@@ -18,9 +29,29 @@ FROM quack_query_by_name('remote', 'SELECT sleep_ms(8000)');
 ----
 Interrupt
 
-# The same connection is reusable, and a query that finishes inside the deadline is untouched.
+# The same connection is reusable afterwards.
 query I
 FROM quack_query_by_name('remote', 'SELECT sleep_ms(200)');
+----
+NULL
+
+# Legitimate queries that finish inside the deadline are never reaped, even in a rapid burst
+# while the timeout is armed — this is the identity guard holding under churn.
+loop i 0 8
+
+query I
+FROM quack_query_by_name('remote', 'SELECT sleep_ms(150)');
+----
+NULL
+
+endloop
+
+# Disabling it live (back to 0) takes effect on the next tick: the same long query now completes.
+statement ok quack_db:quack_server_con
+SET quack_query_timeout=0;
+
+query I
+FROM quack_query_by_name('remote', 'SELECT sleep_ms(3000)');
 ----
 NULL
 
