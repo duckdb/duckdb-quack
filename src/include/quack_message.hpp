@@ -400,9 +400,11 @@ public:
 	static constexpr MessageType TYPE = MessageType::SEND_DATA_REQUEST;
 
 	explicit SendDataRequestMessage(string connection_id_p, string schema_name_p, string table_name_p,
-	                                vector<unique_ptr<DataChunkWrapper>> chunks_p, hugeint_t query_uuid_p)
+	                                vector<unique_ptr<DataChunkWrapper>> chunks_p, hugeint_t query_uuid_p,
+	                                vector<string> parent_schemas_p = vector<string>())
 	    : QuackMessage(TYPE, std::move(connection_id_p)), schema_name(std::move(schema_name_p)),
-	      table_name(std::move(table_name_p)), chunks(std::move(chunks_p)), query_uuid(query_uuid_p) {
+	      table_name(std::move(table_name_p)), chunks(std::move(chunks_p)), query_uuid(query_uuid_p),
+	      parent_schemas(std::move(parent_schemas_p)) {
 	}
 
 	void Serialize(Serializer &serializer) const override;
@@ -440,6 +442,19 @@ public:
 	const string &TableName() const {
 		return table_name;
 	}
+	//! The schemas the target schema is nested in, outermost first (empty for a top-level schema)
+	const vector<string> &ParentSchemas() const {
+		return parent_schemas;
+	}
+	//! The insert target as the server must address it: [parent schemas..., schema, table]
+	QualifiedName QualifiedTableName() const {
+		vector<Identifier> schema_path;
+		for (auto &parent : parent_schemas) {
+			schema_path.emplace_back(parent);
+		}
+		schema_path.emplace_back(schema_name);
+		return QualifiedName(std::move(schema_path), Identifier(table_name));
+	}
 	hugeint_t QueryUUID() const {
 		return query_uuid;
 	}
@@ -474,6 +489,9 @@ private:
 	//! Set only on dead-range markers: batches [batch_index, dead_range_end) are dead (a filtered/pruned
 	//! gap the sink never crossed). Lets the server skip the gap instead of stalling. Invalid on data messages.
 	optional_idx dead_range_end;
+	//! The schemas the target schema is nested in, outermost first. Empty for a table in a top-level schema,
+	//! which keeps the message compatible with peers that predate nested schema support
+	vector<string> parent_schemas;
 };
 
 //! Builds one serialized message step by step, on the producing thread. A cut then needs no second

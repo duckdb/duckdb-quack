@@ -1,12 +1,12 @@
 #pragma once
 
 #include "duckdb/common/error_data.hpp"
-#include "duckdb/common/multi_file/multi_file_read_ahead.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/parallel/interrupt.hpp"
+#include "duckdb/parallel/scan_read_ahead.hpp"
 
 #include <chrono>
 #include <condition_variable>
@@ -155,7 +155,9 @@ public:
 		if (entry != waiters.end()) {
 			return entry->second;
 		}
-		auto completion = make_shared_ptr<ReadAheadJobCompletion>(nullptr, 1);
+		auto completion = make_shared_ptr<ReadAheadJobCompletion>(nullptr);
+		// armed before the waiter is published, so the batch's push is the only thing that can finish it
+		completion->AddIOTask();
 		waiters.emplace(claim, completion);
 		return completion;
 	}

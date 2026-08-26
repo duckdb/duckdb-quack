@@ -9,6 +9,7 @@
 #include "storage/quack_catalog.hpp"
 #include "quack_message.hpp"
 #include "storage/quack_insert.hpp"
+#include "storage/quack_schema.hpp"
 #include "storage/quack_table.hpp"
 #include "quack_client.hpp"
 
@@ -16,6 +17,17 @@
 #include <set>
 
 using namespace duckdb;
+
+//! The schemas the insert target is nested in, outermost first. The local schema path is exactly the path the
+//! server knows the table by, so only the schema itself has to be dropped from it
+static vector<string> GetParentSchemas(const QuackSchemaCatalogEntry &schema) {
+	auto path = schema.GetSchemaPath();
+	vector<string> result;
+	for (idx_t i = 0; i + 1 < path.size(); i++) {
+		result.push_back(path[i].GetIdentifierName());
+	}
+	return result;
+}
 
 QuackInsert::QuackInsert(PhysicalPlan &physical_plan, LogicalOperator &op, TableCatalogEntry &table)
     : PhysicalOperator(physical_plan, PhysicalOperatorType::EXTENSION, op.types, 1), table(&table), schema(nullptr) {
@@ -177,9 +189,9 @@ static void SendChunks(ClientContext &context, const QuackInsert &insert, QuackI
 		wrappers.push_back(make_uniq<DataChunkWrapper>(*chunk));
 	}
 
-	auto send_msg =
-	    make_uniq<SendDataRequestMessage>(quack_catalog.GetConnectionId(), tbl.schema.name.GetIdentifierName(),
-	                                      tbl.name.GetIdentifierName(), std::move(wrappers), gstate.query_uuid);
+	auto send_msg = make_uniq<SendDataRequestMessage>(
+	    quack_catalog.GetConnectionId(), tbl.schema.name.GetIdentifierName(), tbl.name.GetIdentifierName(),
+	    std::move(wrappers), gstate.query_uuid, GetParentSchemas(tbl.schema.Cast<QuackSchemaCatalogEntry>()));
 
 	switch (insert.order_mode) {
 	case AppendOrderMode::PARALLEL_ORDERED: {
@@ -224,7 +236,8 @@ static void SendDeadRange(ClientContext &context, QuackInsertGlobalState &gstate
 
 	auto send_msg = make_uniq<SendDataRequestMessage>(quack_catalog.GetConnectionId(),
 	                                                  tbl.schema.name.GetIdentifierName(), tbl.name.GetIdentifierName(),
-	                                                  vector<unique_ptr<DataChunkWrapper>>(), gstate.query_uuid);
+	                                                  vector<unique_ptr<DataChunkWrapper>>(), gstate.query_uuid,
+	                                                  GetParentSchemas(tbl.schema.Cast<QuackSchemaCatalogEntry>()));
 	send_msg->SetDeadRange(lo, hi);
 
 	// Encode on the producer thread: the async task runs off-thread and must not touch ClientContext.

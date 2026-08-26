@@ -273,11 +273,11 @@ QuackConnection::~QuackConnection() {
 //! Background thread: runs the INSERT that drains `stream` via scan_data_from_quack_client, holding
 //! the statement lock for the statement's duration (one transactional statement -> atomic).
 static void RunInsertStatement(QuackConnection &connection, shared_ptr<QuackDataStream> stream, string stream_id,
-                               string schema_name, string table_name) {
+                               string qualified_table_name) {
 	try {
 		unique_lock<mutex> lock(connection.statement_lock);
-		auto sql = StringUtil::Format("INSERT INTO %s.%s SELECT * FROM scan_data_from_quack_client(%s)",
-		                              SQLIdentifier(schema_name), SQLIdentifier(table_name), SQLString(stream_id));
+		auto sql = StringUtil::Format("INSERT INTO %s SELECT * FROM scan_data_from_quack_client(%s)",
+		                              qualified_table_name, SQLString(stream_id));
 		auto result = connection.duckdb_connection->Query(sql);
 		if (result->HasError()) {
 			stream->SetError(result->GetErrorObject());
@@ -959,9 +959,8 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 
 		// we never execute this query, but throw it at the authorization function so it can check if this user gets to
 		// insert into this table
-		auto dummy_insert_query =
-		    StringUtil::Format("INSERT INTO %s.%s VALUES (NULL)", SQLIdentifier(send_data_message.SchemaName()),
-		                       SQLIdentifier(send_data_message.TableName()));
+		auto qualified_table_name = send_data_message.QualifiedTableName().ToString();
+		auto dummy_insert_query = StringUtil::Format("INSERT INTO %s VALUES (NULL)", qualified_table_name);
 
 		// TODO do not do this if there is no fun set
 		{
@@ -1006,8 +1005,8 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 				stream = QuackStreamRegistry::Get().Create(stream_id, types, ordered);
 				connection.insert.stream = stream;
 				connection.insert.stream_id = stream_id;
-				connection.insert.thread = std::thread(RunInsertStatement, std::ref(connection), stream, stream_id,
-				                                       send_data_message.SchemaName(), send_data_message.TableName());
+				connection.insert.thread =
+				    std::thread(RunInsertStatement, std::ref(connection), stream, stream_id, qualified_table_name);
 				// Apply any dead-range markers that arrived before the stream existed.
 				if (connection.insert.pending_marker_stream_id == stream_id) {
 					buffered_dead_ranges = std::move(connection.insert.pending_dead_ranges);

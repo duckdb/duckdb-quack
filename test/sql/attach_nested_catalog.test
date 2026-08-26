@@ -1,0 +1,112 @@
+# name: test/sql/attach_nested_catalog.test
+# description: catalogs attached on the server show up as nested schemas of the quack catalog
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+# --- the server has a second catalog attached, with a schema tree that mirrors the first one. Before
+# nested schema support these all collapsed onto a single "main"/"shared" schema
+statement ok quack_db:quack_server_con
+attach ':memory:' as other;
+
+statement ok quack_db:quack_server_con
+create schema shared;
+
+statement ok quack_db:quack_server_con
+create schema other.shared;
+
+statement ok quack_db:quack_server_con
+create table shared.t(i int);
+
+statement ok quack_db:quack_server_con
+insert into shared.t values (1);
+
+statement ok quack_db:quack_server_con
+create table other.shared.t(i int);
+
+statement ok quack_db:quack_server_con
+insert into other.shared.t values (2), (3);
+
+statement ok quack_db:quack_server_con
+create table other.main.only_there(i int);
+
+statement ok quack_db:quack_server_con
+insert into other.main.only_there values (4);
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+statement ok
+use rpc
+
+# the server's default catalog keeps its schemas at the top level; every other catalog becomes a
+# top-level schema holding that catalog's own schemas
+query II
+select schema_name, parent_schema from duckdb_schemas() where database_name='rpc' order by all
+----
+main	other
+main	NULL
+other	NULL
+shared	other
+shared	NULL
+
+# same-named schemas in different remote catalogs hold their own tables
+query I
+from shared.t
+----
+1
+
+query I
+from other.shared.t order by i
+----
+2
+3
+
+query I
+from other.main.only_there
+----
+4
+
+# every table is reported exactly once, and the two "shared.t" tables belong to two distinct schemas
+# (duckdb_tables only reports a schema's own name, so they are told apart by their schema)
+query II
+select table_name, count(distinct schema_oid) from duckdb_tables() where database_name='rpc' group by all order by all
+----
+only_there	1
+t	2
+
+query I
+select count(*) from duckdb_tables() where database_name='rpc'
+----
+3
+
+# --- a schema created below a remote catalog lands in that catalog on the server
+statement ok
+create schema other.fresh;
+
+query I quack_db:quack_server_con
+select count(*) from duckdb_schemas() where database_name='other' and schema_name='fresh'
+----
+1
+
+statement ok
+create table other.fresh.ft(i int);
+
+query I quack_db:quack_server_con
+select count(*) from duckdb_tables() where database_name='other' and schema_name='fresh' and table_name='ft'
+----
+1
+
+statement ok
+drop table other.fresh.ft;
+
+statement ok
+drop schema other.fresh;
+
+statement ok
+use memory
+
+include test/template/quack_teardown.test_template
+
+statement ok quack_db:quack_server_con
+detach other;

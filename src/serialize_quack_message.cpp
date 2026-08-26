@@ -191,6 +191,7 @@ void SendDataRequestMessage::Serialize(Serializer &serializer) const {
 	serializer.WritePropertyWithDefault<bool>(7, "is_last_in_batch", is_last_in_batch);
 	serializer.WritePropertyWithDefault<optional_idx>(8, "batch_watermark", batch_watermark, optional_idx());
 	serializer.WritePropertyWithDefault<optional_idx>(9, "dead_range_end", dead_range_end, optional_idx());
+	serializer.WritePropertyWithDefault<vector<string>>(10, "parent_schemas", parent_schemas);
 }
 
 unique_ptr<SendDataRequestMessage> SendDataRequestMessage::Deserialize(Deserializer &deserializer) {
@@ -206,6 +207,7 @@ unique_ptr<SendDataRequestMessage> SendDataRequestMessage::Deserialize(Deseriali
 	                                                           optional_idx());
 	deserializer.ReadPropertyWithExplicitDefault<optional_idx>(9, "dead_range_end", result->dead_range_end,
 	                                                           optional_idx());
+	deserializer.ReadPropertyWithDefault<vector<string>>(10, "parent_schemas", result->parent_schemas);
 	return result;
 }
 
