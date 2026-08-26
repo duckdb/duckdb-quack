@@ -35,10 +35,9 @@ static bool LeaseTimeoutElapsed(time_point<steady_clock> last_renewed_at, time_p
 	return static_cast<idx_t>(elapsed_seconds) >= timeout_seconds;
 }
 
-QuackConnection::QuackConnection(string session_id_p, idx_t heartbeat_timeout_seconds_p,
-                                 QuackInsertStreamRegistry &registry)
+QuackConnection::QuackConnection(string session_id_p, idx_t heartbeat_timeout_seconds_p)
     : session_id(std::move(session_id_p)), heartbeat_timeout_seconds(heartbeat_timeout_seconds_p),
-      lease_last_renewed_at(steady_clock::now()), insert_streams(registry) {
+      lease_last_renewed_at(steady_clock::now()) {
 }
 
 bool QuackConnection::LeaseExpiredLocked(time_point<steady_clock> now) {
@@ -94,7 +93,11 @@ static void AbortStatement(QuackConnection &connection, const string &reason) {
 		}
 	}
 	// The statement can hold a scan that waits for a client batch. Error those streams too.
-	connection.insert_streams.DropSession(connection.session_id, reason);
+	if (connection.duckdb_connection) {
+		if (auto session_state = QuackSessionState::Get(*connection.duckdb_connection->context)) {
+			session_state->Streams().Clear(reason);
+		}
+	}
 	AbortDetachedStatement(connection, std::move(detached), reason);
 }
 
@@ -365,14 +368,13 @@ string QuackServer::CreateNewConnection(const string &session_id, const string &
 	if (!db) {
 		throw InternalException("Database was closed");
 	}
-	auto new_connection = make_shared_ptr<QuackConnection>(session_id, heartbeat_timeout_seconds,
-	                                                       QuackStorageExtensionInfo::GetState(*db).InsertStreams());
+	auto new_connection = make_shared_ptr<QuackConnection>(session_id, heartbeat_timeout_seconds);
 	new_connection->client_id_hash = client_id_hash;
 	new_connection->live_caches = live_caches;
 	new_connection->duckdb_connection = make_uniq<Connection>(*db);
 	auto &connection_context = *new_connection->duckdb_connection->context;
-	// scan_data_from_quack_client reads this, so a stream records the session that may feed it.
-	connection_context.registered_state->Insert(QuackSessionState::KEY, make_shared_ptr<QuackSessionState>(session_id));
+	// scan_data_from_quack_client registers its streams here, and SEND_DATA finds them by connection.
+	connection_context.registered_state->Insert(QuackSessionState::KEY, make_shared_ptr<QuackSessionState>());
 	connection_context.config.enable_progress_bar = false;
 	// new_connection->duckdb_connection->context->config.streaming_buffer_size = 10 * 1000000; // 10 MB
 	active_connections[session_id] = std::move(new_connection);
@@ -804,11 +806,10 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		auto &send_data_message = received_message.Cast<SendDataRequestMessage>();
 		auto &connection = *connection_p;
 
-		// The scan registers the stream when the statement binds, so PREPARE must have run first. That
-		// PREPARE authorized the statement, and the id is unguessable. A batch needs no check beyond
-		// the session that owns the stream.
-		auto stream = QuackStorageExtensionInfo::GetState(db).InsertStreams().Find(send_data_message.StreamId());
-		if (!stream || stream->session_id != connection.session_id) {
+		// The streams live on this connection's session, so a batch is authorized by its connection id.
+		auto session_state = QuackSessionState::Get(*connection.duckdb_connection->context);
+		auto stream = session_state ? session_state->Streams().Find(send_data_message.StreamId()) : nullptr;
+		if (!stream) {
 			return make_uniq<ErrorResponse>("No active data stream '%s'", send_data_message.StreamId());
 		}
 

@@ -27,7 +27,6 @@ class DatabaseInstance;
 struct QuackResultStream;
 class PreparedStatement;
 struct QuackInsertStream;
-class QuackInsertStreamRegistry;
 class ErrorData;
 
 enum class QuackQueryState : uint8_t { IDLE, ACTIVE, FINISHED, CANCELLED, QUACK_ERROR };
@@ -44,7 +43,7 @@ struct QuackStatementState {
 };
 
 struct QuackConnection {
-	QuackConnection(string session_id_p, idx_t heartbeat_timeout_seconds_p, QuackInsertStreamRegistry &registry);
+	QuackConnection(string session_id_p, idx_t heartbeat_timeout_seconds_p);
 	~QuackConnection();
 
 	//! Renew unless the timeout has already elapsed. Once expired, a lease cannot be revived.
@@ -97,8 +96,6 @@ struct QuackConnection {
 	atomic<QuackQueryState> query_state {QuackQueryState::IDLE};
 	timestamp_t query_started_at {0};
 
-	//! Where the statement's scan registers the streams that this session's SEND_DATA messages feed.
-	QuackInsertStreamRegistry &insert_streams;
 	QuackStatementState statement;
 };
 

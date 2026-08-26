@@ -10,7 +10,6 @@
 
 #include "quack_fetch_collector.hpp"
 #include "quack_insert_stream.hpp"
-#include "quack_storage.hpp"
 
 namespace duckdb {
 
@@ -101,9 +100,7 @@ static unique_ptr<FunctionData> QuackScanFromClientBind(ClientContext &context, 
 
 	auto bind_data = make_uniq<QuackScanFromClientBindData>();
 	bind_data->types = types;
-	bind_data->stream = QuackStorageExtensionInfo::GetState(*context.db)
-	                        .InsertStreams()
-	                        .Create(stream_id, std::move(types), ordered, session_state->session_id);
+	bind_data->stream = session_state->Streams().Create(stream_id, std::move(types), ordered);
 	bind_data->stream_id = std::move(stream_id);
 	// The stream exists now, so the client may send. PREPARE waits for this.
 	if (auto statement = session_state->Statement()) {

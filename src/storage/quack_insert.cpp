@@ -7,7 +7,6 @@
 
 #include "quack_client.hpp"
 #include "quack_message.hpp"
-#include "quack_random.hpp"
 #include "quack_send_data.hpp"
 #include "storage/quack_catalog.hpp"
 #include "storage/quack_insert.hpp"
@@ -63,9 +62,9 @@ unique_ptr<GlobalSinkState> QuackInsert::GetGlobalSinkState(ClientContext &conte
 	auto &quack_catalog = table_entry->catalog.Cast<QuackCatalog>();
 	auto &types = children[0].get().GetTypes();
 
-	// The client names the statement, so the server composes no SQL. The stream id is unguessable, so
-	// a batch that carries it needs no authorization of its own.
-	auto stream_id = QuackRandomToken(*context.db);
+	// The client names the statement, so the server composes no SQL. The stream id only needs to be
+	// unique inside this connection: the connection id is the secret.
+	auto stream_id = UUID::ToString(UUID::GenerateRandomUUID());
 	auto query_uuid = UUID::GenerateRandomUUID();
 	auto sql =
 	    StringUtil::Format("INSERT INTO %s.%s SELECT * FROM scan_data_from_quack_client(%s, NULL::%s, ordered := %s)",

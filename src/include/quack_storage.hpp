@@ -2,7 +2,6 @@
 
 #include "duckdb/storage/storage_extension.hpp"
 
-#include "quack_insert_stream.hpp"
 #include "quack_server.hpp"
 
 namespace duckdb {
@@ -33,15 +32,9 @@ public:
 	vector<QuackConnectionSnapshot> GetActiveConnectionSnaps();
 	vector<ServerSnapshot> ListServers();
 
-	QuackInsertStreamRegistry &InsertStreams() {
-		return insert_streams;
-	}
-
 	static constexpr const char *STORAGE_EXTENSION_KEY = "quack";
 
 private:
-	//! Declared before `servers`, so it outlives the connections that deregister from it.
-	QuackInsertStreamRegistry insert_streams;
 	std::mutex servers_mutex;
 	unordered_map<string, unique_ptr<QuackServer>> servers;
 };
