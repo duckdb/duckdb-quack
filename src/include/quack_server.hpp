@@ -1,5 +1,6 @@
 #pragma once
 
+#include <condition_variable>
 #include <queue>
 #include <thread>
 
@@ -11,6 +12,7 @@
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/unordered_map.hpp"
 
+#include "quack_periodic_worker.hpp"
 #include "quack_result_cache.hpp"
 #include "quack_uri.hpp"
 
@@ -129,6 +131,9 @@ struct QuackConnection {
 	//! Read unlocked by the cache sweep and the connection listing, so it must be atomic.
 	atomic<QuackQueryState> query_state {QuackQueryState::IDLE};
 	timestamp_t query_started_at {0};
+	//! Monotonic start time for the query-timeout deadline. Wall-clock query_started_at is for
+	//! display only — a clock jump must not interrupt a running query or defer its timeout.
+	time_point<steady_clock> query_started_steady;
 
 	//! The INSERT this connection is currently driving via a client SEND_DATA stream (one at a time).
 	QuackInsertState insert;
@@ -234,9 +239,23 @@ private:
 	//! Destroys reaped caches on a one-shot detached thread so no response waits on their teardown
 	void DestroyCachesDetached(vector<unique_ptr<QuackResultCache>> doomed);
 
+	//! One reaper pass: interrupt any query that has run past quack_query_timeout. This also
+	//! reclaims a query whose client has disconnected — the server keeps running it otherwise,
+	//! because the heartbeat lease is only evaluated when a fresh message arrives on the connection.
+	void ReaperTick();
+	//! Interrupt `connection`'s running query if it has run for at least `timeout_seconds`.
+	//! A no-op unless the connection has an ACTIVE, non-sentinel query old enough; identity-checked
+	//! so a query started since the decision is never touched.
+	static void ReapConnectionIfOverdue(QuackConnection &connection, time_point<steady_clock> now,
+	                                    idx_t timeout_seconds);
+
 	string token;
 	//! Per-server random key that seeds the HMAC for client_id_hash.
 	string server_hmac_key;
+
+	//! Enforces quack_query_timeout. Declared last so it is torn down (its dtor joins the thread)
+	//! before active_connections; ~QuackServer also stops it explicitly before any teardown.
+	QuackPeriodicWorker reaper;
 };
 
 class HttpQuackServer : public QuackServer {
