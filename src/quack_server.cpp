@@ -367,6 +367,14 @@ void QuackServer::ReapConnectionIfOverdue(QuackConnection &connection, timestamp
 		if (connection.query_state != QuackQueryState::ACTIVE || connection.query_started_at.value == 0) {
 			return;
 		}
+		// The abort below only fires if the connection's current fetch stream still carries this
+		// uuid, which makes reaping safe — but ONLY for a unique uuid. Uuid {0,0} is the shared
+		// sentinel for internal catalogue traffic (quack_catalog.cpp) and is reused across queries,
+		// so a decision made for one {0,0} query could abort the next. Skip it: every real client
+		// query carries a random uuid, so the timeout still covers all of them.
+		if (connection.query_uuid == hugeint_t {0, 0}) {
+			return;
+		}
 		if (now.value - connection.query_started_at.value <= deadline_us) {
 			return;
 		}
@@ -378,7 +386,8 @@ void QuackServer::ReapConnectionIfOverdue(QuackConnection &connection, timestamp
 	}
 	std::unique_lock<std::mutex> lock(connection.lock);
 	if (connection.query_state == QuackQueryState::ACTIVE && connection.query_uuid == uuid) {
-		connection.query_state = QuackQueryState::QUACK_ERROR;
+		// A timeout is a server-initiated cancel, so mirror the CANCEL_REQUEST terminal state.
+		connection.query_state = QuackQueryState::CANCELLED;
 		connection.ClearResultCache();
 	}
 }
@@ -412,7 +421,9 @@ void QuackServer::ReaperLoop() {
 			}
 		}
 		auto now = Timestamp::GetCurrentTimestamp();
-		auto deadline_us = static_cast<int64_t>(timeout_seconds) * 1000000LL; // query_started_at is micros
+		// Clamp before converting to microseconds so the multiply cannot overflow int64. A timeout
+		// this large is effectively "never" anyway (~292,000 years). query_started_at is micros.
+		auto deadline_us = static_cast<int64_t>(MinValue<idx_t>(timeout_seconds, 9223372036854ULL)) * 1000000LL;
 		for (auto &connection : connections) {
 			ReapConnectionIfOverdue(*connection, now, deadline_us);
 		}

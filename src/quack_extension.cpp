@@ -228,9 +228,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "Seconds an idle keep-alive connection is kept open by the RPC server",
 	                          LogicalType::UBIGINT, Value::UBIGINT(300), nullptr, SetScope::GLOBAL);
 	config.AddExtensionOption("quack_query_timeout",
-	                          "Seconds a single query may run on the server before it is interrupted (0 = no limit). "
-	                          "Also reclaims a query whose client has disconnected, which the server keeps running "
-	                          "otherwise",
+	                          "Seconds a SELECT-style query may run on the server before it is interrupted (0 = no "
+	                          "limit), enforced within about a second. Also reclaims such a query whose client has "
+	                          "disconnected, which the server keeps running otherwise. Does not cover INSERT streams",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0), nullptr, SetScope::GLOBAL);
 
 	// Default client_id handed to any ATTACH / quack_query that doesn't pass one explicitly
