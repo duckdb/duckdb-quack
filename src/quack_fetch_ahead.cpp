@@ -1,12 +1,12 @@
 #include "quack_fetch_ahead.hpp"
 
 #include "duckdb/common/enums/task_scheduler_type.hpp"
-#include "duckdb/common/multi_file/multi_file_read_ahead.hpp"
 #include "duckdb/common/random_engine.hpp"
 #include "duckdb/common/thread.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parallel/async_result.hpp"
+#include "duckdb/parallel/scan_read_ahead.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 
 #include <chrono>
@@ -17,7 +17,7 @@ namespace duckdb {
 // Async fetch task
 //===--------------------------------------------------------------------===//
 // Runs the FETCH POST + response decode on an ASYNC-pool thread, publishing the decoded batch.
-// TODO: possibly converge with core's multi-file read-ahead abstraction.
+// TODO: possibly converge with core's ScanReadAhead abstraction.
 class QuackFetchDataTask : public AsyncTask {
 public:
 	QuackFetchDataTask(QuackFetcher &fetcher_p, unique_ptr<QuackClientWrapper> client_wrapper_p, idx_t request_index_p,
