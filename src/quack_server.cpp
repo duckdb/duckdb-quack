@@ -671,8 +671,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			if (status == QuackClaimPopStatus::BATCH) {
 				consumed++;
 				inline_rows += entry.rows;
-				// Batches are stored as header-less chunk blobs. This drain is the only place that
-				// decodes them.
+				// Batches are stored as header-less chunk blobs. Only this drain decodes them.
 				MemoryStream payload_stream(entry.payload->GetData(), entry.payload_size);
 				payload_stream.SetPosition(QUACK_PAYLOAD_HEADER_BYTES);
 				BinaryDeserializer payload_deserializer(payload_stream);
@@ -680,8 +679,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 					results.push_back(make_uniq<DataChunkWrapper>(*chunk));
 				}
 				if (retain_result) {
-					// These rows leave in the PREPARE response. The FETCH handler never sees them, so
-					// the header is written here, for a cache replay that re-serves the payload.
+					// These rows leave in the PREPARE response, so the header for a cache replay is written here.
 					FetchResponseMessage header_message;
 					header_message.SetChunkCount(entry.chunk_count);
 					header_message.SetBatchIndex(consumed);
@@ -768,7 +766,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		}
 
 		while (true) {
-			QuackClaimPopStatus status;
+			QuackClaimPopStatus status = QuackClaimPopStatus::EMPTY;
 			QuackFetchPayload entry;
 			shared_ptr<MemoryStream> served_batch;
 			idx_t served_start = 0;
@@ -845,7 +843,6 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			if (!send_data_message.BatchIndex().IsValid()) {
 				return make_uniq<ErrorResponse>("send_data_request is missing its batch index");
 			}
-			// The decode owns its chunks, so they move into the buffer as they are.
 			// The claim buffer drops a duplicate index, so a retry of the same batch is safe.
 			stream->buffer.PushBatch(send_data_message.BatchIndex().GetIndex(), std::move(incoming_chunks));
 		}

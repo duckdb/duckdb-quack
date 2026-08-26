@@ -79,7 +79,7 @@ struct QuackPreparedSendData : public QuackPreparedBatch {
 	unique_ptr<MemoryStream> payload;
 	idx_t payload_size = 0;
 	idx_t chunk_count = 0;
-	//! Header fields, taken at encode time. The POST has no ClientContext.
+	//! Header fields, taken at encode time: the POST has no ClientContext.
 	string connection_id;
 	string stream_id;
 	optional_idx client_query_id;
@@ -93,13 +93,12 @@ public:
 	    : stream_id(stream_id_p) {
 		auto &quack_catalog = table.catalog.Cast<QuackCatalog>();
 		connection_id = quack_catalog.GetConnectionId();
-		// The same client_query_id that QuackClient::EncodeRequest adds, taken while a context exists.
-		if (context.transaction.HasActiveTransaction()) {
-			auto raw_query_id = context.transaction.GetActiveQuery();
-			if (raw_query_id != DConstants::INVALID_INDEX) {
-				client_query_id = raw_query_id;
-			}
+		// Fail before the first batch when the ids cannot fit. 64 covers the fixed fields at max width.
+		if (64 + connection_id.size() + stream_id.size() > QUACK_PAYLOAD_HEADER_BYTES) {
+			throw InternalException("SEND_DATA header does not fit its reserved space");
 		}
+		// The same client_query_id that QuackClient::EncodeRequest adds, taken while a context exists.
+		client_query_id = QuackActiveClientQueryId(context);
 		writer = make_uniq<QuackChunkPayloadWriter>(size_hint);
 	}
 
@@ -139,9 +138,8 @@ private:
 //===--------------------------------------------------------------------===//
 // Send-data emitter
 //===--------------------------------------------------------------------===//
-// Sends one dense batch as one SEND_DATA_REQUEST. The chunks are serialized already, so a release
-// writes the header before them and POSTs. Finish drains the sends, then a chunk-less terminal
-// SEND_DATA carries the batch count.
+// Sends one dense batch as one SEND_DATA_REQUEST: a release writes the header and POSTs. Finish
+// drains the sends, then a chunk-less terminal SEND_DATA carries the batch count.
 class QuackSendDataEmitter : public QuackBatchEmitter {
 public:
 	QuackSendDataEmitter(ClientContext &context, QuackTableCatalogEntry &table_p, string stream_id_p,

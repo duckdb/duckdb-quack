@@ -108,12 +108,16 @@ const char *EnumUtil::ToChars<MessageType>(MessageType value) {
 	}
 }
 
-void QuackMessage::ToMemoryStream(MemoryStream &write_stream) const {
-	write_stream.Rewind();
+//! One place for the wire format options, so the messages and the chunk blobs cannot diverge.
+static SerializationOptions QuackWireSerializationOptions() {
 	SerializationOptions options;
 	options.storage_compatibility = StorageCompatibility::FromIndex(StorageVersion::V2_0_0);
+	return options;
+}
 
-	BinarySerializer serializer(write_stream, options);
+void QuackMessage::ToMemoryStream(MemoryStream &write_stream) const {
+	write_stream.Rewind();
+	BinarySerializer serializer(write_stream, QuackWireSerializationOptions());
 
 	// write the header
 	serializer.Begin();
@@ -205,19 +209,12 @@ unique_ptr<QuackMessage> QuackMessage::FromMemoryStream(MemoryStream &read_strea
 //===--------------------------------------------------------------------===//
 // QuackChunkPayloadWriter
 //===--------------------------------------------------------------------===//
-static SerializationOptions QuackPayloadSerializationOptions() {
-	// The same options ToMemoryStream uses, so the blob and the header share one format.
-	SerializationOptions options;
-	options.storage_compatibility = StorageCompatibility::FromIndex(StorageVersion::V2_0_0);
-	return options;
-}
-
 QuackChunkPayloadWriter::QuackChunkPayloadWriter(idx_t capacity_hint) {
 	auto capacity = NextPowerOfTwo(MaxValue<idx_t>(capacity_hint, 65536));
 	stream = make_uniq<MemoryStream>(Allocator::DefaultAllocator(), capacity);
 	// The blob starts after the header space. The header itself is written at emit time.
 	stream->SetPosition(QUACK_PAYLOAD_HEADER_BYTES);
-	serializer = make_uniq<BinarySerializer>(*stream, QuackPayloadSerializationOptions());
+	serializer = make_uniq<BinarySerializer>(*stream, QuackWireSerializationOptions());
 }
 
 QuackChunkPayloadWriter::~QuackChunkPayloadWriter() {
@@ -232,7 +229,8 @@ void QuackChunkPayloadWriter::AppendChunk(DataChunk &chunk) {
 }
 
 idx_t QuackChunkPayloadWriter::SizeBytes() const {
-	return stream ? stream->GetPosition() : sealed_size;
+	// The reserved header space is not payload, so it does not count toward the cut measure.
+	return (stream ? stream->GetPosition() : sealed_size) - QUACK_PAYLOAD_HEADER_BYTES;
 }
 
 idx_t QuackChunkPayloadWriter::AllocatedBytes() const {
@@ -249,10 +247,14 @@ QuackChunkPayloadWriter::SealedPayload QuackChunkPayloadWriter::Seal() {
 	return result;
 }
 
+//===--------------------------------------------------------------------===//
+// Chunk blob helpers
+//===--------------------------------------------------------------------===//
 idx_t QuackPrependHeader(MemoryStream &payload, const QuackMessage &header_message) {
+	// Only a buffer that QuackChunkPayloadWriter made has the header space.
+	D_ASSERT(payload.GetPosition() >= QUACK_PAYLOAD_HEADER_BYTES);
 	data_t scratch[QUACK_PAYLOAD_HEADER_BYTES];
-	// The non-owning stream cannot grow: a header past the reserved space throws instead of
-	// corrupting the blob.
+	// The non-owning scratch cannot grow: an oversized header throws instead of corrupting the blob.
 	MemoryStream scratch_stream(scratch, QUACK_PAYLOAD_HEADER_BYTES);
 	header_message.ToMemoryStream(scratch_stream);
 	auto header_size = scratch_stream.GetPosition();
@@ -263,7 +265,8 @@ idx_t QuackPrependHeader(MemoryStream &payload, const QuackMessage &header_messa
 
 vector<unique_ptr<DataChunk>> DecodeQuackChunkBlob(BinaryDeserializer &deserializer, idx_t chunk_count) {
 	vector<unique_ptr<DataChunk>> chunks;
-	chunks.reserve(chunk_count);
+	// The count comes from the wire, so cap the reservation. A false count fails on the read.
+	chunks.reserve(MinValue<idx_t>(chunk_count, 1024));
 	for (idx_t i = 0; i < chunk_count; i++) {
 		auto chunk = make_uniq<DataChunk>();
 		deserializer.Begin();

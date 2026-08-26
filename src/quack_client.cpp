@@ -39,14 +39,23 @@ QuackClient::QuackClient(DatabaseInstance &db_p, const QuackUri &uri_p) : db(db_
 QuackClient::~QuackClient() {
 }
 
+optional_idx QuackActiveClientQueryId(ClientContext &context) {
+	if (!context.transaction.HasActiveTransaction()) {
+		return optional_idx();
+	}
+	auto raw_query_id = context.transaction.GetActiveQuery();
+	if (raw_query_id == DConstants::INVALID_INDEX) {
+		return optional_idx();
+	}
+	return optional_idx(raw_query_id);
+}
+
 void QuackClient::EncodeRequest(optional_ptr<ClientContext> context, QuackMessage &message, MemoryStream &out) {
-	// Inject client_query_id from the active query so client and server logs correlate. Guard against
-	// transaction start (e.g. BEGIN via QuackCatalog::ExecuteCommand), where the transaction isn't yet
-	// installed on the TransactionContext and there is no active query to read.
-	if (context && context->transaction.HasActiveTransaction()) {
-		auto raw_query_id = context->transaction.GetActiveQuery();
-		if (raw_query_id != DConstants::INVALID_INDEX) {
-			message.SetClientQueryId(raw_query_id);
+	if (context) {
+		// Inject client_query_id from the active query so client and server logs correlate.
+		auto client_query_id = QuackActiveClientQueryId(*context);
+		if (client_query_id.IsValid()) {
+			message.SetClientQueryId(client_query_id);
 		}
 	}
 	message.ToMemoryStream(out);

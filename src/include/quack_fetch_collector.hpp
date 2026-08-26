@@ -21,8 +21,8 @@ class ClientContext;
 class PhysicalOperator;
 struct PreparedStatementData;
 
-//! One sealed FETCH_RESPONSE chunk blob. It has no header yet: the serve path writes it, with the
-//! client-visible index (dense minus prepare_batches), directly before the blob.
+//! One sealed FETCH_RESPONSE chunk blob. The serve path writes its header, with the client-visible
+//! index, directly before the blob.
 struct QuackFetchPayload {
 	unique_ptr<MemoryStream> payload;
 	//! The end of the blob. The blob starts at QUACK_PAYLOAD_HEADER_BYTES.
@@ -83,8 +83,7 @@ struct QuackResultStream {
 	//! fails instead of truncating.
 	optional_idx announced_total;
 
-	//! A payload the stream keeps, so it can serve the same bytes again. Its header is written, so
-	//! a re-serve sends from body_start as it is.
+	//! A payload the stream keeps, header written, so a re-serve sends the same bytes again.
 	struct RetainedPayload {
 		shared_ptr<MemoryStream> payload;
 		//! Where the wire body starts in the payload buffer.

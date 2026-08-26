@@ -67,7 +67,6 @@ private:
 		}
 
 		auto &fetch_response = response->Cast<FetchResponseMessage>();
-		// The decode owns its chunks: take them, so the response can go.
 		auto chunks = std::move(fetch_response.MutableResults());
 		// Recycle the client before publishing: a TopUp triggered by this batch needs an idle client.
 		fetcher.ReturnClient(std::move(client_wrapper));
@@ -143,12 +142,7 @@ QuackFetcher::QuackFetcher(ClientContext &context, QuackClientConnection &connec
 	connection_id = connection.ConnectionId();
 	logger = context.logger;
 	// Read once: the async tasks read it together, and it belongs to this query.
-	if (context.transaction.HasActiveTransaction()) {
-		auto raw_query_id = context.transaction.GetActiveQuery();
-		if (raw_query_id != DConstants::INVALID_INDEX) {
-			client_query_id = raw_query_id;
-		}
-	}
+	client_query_id = QuackActiveClientQueryId(context);
 
 	for (idx_t i = 0; i < depth; i++) {
 		idle_clients.push_back(connection.GetClient(context));

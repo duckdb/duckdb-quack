@@ -233,9 +233,7 @@ HttpQuackServer::HttpQuackServer(ClientContext &context_p, const QuackUri &uri_p
 		auto response = HandleMessage(stream);
 		auto raw = response->RawPayload();
 		if (raw) {
-			// The payload is already serialized: give it to httplib with no copy. The shared_ptr
-			// keeps the buffer alive until httplib writes it out. The wire body starts after the
-			// unused header space.
+			// Already serialized: httplib sends the bytes with no copy. The shared_ptr keeps them alive.
 			auto body_start = response->RawPayloadStart();
 			auto data = const_char_ptr_cast(raw->GetData()) + body_start;
 			auto size = raw->GetPosition() - body_start;
