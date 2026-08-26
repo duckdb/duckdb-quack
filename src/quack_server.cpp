@@ -186,7 +186,9 @@ static bool AbortFetchStreamIfUuid(QuackConnection &connection, hugeint_t uuid, 
 	std::thread producer;
 	{
 		lock_guard<mutex> guard(connection.fetch.lock);
-		if (connection.fetch.uuid != uuid || !connection.fetch.stream) {
+		// A newer query took the slot (or it already finished) since the reaper's decision — leave it.
+		bool still_the_reaped_query = connection.fetch.stream && connection.fetch.uuid == uuid;
+		if (!still_the_reaped_query) {
 			return false;
 		}
 		stream = std::move(connection.fetch.stream);
@@ -196,7 +198,8 @@ static bool AbortFetchStreamIfUuid(QuackConnection &connection, hugeint_t uuid, 
 		    stream->buffer.HasError() ? stream->buffer.GetError() : ErrorData(ExceptionType::INTERRUPT, reason);
 		// Interrupt() stays under fetch.lock — that is what proves the running statement is still
 		// `uuid`. It is a non-blocking atomic CAS, safe to hold the lock across.
-		if (!stream->buffer.Finished() && connection.duckdb_connection) {
+		bool still_executing = !stream->buffer.Finished() && connection.duckdb_connection;
+		if (still_executing) {
 			connection.duckdb_connection->Interrupt();
 		}
 	}
@@ -381,7 +384,8 @@ void QuackServer::ReapConnectionIfOverdue(QuackConnection &connection, time_poin
 		}
 		// Whole seconds off a monotonic clock: no overflow, and a backward step just reads as young.
 		auto age = duration_cast<std::chrono::seconds>(now - connection.query_started_steady).count();
-		if (age < 0 || static_cast<idx_t>(age) < timeout_seconds) {
+		bool within_deadline = age < 0 || static_cast<idx_t>(age) < timeout_seconds;
+		if (within_deadline) {
 			return;
 		}
 		uuid = connection.query_uuid;
@@ -391,7 +395,9 @@ void QuackServer::ReapConnectionIfOverdue(QuackConnection &connection, time_poin
 		return;
 	}
 	std::unique_lock<std::mutex> lock(connection.lock);
-	if (connection.query_state == QuackQueryState::ACTIVE && connection.query_uuid == uuid) {
+	// Skip if a new query took the slot while we were aborting — leave its state alone.
+	bool still_the_reaped_query = connection.query_state == QuackQueryState::ACTIVE && connection.query_uuid == uuid;
+	if (still_the_reaped_query) {
 		// A timeout is a server-initiated cancel, so mirror the CANCEL_REQUEST terminal state.
 		connection.query_state = QuackQueryState::CANCELLED;
 		connection.ClearResultCache();
