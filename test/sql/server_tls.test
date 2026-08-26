@@ -1,0 +1,68 @@
+# name: test/sql/server_tls.test
+# description: quack_serve listening over TLS, and the argument checks around it
+# group: [sql]
+
+require quack
+
+require httpfs
+
+statement ok
+SET quack_default_client_id='';
+
+# The fixture is a self-signed certificate for localhost, so the client has to be told to trust it.
+statement ok
+SET ca_cert_file='test/certs/localhost.pem';
+
+statement ok quack_db:quack_server_con
+set variable actual_listen_uri = (select listen_uri from quack_serve('quack:localhost:0', token='asdf', tls_cert='test/certs/localhost.pem', tls_key='test/certs/localhost-key.pem'));
+
+query I quack_db:quack_server_con
+set variable listen_uri = concat('''', getvariable('actual_listen_uri'), '''');
+
+set variable server <variable:quack_server_con:listen_uri>
+
+# A TLS server advertises itself as https, so a client that reads listen_url connects the right way.
+query I quack_db:quack_server_con
+select starts_with(listen_url, 'https://') from quack_server_list();
+----
+true
+
+# The client defaults to plaintext for a local host, so ask for TLS explicitly.
+statement ok
+attach {server} as r (token 'asdf', disable_ssl false)
+
+statement ok
+create table r.t(i bigint);
+
+statement ok
+insert into r.t values (1), (2), (3);
+
+query I
+select sum(i) from r.t;
+----
+6
+
+statement ok
+detach r
+
+statement ok quack_db:quack_server_con
+CALL quack_stop({server});
+
+# --- argument checks ---
+
+# A certificate without its key (or the reverse) would otherwise fall back to plaintext silently.
+statement error
+CALL quack_serve('quack:localhost:0', token='asdf', tls_cert='test/certs/localhost.pem');
+----
+tls_cert and tls_key must be given together
+
+statement error
+CALL quack_serve('quack:localhost:0', token='asdf', tls_key='test/certs/localhost-key.pem');
+----
+tls_cert and tls_key must be given together
+
+# A certificate that cannot be loaded has to say so, rather than failing later at bind time.
+statement error
+CALL quack_serve('quack:localhost:0', token='asdf', tls_cert='test/certs/does-not-exist.pem', tls_key='test/certs/localhost-key.pem');
+----
+Failed to load the TLS certificate
