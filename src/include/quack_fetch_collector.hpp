@@ -21,13 +21,13 @@ class ClientContext;
 class PhysicalOperator;
 struct PreparedStatementData;
 
-//! One sealed FETCH_RESPONSE payload. Two patches write its batch-index field: the dense index at
-//! emit time, then the client-visible index (dense minus prepare_batches) at reply time.
+//! One sealed FETCH_RESPONSE chunk blob. It has no header yet: the serve path writes it, with the
+//! client-visible index (dense minus prepare_batches), directly before the blob.
 struct QuackFetchPayload {
 	unique_ptr<MemoryStream> payload;
+	//! The end of the blob. The blob starts at QUACK_PAYLOAD_HEADER_BYTES.
 	idx_t payload_size = 0;
-	//! Where the fixed-width batch-index field starts: the patch target.
-	idx_t index_offset = 0;
+	idx_t chunk_count = 0;
 	//! The rows in the batch. The PREPARE inline drain counts them.
 	idx_t rows = 0;
 };
@@ -83,9 +83,12 @@ struct QuackResultStream {
 	//! fails instead of truncating.
 	optional_idx announced_total;
 
-	//! A payload the stream keeps, so it can serve the same bytes again.
+	//! A payload the stream keeps, so it can serve the same bytes again. Its header is written, so
+	//! a re-serve sends from body_start as it is.
 	struct RetainedPayload {
 		shared_ptr<MemoryStream> payload;
+		//! Where the wire body starts in the payload buffer.
+		idx_t body_start = 0;
 		idx_t rows = 0;
 	};
 
@@ -106,9 +109,9 @@ struct QuackResultStream {
 	}
 
 	//! Add a payload that the PREPARE inline drain served, outside the FETCH handler.
-	void Retain(idx_t dense_index, shared_ptr<MemoryStream> payload, idx_t rows) {
+	void Retain(idx_t dense_index, shared_ptr<MemoryStream> payload, idx_t body_start, idx_t rows) {
 		lock_guard<mutex> guard(serve_lock);
-		if (!served.emplace(dense_index, RetainedPayload {std::move(payload), rows}).second) {
+		if (!served.emplace(dense_index, RetainedPayload {std::move(payload), body_start, rows}).second) {
 			return;
 		}
 		retained_rows += rows;

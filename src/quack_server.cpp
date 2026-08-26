@@ -168,14 +168,14 @@ static void DriveQuery(QuackConnection &connection, shared_ptr<QuackResultStream
 				result_names.push_back(col_name.GetIdentifierName());
 			}
 			stream->SignalBound(result->GetTypes(), std::move(result_names));
-			unique_ptr<FetchResponsePayloadWriter> writer;
+			unique_ptr<QuackChunkPayloadWriter> writer;
 			idx_t rows = 0;
 			while (auto chunk = result->Fetch()) {
 				if (chunk->size() == 0) {
 					continue;
 				}
 				if (!writer) {
-					writer = make_uniq<FetchResponsePayloadWriter>(context, 0);
+					writer = make_uniq<QuackChunkPayloadWriter>(0);
 				}
 				writer->AppendChunk(*chunk);
 				rows += chunk->size();
@@ -185,9 +185,8 @@ static void DriveQuery(QuackConnection &connection, shared_ptr<QuackResultStream
 				QuackFetchPayload entry;
 				entry.payload = std::move(sealed.payload);
 				entry.payload_size = sealed.payload_size;
-				entry.index_offset = sealed.index_offset;
+				entry.chunk_count = sealed.chunk_count;
 				entry.rows = rows;
-				QuackBatchIndexField::Patch(entry.payload->GetData(), entry.payload_size, entry.index_offset, 1);
 				auto bytes = entry.payload_size;
 				stream->buffer.PushBatch(1, std::move(entry), bytes);
 				stream->announced_total = 1;
@@ -515,6 +514,10 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
 
 	// now deserialize the actual message
 	auto received_message = QuackMessage::DeserializeMessage(deserializer, header);
+	if (received_message->Type() == MessageType::SEND_DATA_REQUEST) {
+		// the chunks travel as a raw blob after the message; the stream stands right on it
+		received_message->Cast<SendDataRequestMessage>().DecodeChunks(read_stream);
+	}
 	if (connection) {
 		// Only supported, structurally valid messages for an existing session renew its lease.
 		if (!RenewConnectionLease(header.connection_id, connection)) {
@@ -672,15 +675,21 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			if (status == QuackClaimPopStatus::BATCH) {
 				consumed++;
 				inline_rows += entry.rows;
-				// Batches are stored serialized. This drain is the only place that decodes them.
+				// Batches are stored as header-less chunk blobs. This drain is the only place that
+				// decodes them.
 				MemoryStream payload_stream(entry.payload->GetData(), entry.payload_size);
-				auto inline_message = QuackMessage::FromMemoryStream(payload_stream);
-				for (auto &wrapper : inline_message->Cast<FetchResponseMessage>().MutableResults()) {
-					results.push_back(std::move(wrapper));
+				payload_stream.SetPosition(QUACK_PAYLOAD_HEADER_BYTES);
+				for (auto &chunk : DecodeQuackChunkBlob(payload_stream, entry.chunk_count)) {
+					results.push_back(make_uniq<DataChunkWrapper>(*chunk));
 				}
 				if (retain_result) {
-					// These rows leave in the PREPARE response. The FETCH handler never sees them.
-					stream->Retain(consumed, std::move(entry.payload), entry.rows);
+					// These rows leave in the PREPARE response. The FETCH handler never sees them, so
+					// the header is written here, for a cache replay that re-serves the payload.
+					FetchResponseMessage header_message;
+					header_message.SetChunkCount(entry.chunk_count);
+					header_message.SetBatchIndex(consumed);
+					auto body_start = QuackPrependHeader(*entry.payload, header_message);
+					stream->Retain(consumed, std::move(entry.payload), body_start, entry.rows);
 				}
 				continue;
 			}
@@ -765,22 +774,27 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			QuackClaimPopStatus status;
 			QuackFetchPayload entry;
 			shared_ptr<MemoryStream> served_batch;
+			idx_t served_start = 0;
 			{
 				// One critical section for the check, the pop and the retain. A concurrent retry of the
 				// same index cannot reach FINISHED while the first serve runs.
 				lock_guard<mutex> guard(stream->serve_lock);
 				auto retained = stream->served.find(dense_index);
 				if (retained != stream->served.end()) {
-					// already patched with the client-visible index
+					// the header with the client-visible index is already written
 					served_batch = retained->second.payload;
+					served_start = retained->second.body_start;
 				} else {
 					status = stream->buffer.TryPopClaimed(dense_index, entry);
 					if (status == QuackClaimPopStatus::BATCH) {
-						// stamp the client-visible index, then keep the payload for a retry
-						QuackBatchIndexField::Patch(entry.payload->GetData(), entry.payload_size, entry.index_offset,
-						                            fetch_request_message.batch_index);
+						// write the header with the client-visible index, then keep the payload for a retry
+						FetchResponseMessage header_message;
+						header_message.SetChunkCount(entry.chunk_count);
+						header_message.SetBatchIndex(fetch_request_message.batch_index);
+						served_start = QuackPrependHeader(*entry.payload, header_message);
 						shared_ptr<MemoryStream> payload(std::move(entry.payload));
-						stream->served.emplace(dense_index, QuackResultStream::RetainedPayload {payload, entry.rows});
+						stream->served.emplace(dense_index,
+						                       QuackResultStream::RetainedPayload {payload, served_start, entry.rows});
 						stream->retained_rows += entry.rows;
 						served_batch = std::move(payload);
 					}
@@ -789,7 +803,8 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			if (served_batch) {
 				// outside serve_lock, because the connection's state lock guards the cache
 				SyncResultCache(connection, *stream, db);
-				return make_uniq<QuackRawPayloadResponse>(MessageType::FETCH_RESPONSE, std::move(served_batch));
+				return make_uniq<QuackRawPayloadResponse>(MessageType::FETCH_RESPONSE, std::move(served_batch),
+				                                          served_start);
 			}
 			if (status == QuackClaimPopStatus::ERRORED) {
 				return make_uniq<ErrorResponse>(stream->buffer.GetError());
@@ -833,18 +848,9 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			if (!send_data_message.BatchIndex().IsValid()) {
 				return make_uniq<ErrorResponse>("send_data_request is missing its batch index");
 			}
-			// Reference the chunks from the message. DataChunkWrapper.Deserialize uses DataChunk::Reference()
-			// internally, so the underlying VectorBuffers are ref-counted and outlive the message.
-			vector<unique_ptr<DataChunk>> owned_chunks;
-			owned_chunks.reserve(incoming_chunks.size());
-			for (auto &wrapper : incoming_chunks) {
-				auto owned = make_uniq<DataChunk>();
-				owned->InitializeEmpty(wrapper->Chunk().GetTypes());
-				owned->Reference(wrapper->Chunk());
-				owned_chunks.push_back(std::move(owned));
-			}
+			// The decode owns its chunks, so they move into the buffer as they are.
 			// The claim buffer drops a duplicate index, so a retry of the same batch is safe.
-			stream->buffer.PushBatch(send_data_message.BatchIndex().GetIndex(), std::move(owned_chunks));
+			stream->buffer.PushBatch(send_data_message.BatchIndex().GetIndex(), std::move(incoming_chunks));
 		}
 
 		if (!send_data_message.TotalBatches().IsValid()) {

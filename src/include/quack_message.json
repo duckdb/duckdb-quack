@@ -128,8 +128,9 @@
       },
       {
         "id": 2,
-        "name": "chunks",
-        "type": "vector<unique_ptr<DataChunkWrapper>>"
+        "name": "chunk_count",
+        "type": "idx_t",
+        "default": 0
       },
       {
         "id": 3,
@@ -139,17 +140,11 @@
       },
       {
         "id": 4,
-        "name": "batch_index_fixed",
-        "type": "string",
-        "serialize_property": "EncodeBatchIndexFixed()",
-        "deserialize_skip_assign": true
+        "name": "batch_index",
+        "type": "optional_idx",
+        "default": "optional_idx()"
       }
-    ],
-    "methods": {
-      "ApplyBatchIndexFixed": [
-        "batch_index_fixed"
-      ]
-    }
+    ]
   },
   {
     "class": "SendDataResponseMessage",
@@ -166,8 +161,9 @@
     "members": [
       {
         "id": 1,
-        "name": "results",
-        "type": "vector<unique_ptr<DataChunkWrapper>>"
+        "name": "chunk_count",
+        "type": "idx_t",
+        "default": 0
       },
       {
         "id": 2,
@@ -177,17 +173,11 @@
       },
       {
         "id": 3,
-        "name": "batch_index_fixed",
-        "type": "string",
-        "serialize_property": "EncodeBatchIndexFixed()",
-        "deserialize_skip_assign": true
+        "name": "batch_index",
+        "type": "optional_idx",
+        "default": "optional_idx()"
       }
-    ],
-    "methods": {
-      "ApplyBatchIndexFixed": [
-        "batch_index_fixed"
-      ]
-    }
+    ]
   },
   {
     "class": "CancelRequestMessage",

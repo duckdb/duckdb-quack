@@ -100,18 +100,17 @@ unique_ptr<FetchRequestMessage> FetchRequestMessage::Deserialize(Deserializer &d
 }
 
 void FetchResponseMessage::Serialize(Serializer &serializer) const {
-	serializer.WritePropertyWithDefault<vector<unique_ptr<DataChunkWrapper>>>(1, "results", results);
+	serializer.WritePropertyWithDefault<idx_t>(1, "chunk_count", chunk_count, 0);
 	serializer.WritePropertyWithDefault<optional_idx>(2, "total_batches", total_batches, optional_idx());
-	serializer.WritePropertyWithDefault<string>(3, "batch_index_fixed", EncodeBatchIndexFixed());
+	serializer.WritePropertyWithDefault<optional_idx>(3, "batch_index", batch_index, optional_idx());
 }
 
 unique_ptr<FetchResponseMessage> FetchResponseMessage::Deserialize(Deserializer &deserializer) {
 	auto result = duckdb::unique_ptr<FetchResponseMessage>(new FetchResponseMessage());
-	deserializer.ReadPropertyWithDefault<vector<unique_ptr<DataChunkWrapper>>>(1, "results", result->results);
+	deserializer.ReadPropertyWithExplicitDefault<idx_t>(1, "chunk_count", result->chunk_count, 0);
 	deserializer.ReadPropertyWithExplicitDefault<optional_idx>(2, "total_batches", result->total_batches,
 	                                                           optional_idx());
-	auto batch_index_fixed = deserializer.ReadPropertyWithDefault<string>(3, "batch_index_fixed");
-	result->ApplyBatchIndexFixed(std::move(batch_index_fixed));
+	deserializer.ReadPropertyWithExplicitDefault<optional_idx>(3, "batch_index", result->batch_index, optional_idx());
 	return result;
 }
 
@@ -172,19 +171,18 @@ unique_ptr<PrepareResponseMessage> PrepareResponseMessage::Deserialize(Deseriali
 
 void SendDataRequestMessage::Serialize(Serializer &serializer) const {
 	serializer.WritePropertyWithDefault<string>(1, "stream_id", stream_id);
-	serializer.WritePropertyWithDefault<vector<unique_ptr<DataChunkWrapper>>>(2, "chunks", chunks);
+	serializer.WritePropertyWithDefault<idx_t>(2, "chunk_count", chunk_count, 0);
 	serializer.WritePropertyWithDefault<optional_idx>(3, "total_batches", total_batches, optional_idx());
-	serializer.WritePropertyWithDefault<string>(4, "batch_index_fixed", EncodeBatchIndexFixed());
+	serializer.WritePropertyWithDefault<optional_idx>(4, "batch_index", batch_index, optional_idx());
 }
 
 unique_ptr<SendDataRequestMessage> SendDataRequestMessage::Deserialize(Deserializer &deserializer) {
 	auto result = duckdb::unique_ptr<SendDataRequestMessage>(new SendDataRequestMessage());
 	deserializer.ReadPropertyWithDefault<string>(1, "stream_id", result->stream_id);
-	deserializer.ReadPropertyWithDefault<vector<unique_ptr<DataChunkWrapper>>>(2, "chunks", result->chunks);
+	deserializer.ReadPropertyWithExplicitDefault<idx_t>(2, "chunk_count", result->chunk_count, 0);
 	deserializer.ReadPropertyWithExplicitDefault<optional_idx>(3, "total_batches", result->total_batches,
 	                                                           optional_idx());
-	auto batch_index_fixed = deserializer.ReadPropertyWithDefault<string>(4, "batch_index_fixed");
-	result->ApplyBatchIndexFixed(std::move(batch_index_fixed));
+	deserializer.ReadPropertyWithExplicitDefault<optional_idx>(4, "batch_index", result->batch_index, optional_idx());
 	return result;
 }
 
