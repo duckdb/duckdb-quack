@@ -51,6 +51,14 @@ public:
 		return entry == streams.end() ? nullptr : entry->second;
 	}
 
+	//! Error every stream but keep it registered, so the next SEND_DATA reports the statement's error.
+	void Fail(const ErrorData &error) {
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		for (auto &entry : streams) {
+			entry.second->buffer.SetError(error);
+		}
+	}
+
 	//! Drop every stream. A `reason` errors each buffer first, so a scan that waits for a batch wakes up.
 	void Clear(const string &reason = string()) {
 		unordered_map<string, shared_ptr<QuackInsertStream>> dropped;

@@ -127,6 +127,47 @@ select count(*) from rpc.failed_source;
 ----
 20000
 
+# --- a statement that fails on the server stops the client's sends ---
+
+statement ok
+create table rpc.keyed(i bigint primary key);
+
+statement ok
+insert into rpc.keyed values (5);
+
+statement ok
+create table big_src as select i from range(200000) t(i);
+
+statement ok
+set enable_logging = true; set logging_storage = 'memory'; set logging_level = 'debug';
+
+# The first batch already hits the existing key. The server refuses the sends after that, so the
+# client does not load all ~100 batches.
+statement error
+insert into rpc.keyed select i from big_src;
+----
+Duplicate key
+
+query II
+select count(*) filter (where message like '%ERROR_RESPONSE%') > 0,
+       count(*) filter (where message like '%SEND_DATA_RESPONSE%') < 98
+from duckdb_logs where message like '%SEND_DATA_REQUEST%';
+----
+true	true
+
+query I
+select count(*) from rpc.keyed;
+----
+1
+
+statement ok
+insert into rpc.keyed select i + 10 from src;
+
+query I
+select count(*) from rpc.keyed;
+----
+20001
+
 # --- the internal scan is not callable by hand ---
 
 statement error

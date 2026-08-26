@@ -125,6 +125,12 @@ static void SyncResultCache(QuackConnection &connection, QuackResultStream &stre
 //! full duration. A statement that returns rows fills the claim buffer in parallel. A statement that
 //! returns a count leaves the count in batch 1, through the fallback below.
 static void DriveQuery(QuackConnection &connection, shared_ptr<QuackResultStream> stream, string sql) {
+	// A failed statement must stop the client's sends, so its scan's streams get the error too.
+	auto fail_streams = [&](const ErrorData &error) {
+		if (auto session_state = QuackSessionState::Get(*connection.duckdb_connection->context)) {
+			session_state->Streams().Fail(error);
+		}
+	};
 	try {
 		unique_lock<mutex> guard(connection.statement_lock);
 		auto &context = *connection.duckdb_connection->context;
@@ -146,6 +152,7 @@ static void DriveQuery(QuackConnection &connection, shared_ptr<QuackResultStream
 		config.get_result_collector = nullptr;
 		if (result->HasError()) {
 			stream->buffer.SetError(result->GetErrorObject());
+			fail_streams(result->GetErrorObject());
 		} else if (!stream->Bound()) {
 			// No collector claimed the stream, because no statement returned a result. Send the last
 			// statement's Success/Count result, as the protocol always has. No columns is an error.
@@ -190,6 +197,7 @@ static void DriveQuery(QuackConnection &connection, shared_ptr<QuackResultStream
 		}
 	} catch (std::exception &ex) {
 		stream->buffer.SetError(ErrorData(ex));
+		fail_streams(ErrorData(ex));
 	}
 	// Close against the announced total, so a short stream errors instead of truncating.
 	stream->buffer.Finish(stream->announced_total);
@@ -811,6 +819,13 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		auto stream = session_state ? session_state->Streams().Find(send_data_message.StreamId()) : nullptr;
 		if (!stream) {
 			return make_uniq<ErrorResponse>("No active data stream '%s'", send_data_message.StreamId());
+		}
+		{
+			// the statement can fail before its scan sees the stream error
+			lock_guard<mutex> guard(connection.statement.lock);
+			if (connection.statement.stream && connection.statement.stream->buffer.HasError()) {
+				return make_uniq<ErrorResponse>(connection.statement.stream->buffer.GetError());
+			}
 		}
 
 		auto &incoming_chunks = send_data_message.Chunks();
