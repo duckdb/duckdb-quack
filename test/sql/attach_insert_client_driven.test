@@ -142,11 +142,18 @@ statement ok
 set enable_logging = true; set logging_storage = 'memory'; set logging_level = 'debug';
 
 # The first batch already hits the existing key. The server refuses the sends after that, so the
-# client does not load all ~100 batches.
+# client does not load all ~100 batches. The delay keeps the sends slower than the server's
+# failure, so the early stop is deterministic.
+statement ok
+set quack_debug_send_delay_ms=5;
+
 statement error
 insert into rpc.keyed select i from big_src;
 ----
 Duplicate key
+
+statement ok
+reset quack_debug_send_delay_ms;
 
 query II
 select count(*) filter (where message like '%ERROR_RESPONSE%') > 0,
