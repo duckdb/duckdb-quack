@@ -10,6 +10,7 @@
 #include "quack_send_data.hpp"
 #include "storage/quack_catalog.hpp"
 #include "storage/quack_insert.hpp"
+#include "storage/quack_schema.hpp"
 #include "storage/quack_table.hpp"
 
 using namespace duckdb;
@@ -66,11 +67,12 @@ unique_ptr<GlobalSinkState> QuackInsert::GetGlobalSinkState(ClientContext &conte
 	// unique inside this connection: the connection id is the secret.
 	auto stream_id = UUID::ToString(UUID::GenerateRandomUUID());
 	auto query_uuid = UUID::GenerateRandomUUID();
+	// The remote name carries the full nested-schema path, so the server resolves the same table.
+	auto remote_name = table_entry->schema.Cast<QuackSchemaCatalogEntry>().GetRemoteName(table_entry->name);
 	auto sql =
-	    StringUtil::Format("INSERT INTO %s.%s SELECT * FROM scan_data_from_quack_client(%s, NULL::%s, ordered := %s)",
-	                       SQLIdentifier(table_entry->schema.name.GetIdentifierName()),
-	                       SQLIdentifier(table_entry->name.GetIdentifierName()), SQLString(stream_id),
-	                       StructPrototype(types), order_mode != AppendOrderMode::UNORDERED ? "true" : "false");
+	    StringUtil::Format("INSERT INTO %s SELECT * FROM scan_data_from_quack_client(%s, NULL::%s, ordered := %s)",
+	                       remote_name.ToString(), SQLString(stream_id), StructPrototype(types),
+	                       order_mode != AppendOrderMode::UNORDERED ? "true" : "false");
 
 	// inline_rows = 0, because the statement waits for our batches and has no row to answer with. The
 	// scan registers the stream while it binds, so PREPARE must land before the first batch.

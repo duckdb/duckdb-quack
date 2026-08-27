@@ -263,15 +263,34 @@ void QuackServer::DestroyCachesDetached(vector<unique_ptr<QuackResultCache>> doo
 }
 
 vector<QuackConnectionSnapshot> QuackServer::GetActiveConnectionSnap() {
+	// sql_query and query_started_at are written under QuackConnection::lock, so reading them under
+	// active_connections_mutex alone is a data race — and sql_query is a std::string, so a concurrent
+	// write can free the storage we copy. (query_state is atomic and would be safe unlocked, but we
+	// read it in the same critical section for a snapshot consistent with the other two.) Copy the
+	// connection handles out under active_connections_mutex, release it, then read each connection's
+	// fields under its own lock (never holding both mutex classes at once).
+	vector<shared_ptr<QuackConnection>> connections;
+	{
+		std::lock_guard<std::mutex> lock(active_connections_mutex);
+		connections.reserve(active_connections.size());
+		for (auto &[id, conn] : active_connections) {
+			connections.push_back(conn);
+		}
+	}
 	vector<QuackConnectionSnapshot> result;
-	std::lock_guard<std::mutex> lock(active_connections_mutex);
-	for (auto &[id, conn] : active_connections) {
+	result.reserve(connections.size());
+	for (auto &conn : connections) {
 		QuackConnectionSnapshot snapshot;
+		// session_id and client_id_hash are set once when the connection is created, before it is
+		// published to active_connections, and never rewritten — so they need no lock here.
 		snapshot.session_id = conn->session_id;
 		snapshot.client_id_hash = conn->client_id_hash;
-		snapshot.sql_query = conn->sql_query;
-		snapshot.query_state = conn->query_state;
-		snapshot.query_started_at = conn->query_started_at;
+		{
+			std::lock_guard<std::mutex> lock(conn->lock);
+			snapshot.sql_query = conn->sql_query;
+			snapshot.query_state = conn->query_state;
+			snapshot.query_started_at = conn->query_started_at;
+		}
 		auto cached_rows = conn->cached_rows.load();
 		if (cached_rows != DConstants::INVALID_INDEX) {
 			snapshot.cached_rows = cached_rows;

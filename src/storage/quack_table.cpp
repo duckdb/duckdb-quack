@@ -1,4 +1,5 @@
 #include "storage/quack_catalog.hpp"
+#include "storage/quack_schema.hpp"
 #include "storage/quack_table.hpp"
 #include "quack_scan.hpp"
 #include "duckdb/parser/parser.hpp"
@@ -25,9 +26,10 @@ QuackTableSet::QuackTableSet(ClientContext &context, QuackSchemaCatalogEntry &pa
                              const QuackLoadCatalogData &load_data)
     : QuackCatalogSet(parent.ParentCatalog().Cast<QuackCatalog>()), schema(parent) {
 	for (auto &row : load_data.tables->Rows()) {
-		auto schema_name = row.GetValue(0).GetValue<string>();
-		if (schema_name != parent.name) {
-			// does not belong to this schema
+		auto schema_oid = row.GetValue(0).GetValue<int64_t>();
+		if (schema_oid != parent.RemoteOid()) {
+			// does not belong to this schema. Matching on the remote oid rather than the schema name keeps
+			// schemas of the same name (in different catalogs, or nested in different parents) apart
 			continue;
 		}
 		// parse the SQL to get the table definition
@@ -45,13 +47,13 @@ QuackTableSet::QuackTableSet(ClientContext &context, QuackSchemaCatalogEntry &pa
 			auto table = make_uniq<QuackTableCatalogEntry>(catalog, parent, bound_info->Base());
 			entry = std::move(table);
 		} else {
-			auto view_name = row.GetValue(1).GetValue<string>();
+			auto view_name = Identifier(row.GetValue(1).GetValue<string>());
 			// bind a remote procedure call to the view on the server side
 			// we don't actually care what the view contains server-side, we just treat it like an opaque object we can
 			// query
-			CreateViewInfo info(schema, Identifier(view_name));
+			CreateViewInfo info(schema, view_name);
 			info.sql = QuackViewCatalogEntry::CreateViewSQL(catalog.GetName().GetIdentifierName(),
-			                                                schema.name.GetIdentifierName(), view_name);
+			                                                parent.GetRemoteName(view_name));
 			info.query = CreateViewInfo::ParseSelect(info.sql);
 
 			// bind to resolve the types
@@ -67,11 +69,13 @@ QuackTableSet::QuackTableSet(QuackSchemaCatalogEntry &parent)
 }
 
 string QuackTableSet::GetLoadQuery() {
+	// the schema is identified by its oid - the name alone is ambiguous once schemas can be nested or live in
+	// different catalogs on the server
 	return R"(
-SELECT schema_name, sql, 'table'
+SELECT schema_oid, sql, 'table'
 FROM duckdb_tables()
 UNION ALL
-SELECT schema_name, view_name, 'view'
+SELECT schema_oid, view_name, 'view'
 FROM duckdb_views()
 	)";
 }
@@ -80,7 +84,8 @@ TableFunction QuackTableCatalogEntry::GetScanFunction(ClientContext &context, un
 	auto &quack_catalog = catalog.Cast<QuackCatalog>();
 	auto bind_data = make_uniq<QuackScanBindData>();
 	bind_data->client_connection = quack_catalog.GetClientConnection();
-	bind_data->table_name = name.GetIdentifierName();
+	// the scan runs on the server: refer to the table the way the server sees it
+	bind_data->qualified_table_name = schema.Cast<QuackSchemaCatalogEntry>().GetRemoteName(name);
 	for (auto &col : GetColumns().Physical()) {
 		bind_data->column_names.emplace_back(col.Name());
 		bind_data->column_types.push_back(col.Type());
@@ -95,7 +100,8 @@ unique_ptr<BaseStatistics> QuackTableCatalogEntry::GetStatistics(ClientContext &
 }
 
 TableStorageInfo QuackTableCatalogEntry::GetStorageInfo(ClientContext &context) {
-	throw NotImplementedException("GetStorageInfo not implemented yet");
+	// the table is stored on the server - there is no local storage or index to report
+	return TableStorageInfo();
 }
 
 } // namespace duckdb

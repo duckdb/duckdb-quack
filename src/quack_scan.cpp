@@ -235,21 +235,21 @@ static string BuildPushdownQuery(const QuackScanBindData &bind_data, const Table
 	// 			if (IsRowIdColumnId(col_id) || col_id >= bind_data.column_names.size()) {
 	// 				continue;
 	// 			}
-	// 			selected_columns.push_back(KeywordHelper::WriteOptionallyQuoted(bind_data.column_names[col_id]));
+	// 			selected_columns.push_back(KeywordHelper::WriteOptionallyQuoted(bind_data.column_names[col_id].GetIdentifierName()));
 	// 		}
 	// 	} else {
 	// 		for (auto &col_id : input.column_ids) {
 	// 			if (IsRowIdColumnId(col_id) || col_id >= bind_data.column_names.size()) {
 	// 				continue;
 	// 			}
-	// 			selected_columns.push_back(KeywordHelper::WriteOptionallyQuoted(bind_data.column_names[col_id]));
+	// 			selected_columns.push_back(KeywordHelper::WriteOptionallyQuoted(bind_data.column_names[col_id].GetIdentifierName()));
 	// 		}
 	// 	}
 	// 	if (!selected_columns.empty()) {
 	// 		query = "SELECT " + StringUtil::Join(selected_columns, ", ") + " ";
 	// 	}
 	// }
-	query += StringUtil::Format("FROM %s", SQLIdentifier(bind_data.table_name));
+	query += StringUtil::Format("FROM %s", bind_data.qualified_table_name.ToString());
 	//
 	// // Filters: build WHERE clause from pushable filters
 	// if (input.filters) {
@@ -263,7 +263,7 @@ static string BuildPushdownQuery(const QuackScanBindData &bind_data, const Table
 	// 		if (!CanPushdownFilter(filter)) {
 	// 			continue;
 	// 		}
-	// 		auto col_name = KeywordHelper::WriteOptionallyQuoted(bind_data.column_names[col_idx]);
+	// 		auto col_name = KeywordHelper::WriteOptionallyQuoted(bind_data.column_names[col_idx].GetIdentifierName());
 	// 		where_clauses.push_back(filter.ToString(col_name));
 	// 	}
 	// 	if (!where_clauses.empty()) {
@@ -291,7 +291,7 @@ unique_ptr<GlobalTableFunctionState> QuackScanInitGlobal(ClientContext &context,
 	vector<ChunkResult> results;
 	bool needs_more_fetch = bind_data.needs_more_fetch;
 	hugeint_t query_uuid;
-	if (!bind_data.table_name.empty()) {
+	if (!bind_data.qualified_table_name.Path().empty()) {
 		// apply pushdown to the query
 		auto query = BuildPushdownQuery(bind_data, input);
 		auto &client_connection = *bind_data.client_connection;
@@ -415,7 +415,7 @@ static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChu
 			case QuackFetchResult::BATCH: {
 				// tag fetched chunks like the initial batch (see QuackScanInitGlobal): direct queries
 				// return full-width chunks that still need projection, the catalog path already projected
-				auto fetched_pushdown_type = bind_data.table_name.empty()
+				auto fetched_pushdown_type = bind_data.qualified_table_name.Path().empty()
 				                                 ? ChunkResultPushdownType::REQUIRES_PUSHDOWN
 				                                 : ChunkResultPushdownType::PUSHDOWN_ALREADY_APPLIED;
 				for (auto &chunk : chunks) {

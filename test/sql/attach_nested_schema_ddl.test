@@ -1,0 +1,138 @@
+# name: test/sql/attach_nested_schema_ddl.test
+# description: CREATE / DROP of nested schemas and their contents against an attached quack catalog
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+# a table reference carries at most three name parts, so the catalog has to be implicit for entries
+# that live in a nested schema
+statement ok
+use rpc
+
+# --- CREATE SCHEMA, nested and not
+statement ok
+create schema s1;
+
+statement ok
+create schema s1.child;
+
+statement ok
+create schema s1.child.grandchild;
+
+query II
+select schema_name, parent_schema from duckdb_schemas() where database_name='rpc' order by all
+----
+child	s1
+grandchild	child
+main	NULL
+s1	NULL
+
+# the schemas really were created on the server
+query I quack_db:quack_server_con
+select count(*) from duckdb_schemas() where schema_name in ('s1', 'child', 'grandchild')
+----
+3
+
+statement error
+create schema s1.child;
+----
+<REGEX>:.*(already exists|Cannot create).*
+
+statement ok
+create schema if not exists s1.child;
+
+statement error
+create schema nope.child;
+----
+<REGEX>:.*nope.*
+
+# --- CREATE TABLE inside a nested schema
+statement ok
+create table s1.child.t(i bigint);
+
+query I quack_db:quack_server_con
+select count(*) from duckdb_tables() where schema_name='child' and table_name='t'
+----
+1
+
+# INSERT ... SELECT from a local source streams the rows to the server (the client-side insert path,
+# which has to address the nested target schema)
+statement ok
+create table memory.main.local_src(i bigint);
+
+statement ok
+insert into memory.main.local_src select * from range(2000) t(i);
+
+# the source is local, so the rows are streamed to the server by the client-side insert operator -
+# it has to address the nested target schema
+query II
+explain insert into s1.child.t select * from memory.main.local_src
+----
+physical_plan	<REGEX>:.*Rpc Insert.*
+
+statement ok
+insert into s1.child.t select * from memory.main.local_src;
+
+query II
+select count(*), sum(i) from s1.child.t
+----
+2000	1999000
+
+# CTAS in a nested schema
+statement ok
+create table s1.child.ctas as select i * 2 as d from memory.main.local_src;
+
+query II
+select count(*), sum(d) from s1.child.ctas
+----
+2000	3998000
+
+# --- views in a nested schema are evaluated remotely
+statement ok
+create view s1.child.v as select i from s1.child.t where i < 10;
+
+query I
+select count(*) from s1.child.v
+----
+10
+
+# --- DROP
+statement ok
+drop view s1.child.v;
+
+statement ok
+drop table s1.child.ctas;
+
+statement error
+select count(*) from s1.child.ctas
+----
+<REGEX>:.*ctas.*
+
+statement ok
+drop schema s1.child.grandchild;
+
+query I
+select count(*) from duckdb_schemas() where database_name='rpc' and schema_name='grandchild'
+----
+0
+
+query I quack_db:quack_server_con
+select count(*) from duckdb_schemas() where schema_name='grandchild'
+----
+0
+
+statement ok
+drop schema s1.child cascade;
+
+query I
+select count(*) from duckdb_schemas() where database_name='rpc' and schema_name='child'
+----
+0
+
+statement ok
+use memory
+
+include test/template/quack_teardown.test_template

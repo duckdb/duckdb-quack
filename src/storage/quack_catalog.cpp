@@ -51,21 +51,48 @@ QuackCatalog::~QuackCatalog() {
 void QuackCatalog::Initialize(bool load_builtin) {
 }
 
+//! The (possibly nested) schema path a lookup refers to. A qualified lookup always leads with the catalog
+//! component (e.g. [catalog, schema] or a nested [catalog, s1, s2]); a bare lookup is just [schema]. The
+//! leading catalog component and any empty placeholders are dropped.
+static vector<Identifier> GetSchemaPath(const EntryLookupInfo &schema_lookup) {
+	auto &qualified_path = schema_lookup.GetQualifiedName().Path();
+	vector<Identifier> schema_path;
+	for (idx_t i = 0; i < qualified_path.size(); i++) {
+		if (i == 0 && qualified_path.size() > 1) {
+			continue;
+		}
+		if (qualified_path[i].empty()) {
+			continue;
+		}
+		schema_path.push_back(qualified_path[i]);
+	}
+	return schema_path;
+}
+
 optional_ptr<SchemaCatalogEntry> QuackCatalog::LookupSchema(CatalogTransaction transaction,
                                                             const EntryLookupInfo &schema_lookup,
                                                             OnEntryNotFound if_not_found) {
-	auto &schema_name = schema_lookup.GetEntryName();
-	auto schema_entry = schemas->GetEntry(schema_name);
-	if (schema_entry) {
-		return schema_entry->Cast<SchemaCatalogEntry>();
+	auto schema_path = GetSchemaPath(schema_lookup);
+	// navigate the schema chain: the outermost schema lives in the catalog, each nested one in its parent
+	reference<QuackCatalogSet> current_set = *schemas;
+	optional_ptr<CatalogEntry> entry;
+	for (idx_t i = 0; i < schema_path.size(); i++) {
+		entry = current_set.get().GetEntry(schema_path[i].GetIdentifierName());
+		if (!entry) {
+			switch (if_not_found) {
+			case OnEntryNotFound::THROW_EXCEPTION:
+				throw BinderException("Schema with name \"%s\" not found", schema_path[i].GetIdentifierName());
+			case OnEntryNotFound::RETURN_NULL:
+			default:
+				return nullptr;
+			}
+		}
+		current_set = entry->Cast<QuackSchemaCatalogEntry>().Schemas();
 	}
-	switch (if_not_found) {
-	case OnEntryNotFound::THROW_EXCEPTION:
-		throw BinderException("Schema with name \"%s\" not found", schema_name);
-	case OnEntryNotFound::RETURN_NULL:
-	default:
+	if (!entry) {
 		return nullptr;
 	}
+	return entry->Cast<SchemaCatalogEntry>();
 }
 
 const QuackUri &QuackCatalog::GetServerUri() {
@@ -119,17 +146,44 @@ QuackCatalog &QuackCatalog::GetQuackCatalog(ClientContext &context, Value &catal
 }
 
 optional_ptr<CatalogEntry> QuackCatalog::CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) {
+	// find the set the schema goes in - the catalog itself for a top-level schema, the deepest parent for a
+	// nested one. This runs before the schema is created on the server so a bad path does not leave the
+	// server and the local catalog out of sync
+	reference<QuackCatalogSet> target_set = *schemas;
+	optional_ptr<QuackSchemaCatalogEntry> parent;
+	for (auto &parent_name : info.ParentSchemas()) {
+		auto parent_entry = target_set.get().GetEntry(parent_name.GetIdentifierName());
+		if (!parent_entry) {
+			throw CatalogException("Cannot create nested schema \"%s\": parent schema \"%s\" does not exist",
+			                       info.SchemaName().GetIdentifierName(), parent_name.GetIdentifierName());
+		}
+		parent = &parent_entry->Cast<QuackSchemaCatalogEntry>();
+		target_set = parent->Schemas();
+	}
+
+	// create the schema remotely - the local schema path is exactly how the server sees it, so the statement
+	// only needs the local catalog name (the ATTACH alias) removed
+	auto remote_info = unique_ptr_cast<CreateInfo, CreateSchemaInfo>(info.Copy());
+	remote_info->StripCatalogQualification();
 	auto &quack_transaction = QuackTransaction::Get(transaction);
-	// create schema remotely
-	quack_transaction.Query(info.ToString());
-	// register schema locally
-	auto schema_entry = make_uniq<QuackSchemaCatalogEntry>(*this, info);
-	return schemas->CreateEntry(std::move(schema_entry), info.on_conflict);
+	quack_transaction.Query(remote_info->ToString());
+
+	auto schema_entry = make_uniq<QuackSchemaCatalogEntry>(*this, info, parent.get());
+	return target_set.get().CreateEntry(std::move(schema_entry), info.on_conflict);
+}
+
+//! Report a schema and every schema nested inside it
+static void ScanNestedSchemas(QuackSchemaCatalogEntry &schema,
+                              const std::function<void(SchemaCatalogEntry &)> &callback) {
+	callback(schema);
+	for (auto &nested : schema.Schemas().GetAllCatalogEntries()) {
+		ScanNestedSchemas(nested.get().Cast<QuackSchemaCatalogEntry>(), callback);
+	}
 }
 
 void QuackCatalog::ScanSchemas(ClientContext &context, std::function<void(SchemaCatalogEntry &)> callback) {
 	for (auto &schema : schemas->GetAllCatalogEntries()) {
-		callback(schema.get().Cast<SchemaCatalogEntry>());
+		ScanNestedSchemas(schema.get().Cast<QuackSchemaCatalogEntry>(), callback);
 	}
 }
 
@@ -190,8 +244,29 @@ string QuackCatalog::GetDBPath() {
 }
 
 void QuackCatalog::DropSchema(ClientContext &context, DropInfo &info) {
-	// TODO should we just send over the drop info in a dropmessage???
-	throw NotImplementedException("DropSchema not implemented yet");
+	// the resolved path is [catalog, parent schemas..., schema]; drop it remotely under the name the server
+	// knows it by - the local schema path is exactly the remote qualification, only the ATTACH alias is local
+	auto remote_name = info.GetQualifiedName();
+	remote_name.StripCatalog();
+	auto &schema_path = remote_name.Path();
+	if (schema_path.empty()) {
+		throw InternalException("DropSchema called without a schema name");
+	}
+	auto drop_info = info.Copy();
+	drop_info->SetQualifiedName(remote_name);
+	auto &transaction = QuackTransaction::Get(context, *this);
+	transaction.Query(drop_info->ToString());
+
+	// remove the schema from the local set it lives in
+	reference<QuackCatalogSet> target_set = *schemas;
+	for (idx_t i = 0; i + 1 < schema_path.size(); i++) {
+		auto parent_entry = target_set.get().GetEntry(schema_path[i].GetIdentifierName());
+		if (!parent_entry) {
+			return;
+		}
+		target_set = parent_entry->Cast<QuackSchemaCatalogEntry>().Schemas();
+	}
+	target_set.get().DropEntry(schema_path.back().GetIdentifierName());
 }
 
 bool QuackCatalog::SupportsPushdown(const TableRef &ref) {
