@@ -277,7 +277,10 @@ public:
 	}
 
 	void FinishEvent() override {
-		gstate.core->FinalizeFinish(context);
+		auto reported = gstate.core->FinalizeFinish(context);
+		if (reported.IsValid()) {
+			gstate.row_count = reported.GetIndex();
+		}
 	}
 
 private:
@@ -292,7 +295,10 @@ SinkFinalizeType QuackRebalancerFinalize(Pipeline &pipeline, Event &event, Clien
 	// A single batch emits here. Several batches, or one that parks on capacity, go to the event
 	// tasks: those emit in parallel, and they can yield when the delivery buffer is full.
 	if (core.TaskCount() <= 1 && core.ExecuteTasks(context) == QuackEmitProgress::DONE) {
-		core.FinalizeFinish(context);
+		auto reported = core.FinalizeFinish(context);
+		if (reported.IsValid()) {
+			gstate.row_count = reported.GetIndex();
+		}
 	} else {
 		event.InsertEvent(make_shared_ptr<QuackEmitRemainingEvent>(gstate, pipeline, context));
 	}

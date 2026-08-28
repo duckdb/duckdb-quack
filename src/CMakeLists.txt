@@ -8,16 +8,17 @@ add_library(
   quack_fetch_collector.cpp
   quack_clear_cache.cpp
   quack_client.cpp
-  quack_data_stream.cpp
   quack_extension.cpp
   quack_fetch_ahead.cpp
   quack_http_server.cpp
   quack_log.cpp
   quack_message.cpp
+  quack_random.cpp
   quack_result_cache.cpp
   quack_scan.cpp
   quack_scan_from_client.cpp
   quack_secret.cpp
+  quack_send_data.cpp
   quack_server.cpp
   quack_start_stop.cpp
   quack_storage.cpp

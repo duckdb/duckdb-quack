@@ -15,6 +15,9 @@ namespace duckdb {
 class QuackClientConnection;
 struct QuackClientWrapper;
 
+//! The active query's id, for log correlation. Invalid when no query runs (e.g. transaction start).
+optional_idx QuackActiveClientQueryId(ClientContext &context);
+
 class QuackClient {
 public:
 	explicit QuackClient(DatabaseInstance &db_p, const QuackUri &uri_p);

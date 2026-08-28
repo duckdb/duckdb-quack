@@ -233,10 +233,10 @@ HttpQuackServer::HttpQuackServer(ClientContext &context_p, const QuackUri &uri_p
 		auto response = HandleMessage(stream);
 		auto raw = response->RawPayload();
 		if (raw) {
-			// The payload is already serialized: give it to httplib with no copy. The shared_ptr
-			// keeps the buffer alive until httplib writes it out.
-			auto data = const_char_ptr_cast(raw->GetData());
-			auto size = raw->GetPosition();
+			// Already serialized: httplib sends the bytes with no copy. The shared_ptr keeps them alive.
+			auto body_start = response->RawPayloadStart();
+			auto data = const_char_ptr_cast(raw->GetData()) + body_start;
+			auto size = raw->GetPosition() - body_start;
 			shared_ptr<QuackMessage> owned(std::move(response));
 			res.set_content_provider(size, "application/vnd.duckdb",
 			                         [owned, data](size_t offset, size_t length, duckdb_httplib::DataSink &sink) {

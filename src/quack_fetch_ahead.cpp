@@ -67,7 +67,7 @@ private:
 		}
 
 		auto &fetch_response = response->Cast<FetchResponseMessage>();
-		auto &wrappers = fetch_response.MutableResults();
+		auto chunks = std::move(fetch_response.MutableResults());
 		// Recycle the client before publishing: a TopUp triggered by this batch needs an idle client.
 		fetcher.ReturnClient(std::move(client_wrapper));
 		if (fetcher.debug_delay_ms > 0) {
@@ -76,7 +76,7 @@ private:
 			ThreadUtil::SleepMs(random.NextRandomInteger(0, NumericCast<uint32_t>(fetcher.debug_delay_ms)));
 		}
 		bool pushed = false;
-		if (wrappers.empty()) {
+		if (chunks.empty()) {
 			// terminal response: this index is above the stream's total
 			auto total = fetch_response.TotalBatches();
 			if (total.IsValid()) {
@@ -91,15 +91,6 @@ private:
 			if (batch_index.GetIndex() != request_index) {
 				throw IOException("fetch_response carries batch %llu but batch %llu was requested",
 				                  batch_index.GetIndex(), request_index);
-			}
-			// Convert to owned chunks (buffers are shared, Reference is cheap) so decode stays here.
-			vector<unique_ptr<DataChunk>> chunks;
-			chunks.reserve(wrappers.size());
-			for (auto &wrapper : wrappers) {
-				auto owned = make_uniq<DataChunk>();
-				owned->InitializeEmpty(wrapper->Chunk().GetTypes());
-				owned->Reference(wrapper->Chunk());
-				chunks.push_back(std::move(owned));
 			}
 			fetcher.buffer->PushBatch(request_index, std::move(chunks));
 			fetcher.RecordReceived(request_index);
@@ -151,12 +142,7 @@ QuackFetcher::QuackFetcher(ClientContext &context, QuackClientConnection &connec
 	connection_id = connection.ConnectionId();
 	logger = context.logger;
 	// Read once: the async tasks read it together, and it belongs to this query.
-	if (context.transaction.HasActiveTransaction()) {
-		auto raw_query_id = context.transaction.GetActiveQuery();
-		if (raw_query_id != DConstants::INVALID_INDEX) {
-			client_query_id = raw_query_id;
-		}
-	}
+	client_query_id = QuackActiveClientQueryId(context);
 
 	for (idx_t i = 0; i < depth; i++) {
 		idle_clients.push_back(connection.GetClient(context));

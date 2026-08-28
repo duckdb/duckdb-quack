@@ -21,13 +21,13 @@ class ClientContext;
 class PhysicalOperator;
 struct PreparedStatementData;
 
-//! One sealed FETCH_RESPONSE payload. Two patches write its batch-index field: the dense index at
-//! emit time, then the client-visible index (dense minus prepare_batches) at reply time.
+//! One sealed FETCH_RESPONSE chunk blob. The serve path writes its header, with the client-visible
+//! index, directly before the blob.
 struct QuackFetchPayload {
 	unique_ptr<MemoryStream> payload;
+	//! The end of the blob. The blob starts at QUACK_PAYLOAD_HEADER_BYTES.
 	idx_t payload_size = 0;
-	//! Where the fixed-width batch-index field starts: the patch target.
-	idx_t index_offset = 0;
+	idx_t chunk_count = 0;
 	//! The rows in the batch. The PREPARE inline drain counts them.
 	idx_t rows = 0;
 };
@@ -35,7 +35,7 @@ using QuackFetchPayloadBuffer = QuackClaimBuffer<QuackFetchPayload>;
 
 //! Server state for one client-facing result. The fetch collector fills the claim buffer with sealed
 //! payloads, out of order and under a byte limit. The FETCH handlers drain it.
-struct QuackFetchStream {
+struct QuackResultStream {
 	QuackFetchPayloadBuffer buffer;
 
 	void SignalBound(vector<LogicalType> types_p, vector<string> names_p) {
@@ -48,13 +48,24 @@ struct QuackFetchStream {
 		bind_cv.notify_all();
 	}
 
-	//! true = the query is planned. false = it failed before that; the buffer holds the error.
+	//! A scan of this statement registered a client data stream. The statement gives no row until the
+	//! client sends its batches, so PREPARE answers now.
+	void SignalClientDataPending() {
+		{
+			lock_guard<mutex> guard(bind_lock);
+			client_data_pending = true;
+		}
+		bind_cv.notify_all();
+	}
+
+	//! true = the query is planned, or it waits for client data. false = it failed first. The buffer
+	//! then holds the error.
 	bool WaitBound() {
 		unique_lock<mutex> guard(bind_lock);
-		while (!bound && !buffer.HasError() && !buffer.Exhausted()) {
+		while (!bound && !client_data_pending && !buffer.HasError() && !buffer.Exhausted()) {
 			bind_cv.wait_for(guard, std::chrono::milliseconds(50));
 		}
-		return bound;
+		return bound || client_data_pending;
 	}
 
 	bool Bound() {
@@ -64,6 +75,7 @@ struct QuackFetchStream {
 
 	vector<LogicalType> types;
 	vector<string> names;
+	bool client_data_pending = false;
 	//! The dense batches PREPARE consumed inline. FETCH subtracts this, so the client-facing indices
 	//! stay dense from 1. PREPARE writes it before the first FETCH arrives.
 	idx_t prepare_batches = 0;
@@ -71,9 +83,11 @@ struct QuackFetchStream {
 	//! fails instead of truncating.
 	optional_idx announced_total;
 
-	//! A payload the stream keeps, so it can serve the same bytes again.
+	//! A payload the stream keeps, header written, so a re-serve sends the same bytes again.
 	struct RetainedPayload {
 		shared_ptr<MemoryStream> payload;
+		//! Where the wire body starts in the payload buffer.
+		idx_t body_start = 0;
 		idx_t rows = 0;
 	};
 
@@ -94,9 +108,9 @@ struct QuackFetchStream {
 	}
 
 	//! Add a payload that the PREPARE inline drain served, outside the FETCH handler.
-	void Retain(idx_t dense_index, shared_ptr<MemoryStream> payload, idx_t rows) {
+	void Retain(idx_t dense_index, shared_ptr<MemoryStream> payload, idx_t body_start, idx_t rows) {
 		lock_guard<mutex> guard(serve_lock);
-		if (!served.emplace(dense_index, RetainedPayload {std::move(payload), rows}).second) {
+		if (!served.emplace(dense_index, RetainedPayload {std::move(payload), body_start, rows}).second) {
 			return;
 		}
 		retained_rows += rows;
@@ -123,6 +137,6 @@ private:
 
 //! Installed in ClientConfig::get_result_collector, so the query runs in parallel into `stream`.
 unique_ptr<PhysicalOperator> MakeQuackFetchCollector(ClientContext &context, PreparedStatementData &data,
-                                                     shared_ptr<QuackFetchStream> stream);
+                                                     shared_ptr<QuackResultStream> stream);
 
 } // namespace duckdb

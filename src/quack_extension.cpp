@@ -210,8 +210,19 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "producers (0 = automatic, memory-manager governed)",
 	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_REBALANCE_BUFFER_BYTES_DEFAULT));
 
-	config.AddExtensionOption("quack_send_data_flush_rows",
-	                          "Rows a thread buffers before flushing one SEND_DATA_REQUEST (0 = default 204800)",
+	config.AddExtensionOption("quack_debug_duplicate_sends",
+	                          "DEBUG SETTING: send every SEND_DATA batch two times, imitating a transport retry; "
+	                          "the receiver must drop the duplicate",
+	                          LogicalType::UBIGINT, Value::UBIGINT(0));
+
+	config.AddExtensionOption("quack_debug_drop_batch",
+	                          "DEBUG SETTING: do not send the SEND_DATA batch with this dense index (0 = off); "
+	                          "the terminal message must then fail the statement instead of inserting less data",
+	                          LogicalType::UBIGINT, Value::UBIGINT(0));
+
+	config.AddExtensionOption("quack_debug_send_delay_ms",
+	                          "DEBUG SETTING: max random delay in ms before a SEND_DATA request goes out, "
+	                          "stressing out-of-order batch arrival on the server",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
 
 	config.AddExtensionOption("quack_fetch_producer_buffer_bytes",

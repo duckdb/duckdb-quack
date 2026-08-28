@@ -21,12 +21,10 @@ struct QuackPreparedFetchBatch : public QuackPreparedBatch {
 	QuackFetchPayload entry;
 };
 
-//! The accumulation buffer IS the wire response, so the FETCH handler patches 8 bytes and replies.
-//! It serializes nothing on the reply thread.
+//! The accumulation buffer IS the wire body: the FETCH handler writes the header and replies.
 class QuackFetchFragmentBuilder : public QuackFragmentBuilder {
 public:
-	QuackFetchFragmentBuilder(ClientContext &context, idx_t size_hint)
-	    : writer(make_uniq<FetchResponsePayloadWriter>(context, size_hint)) {
+	explicit QuackFetchFragmentBuilder(idx_t size_hint) : writer(make_uniq<QuackChunkPayloadWriter>(size_hint)) {
 	}
 
 	void Append(ClientContext &context, DataChunk &chunk) override {
@@ -48,30 +46,30 @@ public:
 		auto prepared = make_uniq<QuackPreparedFetchBatch>();
 		prepared->entry.payload = std::move(sealed.payload);
 		prepared->entry.payload_size = sealed.payload_size;
-		prepared->entry.index_offset = sealed.index_offset;
+		prepared->entry.chunk_count = sealed.chunk_count;
 		prepared->entry.rows = rows;
 		return std::move(prepared);
 	}
 
 private:
-	unique_ptr<FetchResponsePayloadWriter> writer;
+	unique_ptr<QuackChunkPayloadWriter> writer;
 	QuackChunkStager stager;
 	idx_t rows = 0;
 };
 
-// Stamps the dense index into the sealed payload, then publishes it. A full buffer parks the
-// producing task, not the thread.
+// Publishes sealed payloads under their dense index. A full buffer parks the producing task, not
+// the thread.
 class QuackFetchBufferEmitter : public QuackBatchEmitter {
 public:
-	QuackFetchBufferEmitter(shared_ptr<QuackFetchStream> stream_p, idx_t debug_delay_ms_p)
+	QuackFetchBufferEmitter(shared_ptr<QuackResultStream> stream_p, idx_t debug_delay_ms_p)
 	    : stream(std::move(stream_p)), debug_delay_ms(debug_delay_ms_p) {
 	}
 
 	unique_ptr<QuackFragmentBuilder> OpenFragment(ClientContext &context, idx_t size_hint) override {
-		return make_uniq<QuackFetchFragmentBuilder>(context, size_hint);
+		return make_uniq<QuackFetchFragmentBuilder>(size_hint);
 	}
 
-	//! NO_CAPACITY leaves the batch with the caller. A retry stamps the same index again, which is
+	//! NO_CAPACITY leaves the batch with the caller. A retry pushes the same batch again, which is
 	//! safe. DROPPED and PUSHED both consume the batch.
 	bool TryEmitPrepared(ClientContext &context, idx_t dense_index, unique_ptr<QuackPreparedBatch> &batch,
 	                     optional_ptr<const InterruptState> interrupt) override {
@@ -81,7 +79,6 @@ public:
 			ThreadUtil::SleepMs(random.NextRandomInteger(0, NumericCast<uint32_t>(debug_delay_ms)));
 		}
 		auto &entry = static_cast<QuackPreparedFetchBatch &>(*batch).entry;
-		QuackBatchIndexField::Patch(entry.payload->GetData(), entry.payload_size, entry.index_offset, dense_index);
 		auto bytes = entry.payload_size;
 		if (stream->buffer.TryPushBatch(dense_index, entry, bytes, interrupt) == QuackPushStatus::NO_CAPACITY) {
 			return false;
@@ -90,15 +87,16 @@ public:
 		return true;
 	}
 
-	void Finish(ClientContext &context, idx_t total_batches) override {
+	optional_idx Finish(ClientContext &context, idx_t total_batches) override {
 		// Do NOT finish the buffer here. The claimed statement can sit in the middle of a
 		// multi-statement query, and the client must not see the stream end while more statements run.
-		// RunFetchQuery closes the stream, and it checks the count against this total.
+		// DriveQuery closes the stream, and it checks the count against this total.
 		stream->announced_total = total_batches;
+		return optional_idx();
 	}
 
 private:
-	shared_ptr<QuackFetchStream> stream;
+	shared_ptr<QuackResultStream> stream;
 	idx_t debug_delay_ms;
 };
 
@@ -108,12 +106,12 @@ private:
 // The data leaves through the stream's claim buffer, so the statement's own result stays empty.
 class QuackFetchCollector : public PhysicalResultCollector {
 public:
-	QuackFetchCollector(PhysicalPlan &physical_plan, PreparedStatementData &data, shared_ptr<QuackFetchStream> stream_p,
-	                    AppendOrderMode order_mode_p)
+	QuackFetchCollector(PhysicalPlan &physical_plan, PreparedStatementData &data,
+	                    shared_ptr<QuackResultStream> stream_p, AppendOrderMode order_mode_p)
 	    : PhysicalResultCollector(physical_plan, data), stream(std::move(stream_p)), order_mode(order_mode_p) {
 	}
 
-	shared_ptr<QuackFetchStream> stream;
+	shared_ptr<QuackResultStream> stream;
 	AppendOrderMode order_mode;
 
 public:
@@ -175,7 +173,7 @@ public:
 };
 
 unique_ptr<PhysicalOperator> MakeQuackFetchCollector(ClientContext &context, PreparedStatementData &data,
-                                                     shared_ptr<QuackFetchStream> stream) {
+                                                     shared_ptr<QuackResultStream> stream) {
 	// The stream carries the FIRST statement that returns a result, as core does for a result chain.
 	// Every other statement keeps the default collector.
 	if (data.properties.return_type != StatementReturnType::QUERY_RESULT || stream->Bound()) {

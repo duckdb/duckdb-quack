@@ -24,52 +24,18 @@ class Connection;
 class MemoryStream;
 class QueryResult;
 class DatabaseInstance;
-struct QuackFetchStream;
+struct QuackResultStream;
 class PreparedStatement;
-class EncryptionState;
-class QuackDataStream;
+struct QuackInsertStream;
 class ErrorData;
 
 enum class QuackQueryState : uint8_t { IDLE, ACTIVE, FINISHED, CANCELLED, QUACK_ERROR };
 
-//! An insert stream + its driver thread, taken off a connection so finish/join can run unlocked.
-struct DetachedInsertStream {
-	shared_ptr<QuackDataStream> stream;
-	std::thread thread;
-	string id;
-	//! Finish + join + deregister; returns any INSERT error. Call WITHOUT a lock held.
-	ErrorData FinishAndJoin();
-	//! Roll the INSERT back (SetError) + join + deregister. Call WITHOUT a lock held.
-	void AbortAndJoin(const string &reason);
-};
-
-//! Server-side state for the INSERT a client is currently driving via a SEND_DATA stream on this
-//! connection (one at a time). `lock` is held only briefly — never across a Push or a join.
-struct QuackInsertState {
-	annotated_mutex lock;
-	shared_ptr<QuackDataStream> stream DUCKDB_GUARDED_BY(lock);
-	std::thread thread DUCKDB_GUARDED_BY(lock);
-	string stream_id DUCKDB_GUARDED_BY(lock);
-	//! Dead-range markers that arrived before the stream-creating data message, tagged with the stream
-	//! they belong to; applied once that stream is created.
-	string pending_marker_stream_id DUCKDB_GUARDED_BY(lock);
-	vector<std::pair<idx_t, idx_t>> pending_dead_ranges DUCKDB_GUARDED_BY(lock);
-
-	//! Take the active stream/thread/id off (briefly under the lock) for an unlocked finish/abort.
-	DetachedInsertStream Detach();
-	//! Detach only if the active stream is unrelated to `msg_stream_id` (else return an empty detach).
-	DetachedInsertStream DetachIfUnrelated(const string &msg_stream_id);
-	//! Detach + drain (`watermark`) + finish + join; returns any INSERT error. Empty if none active.
-	ErrorData Finalize(optional_idx watermark = optional_idx());
-	//! Active stream if it matches `sid` (caller pushes the range), else buffer the range and return null.
-	shared_ptr<QuackDataStream> StreamForDeadRangeOrBuffer(const string &sid, idx_t lo, idx_t hi);
-};
-
 //! The stream the connection's active query fills, one at a time. The query runs on a background
 //! thread with a rebalancing result collector, and the FETCH handlers drain the stream's buffer.
-struct QuackFetchState {
+struct QuackStatementState {
 	mutex lock;
-	shared_ptr<QuackFetchStream> stream;
+	shared_ptr<QuackResultStream> stream;
 	std::thread thread;
 	hugeint_t uuid = 0;
 	//! A late FETCH for this uuid gets this error. The stream and its payloads can then go away.
@@ -77,7 +43,7 @@ struct QuackFetchState {
 };
 
 struct QuackConnection {
-	explicit QuackConnection(string session_id_p, idx_t heartbeat_timeout_seconds_p);
+	QuackConnection(string session_id_p, idx_t heartbeat_timeout_seconds_p);
 	~QuackConnection();
 
 	//! Renew unless the timeout has already elapsed. Once expired, a lease cannot be revived.
@@ -87,8 +53,8 @@ struct QuackConnection {
 
 	//! Guards the session state below and the result cache. Never held across a statement.
 	mutex lock;
-	//! Held for a whole statement, because `duckdb_connection` runs one at a time. The fetch
-	//! producer and the insert driver take it. Request handlers must not.
+	//! Held for a whole statement, because `duckdb_connection` runs one at a time. Only the query
+	//! driver takes it. Request handlers must not.
 	mutex statement_lock;
 	unique_ptr<Connection> duckdb_connection;
 	//! Replay cache of the last client query's result stream, null unless quack_enable_reconnects.
@@ -130,9 +96,7 @@ struct QuackConnection {
 	atomic<QuackQueryState> query_state {QuackQueryState::IDLE};
 	timestamp_t query_started_at {0};
 
-	//! The INSERT this connection is currently driving via a client SEND_DATA stream (one at a time).
-	QuackInsertState insert;
-	QuackFetchState fetch;
+	QuackStatementState statement;
 };
 
 struct QuackConnectionSnapshot {
@@ -182,9 +146,6 @@ public:
 
 	string GenerateSessionId();
 
-	//! Generate a fresh CSPRNG-backed 128-bit token, hex-encoded (32 chars).
-	static string GenerateRandomToken(DatabaseInstance &db);
-
 	//! Throw InvalidInputException if `token` doesn't meet requirements(currently, length >= 4)
 	static void ValidateToken(const string &token);
 
@@ -222,9 +183,6 @@ protected:
 	//! Min-heap of the expiry-queue slots, at most one per connection with a cache
 	mutex cache_expiry_mutex;
 	std::priority_queue<CacheExpiryEntry, vector<CacheExpiryEntry>, CacheExpiresLater> cache_expiry_queue;
-
-	mutex session_id_rng_mutex;
-	shared_ptr<EncryptionState> session_id_rng;
 
 	QuackUri uri;
 
