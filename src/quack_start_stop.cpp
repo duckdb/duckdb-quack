@@ -15,6 +15,8 @@ struct QuackStartStopFunctionData : public TableFunctionData {
 	bool finished = false;
 	QuackUri listen_uri;
 	string token;
+	//! Persist the token as the default quack secret once the server is up
+	bool create_secret = false;
 };
 
 static unique_ptr<FunctionData> QuackServeBind(ClientContext &context, TableFunctionBindInput &input,
@@ -49,14 +51,17 @@ static unique_ptr<FunctionData> QuackServeBind(ClientContext &context, TableFunc
 		throw InvalidInputException("Cannot specify both token and secret - the secret supplies the token");
 	}
 
-	unique_ptr<SecretEntry> secret;
-	if (!has_token) {
-		// An explicit name selects the secret; without one we use the default secret for this endpoint (if any).
-		// Without a URI the secret decides where we listen, so a lone secret counts as the default one.
-		secret = QuackSecret::Find(context, has_secret_name ? &secret_entry->second : nullptr, listen_uri,
-		                           explicit_uri ? QuackSecret::DefaultLookup::SCOPE_MATCH_ONLY
-		                                        : QuackSecret::DefaultLookup::ALLOW_SINGLE_SECRET);
-	}
+	// An explicit name selects the secret; without one we use the default secret for this endpoint (if any).
+	// Without a URI the secret decides where we listen, so a lone secret counts as the default one.
+	auto secret = QuackSecret::Find(context, has_secret_name ? &secret_entry->second : nullptr, listen_uri,
+	                                explicit_uri ? QuackSecret::DefaultLookup::SCOPE_MATCH_ONLY
+	                                             : QuackSecret::DefaultLookup::ALLOW_SINGLE_SECRET);
+
+	// Nothing to fall back on next time: persist the token we are about to use, if we are asked to.
+	auto create_secret_entry = input.named_parameters.find("create_secret_if_not_exists");
+	bind_data->create_secret = create_secret_entry != input.named_parameters.end() &&
+	                           !create_secret_entry->second.IsNull() && create_secret_entry->second.GetValue<bool>() &&
+	                           !has_secret_name && !secret;
 	if (secret && !explicit_uri) {
 		// No URI was given: a fully-qualified secret scope tells us where to listen.
 		string secret_endpoint;
@@ -101,6 +106,10 @@ static void QuackServe(ClientContext &context, TableFunctionInput &data_p, DataC
 
 	auto &server =
 	    QuackStorageExtensionInfo::GetState(*context.db).CreateServer(context, bind_data.listen_uri, bind_data.token);
+	if (bind_data.create_secret) {
+		// only once the server is actually up: a token that never made it onto a socket is not worth persisting
+		QuackSecret::CreateDefault(context, bind_data.token);
+	}
 	auto &actual_uri = server.ListenUri();
 	output.data[0].SetValue(0, actual_uri.Uri());
 	output.data[1].SetValue(0, actual_uri.Http());
@@ -117,6 +126,7 @@ TableFunctionSet QuackServeFunction::GetFunction() {
 	fun.named_parameters["allow_other_hostname"] = LogicalType::BOOLEAN;
 	fun.named_parameters["token"] = LogicalType::VARCHAR;
 	fun.named_parameters["secret"] = LogicalType::VARCHAR;
+	fun.named_parameters["create_secret_if_not_exists"] = LogicalType::BOOLEAN;
 	set.AddFunction(fun);
 	fun.arguments.clear();
 	set.AddFunction(fun);

@@ -52,7 +52,17 @@ CALL quack_serve();                -- default secret, listens on quack:localhost
 ```
 
 If no secret matches and no `token` is given, `quack_serve` generates a random token and
-returns it in the `auth_token` column.
+returns it in the `auth_token` column. To keep that token across restarts, ask for it to be
+persisted:
+
+```sql
+CALL quack_serve(create_secret_if_not_exists = true);
+```
+
+This writes the token to a persistent default secret (`__default_quack`, scoped to `quack:`), so
+the next `quack_serve` - and any client on the machine - reuses the same token. It only does so
+when there is nothing to reuse yet: if a secret was named with `secret =`, or a default secret
+already matches, nothing is written.
 
 ### Connecting through a secret
 
