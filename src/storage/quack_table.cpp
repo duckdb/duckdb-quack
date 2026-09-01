@@ -4,6 +4,7 @@
 #include "quack_scan.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/statement/create_statement.hpp"
+#include "duckdb/parser/parsed_data/alter_info.hpp"
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
 #include "storage/quack_view.hpp"
@@ -15,8 +16,7 @@ unique_ptr<CreateInfo> ParseCreateTable(const string &sql) {
 	parser.ParseQuery(sql);
 	if (parser.statements.size() != 1 || parser.statements[0]->type != StatementType::CREATE_STATEMENT) {
 		throw BinderException(
-		    "Failed to create view from SQL string - \"%s\" - statement did not contain a single SELECT statement",
-		    sql);
+		    "Failed to parse CREATE TABLE from the remote catalog - \"%s\" - expected a single CREATE statement", sql);
 	}
 	auto &create = parser.statements[0]->Cast<CreateStatement>();
 	return std::move(create.info);
@@ -41,9 +41,20 @@ QuackTableSet::QuackTableSet(ClientContext &context, QuackSchemaCatalogEntry &pa
 			if (info->type != CatalogType::TABLE_ENTRY) {
 				throw InternalException("Expected a CREATE TABLE");
 			}
-			// bind to resolve the types
+			// Bind to resolve the types. SKIP_BINDING leaves the column DEFAULT expressions unbound:
+			// binding them here would resolve functions through the catalog we are still constructing,
+			// which is not registered yet - a computed DEFAULT (now(), 1 + 0, nextval(...)) then aborts
+			// the entire ATTACH with a misleading "Catalog \"...\" does not exist" (issue #132).
+			// The parsed DEFAULT stays on the column and binds on first use, once the catalog exists.
 			auto binder = Binder::CreateBinder(context);
-			auto bound_info = binder->BindCreateTableInfo(std::move(info), schema);
+			unique_ptr<BoundCreateTableInfo> bound_info;
+			try {
+				bound_info = binder->BindCreateTableInfo(std::move(info), schema, AlterBindMode::SKIP_BINDING);
+			} catch (std::exception &ex) {
+				throw BinderException(
+				    "Failed to bind remote table while attaching quack catalog \"%s\" (schema \"%s\"): %s\nSQL: %s",
+				    catalog.GetName().GetIdentifierName(), schema.name.GetIdentifierName(), ex.what(), sql);
+			}
 			auto table = make_uniq<QuackTableCatalogEntry>(catalog, parent, bound_info->Base());
 			entry = std::move(table);
 		} else {
