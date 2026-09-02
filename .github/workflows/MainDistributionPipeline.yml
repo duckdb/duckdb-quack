@@ -46,3 +46,23 @@ jobs:
       ci_tools_version: main
       extension_name: quack
       format_checks: 'format'
+
+  check-protocol-version:
+    name: Check protocol & QUACK_VERSION
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need full history to diff against origin/main
+
+      - name: Compare schema and QUACK_VERSION against main
+        run: |
+          git fetch origin main
+          schema_changed=$(git diff origin/main -- src/include/quack_message.json)
+          version_changed=$(git diff origin/main -- src/include/quack_message.hpp | grep -c "QUACK_VERSION" || true)
+
+          if [[ -n "$schema_changed" && "$version_changed" -eq 0 ]]; then
+            echo "::error::quack_messages.json changed vs main, but QUACK_VERSION was not bumped in quack_message.hpp."
+            exit 1
+          fi
