@@ -108,6 +108,10 @@ static unique_ptr<FunctionData> QuackScanBindCatalogName(ClientContext &context,
 	auto client_wrapper = bind_data->client_connection->GetClient(context);
 	auto &client = client_wrapper->GetClient();
 	bind_data->query_uuid = UUID::GenerateRandomUUID();
+
+	if (!context.transaction.IsAutoCommit()) {
+		QuackTransaction::Get(context, catalog).ForceStart();
+	}
 	auto bind_response = client.Request<PrepareResponseMessage>(
 	    context,
 	    make_uniq<PrepareRequestMessage>(bind_data->client_connection->ConnectionId(), query, bind_data->query_uuid));
