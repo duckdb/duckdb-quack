@@ -1,0 +1,100 @@
+# name: test/sql/error_types.test
+# description: errors raised by the server are rethrown by the client with their original exception type
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok
+create secret (type quack, token 'asdf')
+
+# a catalog error stays a catalog error - it used to arrive as "Invalid Input Error"
+statement error
+from quack_query({server}, 'select * from no_such_table')
+----
+Catalog Error: Table with name no_such_table does not exist!
+
+statement error
+from quack_query({server}, 'selexxxct 42')
+----
+Parser Error: syntax error at or near
+
+statement error
+from quack_query({server}, 'select ''abc''::int')
+----
+Conversion Error: Could not convert string 'abc' to INT32
+
+statement error
+from quack_query({server}, 'select no_such_column from range(10)')
+----
+Binder Error: Referenced column "no_such_column" not found
+
+# the error is raised while streaming the result (in a FETCH, not in the PREPARE): the batch is 12 chunks,
+# so the failing row is well past the first response
+statement error
+from quack_query({server}, 'select case when i < 30000 then i::varchar else ''abc'' end::int from range(60000) t(i)')
+----
+Conversion Error: Could not convert string 'abc' to INT32
+
+# errors raised by quack itself (not by a query) keep throwing as InvalidInputException
+statement error
+from quack_query({server}, 'select 42', token='wrong-token')
+----
+Invalid Input Error: Authentication failed
+
+# over an attached database: an insert rejected by the server surfaces as a constraint error, not as
+# an invalid input error (this one comes back on the SEND_DATA path)
+statement ok
+attach {server} as rpc (type quack)
+
+statement ok
+create table rpc.checked (i integer check (i < 30000))
+
+statement error
+insert into rpc.checked select i from range(60000) t(i)
+----
+Constraint Error: CHECK constraint failed
+
+# A failed checkpoint on an ATTACHED database is scoped to that database: DuckDB invalidates only it and
+# raises an IOException (it invalidates the whole instance, with a FatalException, only for the initial
+# database - see SingleFileStorageManager::CheckpointDatabase). Arm the server to fail its next checkpoint:
+statement ok
+from quack_query({server}, 'attach ''{TEST_DIR}/fatal.db'' as f; create table f.t as select 42 i')
+
+statement ok
+from quack_query({server}, 'pragma debug_checkpoint_abort=''before_header''')
+
+# raise the WAL threshold first, so the insert cannot autocheckpoint on its own: the explicit CHECKPOINT is
+# then the only thing that can trip the abort, and the error arrives unwrapped rather than nested inside the
+# "COMMIT succeeded but the autocheckpoint failed" message.
+statement ok
+from quack_query({server}, 'set wal_autocheckpoint=''1TB''')
+
+statement ok
+from quack_query({server}, 'insert into f.t values (43)')
+
+# the type survives the wire: an IO Error stays an IO Error, and names the database it was scoped to
+statement error
+from quack_query({server}, 'checkpoint f')
+----
+IO Error: Checkpoint failed for database "f". The database has been invalidated.
+
+# our own database is untouched and stays fully usable
+query I
+select 42
+----
+42
+
+# and so is the SERVER's own database - only the attached "f" died, so rpc still answers
+query I
+select count(*) from rpc.checked
+----
+0
+
+statement ok
+detach rpc
+
+# NOTE: this test no longer covers the whole-server-invalidation path (the must_invalidate flag on
+# ErrorResponse, and the client-side "this attached database is gone with it" fallback). Reaching it needs a
+# FATAL on the server's INITIAL database, which the test harness cannot arrange: quack_serve runs on the same
+# in-memory DuckDB instance as the client, because sqllogictest's named connections ("quack_db:foo") are all
+# connections to the one runner database, not separate instances. That behaviour is currently untested.

@@ -32,9 +32,27 @@
         "name": "message",
         "type": "string",
         "serialize_property": "error.RawMessage()"
+      },
+      {
+        "id": 2,
+        "name": "exception_type",
+        "type": "string",
+        "serialize_property": "ExceptionTypeName()"
+      },
+      {
+        "id": 3,
+        "name": "extra_info",
+        "type": "unordered_map<string, string>",
+        "serialize_property": "TransferableExtraInfo()"
+      },
+      {
+        "id": 4,
+        "name": "must_invalidate",
+        "type": "bool"
       }
     ],
-    "constructor": ["message"]
+    "constructor": ["message", "exception_type", "extra_info", "must_invalidate"],
+    "constructor_method": "ErrorResponse::FromWire"
   },
   {
     "class": "PrepareRequestMessage",

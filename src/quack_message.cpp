@@ -1,7 +1,9 @@
 #include "duckdb/catalog/catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/common/serializer/memory_stream.hpp"
 #include "duckdb/common/serializer/binary_deserializer.hpp"
+#include "duckdb/common/string_util.hpp"
 
 #include "quack_message.hpp"
 
@@ -179,6 +181,81 @@ unique_ptr<QuackMessage> QuackMessage::DeserializeMessage(BinaryDeserializer &de
 	deserializer.End();
 	// a chunk-carrying message continues with its raw blob, from right after the message
 	result->DecodeBlob(deserializer);
+	return result;
+}
+
+//! Extra info that must not cross the wire, because it describes the process that raised the error:
+//! - exception_type / exception_message are reserved by ExceptionToJSONMap (it asserts on them), and a peer
+//!   sending them would overwrite the type and message we decoded
+//! - position is an offset into the SERVER's SQL - the client would point a caret into its own statement
+//! - a stack trace holds frames of the server process, and would hand out the layout of the server binary to
+//!   anyone who can trigger an error
+static bool IsTransferableErrorInfo(const string &key) {
+	static const char *const NON_TRANSFERABLE[] = {"exception_type", "exception_message", "position", "stack_trace",
+	                                               "stack_trace_pointers"};
+	for (auto &non_transferable : NON_TRANSFERABLE) {
+		if (key == non_transferable) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static unordered_map<string, string> TransferableErrorInfo(const unordered_map<string, string> &extra_info) {
+	unordered_map<string, string> result;
+	for (auto &entry : extra_info) {
+		if (IsTransferableErrorInfo(entry.first)) {
+			result.insert(entry);
+		}
+	}
+	return result;
+}
+
+//! DuckDB invalidates the whole DatabaseInstance when it sees one of these (client_context.cpp). That verdict
+//! is about the SERVER, so rethrowing one verbatim would let a broken server poison THIS database.
+static bool InvalidatesDatabase(ExceptionType type) {
+	return type == ExceptionType::INTERNAL || Exception::InvalidatesDatabase(type);
+}
+
+string ErrorResponse::ExceptionTypeName() const {
+	if (!error.HasError()) {
+		return string();
+	}
+	return Exception::ExceptionTypeToString(error.Type());
+}
+
+unordered_map<string, string> ErrorResponse::TransferableExtraInfo() const {
+	return TransferableErrorInfo(error.ExtraInfo());
+}
+
+unique_ptr<ErrorResponse> ErrorResponse::FromWire(const string &message, const string &exception_type,
+                                                  const unordered_map<string, string> &extra_info,
+                                                  bool must_invalidate) {
+	auto type = Exception::StringToExceptionType(exception_type);
+	if (type == ExceptionType::INVALID) {
+		// the peer sent no type, or one this DuckDB does not know (it may run a different version)
+		type = ExceptionType::INVALID_INPUT;
+	}
+	// the peer controls this map, so filter it here too and not just on the way out
+	auto received_info = TransferableErrorInfo(extra_info);
+
+	auto raw_message = message;
+	if (InvalidatesDatabase(type)) {
+		// downgrade to a type that does not invalidate OUR database, keeping the original one in the extra info
+		received_info[QuackErrorInfo::ORIGINAL_EXCEPTION_TYPE] = Exception::ExceptionTypeToString(type);
+		raw_message =
+		    StringUtil::Format("%s Error on the Quack server: %s", Exception::ExceptionTypeToString(type), raw_message);
+		type = ExceptionType::INVALID_INPUT;
+	}
+
+	auto result = unique_ptr<ErrorResponse>(new ErrorResponse());
+	result->must_invalidate = must_invalidate;
+	if (received_info.empty()) {
+		result->error = ErrorData(type, raw_message);
+	} else {
+		// ErrorData has no setter for its extra info: the JSON constructor is the only way to restore it
+		result->error = ErrorData(StringUtil::ExceptionToJSONMap(type, raw_message, received_info));
+	}
 	return result;
 }
 
