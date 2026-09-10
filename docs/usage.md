@@ -109,15 +109,33 @@ FROM rpc.call('SELECT 42');
 
 ### Pushdown
 
-Scans through an attached catalog support both **projection pushdown**
-and **filter pushdown** (constant comparisons, `IS NULL`, `IS NOT NULL`,
-`IN`, and `AND`/`OR` combinations). Only the required columns are
-transferred, and filters are evaluated server-side. Verify with
-`EXPLAIN`:
+Scans through an attached catalog support **projection pushdown**: only
+the columns the query needs are transferred. Verify with `EXPLAIN`:
 
 ```sql
-EXPLAIN SELECT i FROM rpc.main.test_data WHERE i = 42;
+EXPLAIN SELECT i FROM rpc.main.test_data;
 ```
+
+Filter pushdown is not currently enabled. Filters are applied on the
+client, once the rows have arrived.
+
+### Session settings and remote evaluation
+
+Remote SQL is bound and executed in the server's own session. Each
+client connection gets a fresh server-side connection that inherits the
+server's settings, and the protocol does not carry client session
+state, so a setting changed on the client does not apply to anything
+evaluated remotely:
+
+```sql
+SET integer_division = true;
+FROM quack_query('quack:localhost', 'SELECT 7/2');
+-- 3.5, bound with the server's integer_division, not the client's
+```
+
+The same holds for `ieee_floating_point_ops`, `default_collation`,
+`TimeZone`, and any other setting that changes results or result types.
+Set those on the server if remote queries depend on them.
 
 ### Authentication
 
