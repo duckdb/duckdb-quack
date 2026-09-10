@@ -431,18 +431,37 @@ static string GetSettingString(DatabaseInstance &db, const string &setting_name)
 	return setting_str;
 }
 
+//! Outcome of an authentication/authorization callback: what it returned, or why it could not run
+struct AuthCallbackResult {
+	Value value;
+	string error;
+
+	bool Denied() const {
+		return !error.empty() || value.IsNull() ||
+		       (value.type().id() == LogicalTypeId::BOOLEAN && !value.GetValue<bool>());
+	}
+	unique_ptr<ErrorResponse> Failure(const string &check) const {
+		if (error.empty()) {
+			return make_uniq<ErrorResponse>(check + " failed");
+		}
+		return make_uniq<ErrorResponse>(check + " callback failed: " + error);
+	}
+};
+
 template <typename... ARGS>
-static Value EvaluateAuthQuery(DatabaseInstance &db, const string &sql, ARGS... values) {
+static AuthCallbackResult EvaluateAuthQuery(DatabaseInstance &db, const string &sql, ARGS... values) {
+	AuthCallbackResult result;
 	Connection dummy_connection(db);
-	auto auth_result = dummy_connection.Query(sql, values...);
-	if (!auth_result || auth_result->HasError()) {
-		return Value(false);
+	auto query_result = dummy_connection.Query(sql, values...);
+	if (!query_result || query_result->HasError()) {
+		result.error = query_result ? query_result->GetError() : "auth callback produced no result";
+		return result;
 	}
-	auto auth_result_chunk = auth_result->Fetch();
-	if (!auth_result_chunk || auth_result_chunk->size() == 0) {
-		return Value(false);
+	auto chunk = query_result->Fetch();
+	if (chunk && chunk->size() > 0) {
+		result.value = chunk->GetValue(0, 0);
 	}
-	return auth_result_chunk->GetValue(0, 0);
+	return result;
 }
 
 // Derive a stable, per-client reconnect identifier as HMAC-SHA256(server_hmac_key, client_id)
@@ -576,13 +595,11 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			    "heartbeat_timeout out of range - must be between 1 and %llu seconds", MAX_HEARTBEAT_TIMEOUT_SECONDS));
 		}
 		string session_id = GenerateSessionId();
-		auto auth_result = EvaluateAuthQuery(
+		auto auth = EvaluateAuthQuery(
 		    db, StringUtil::Format("SELECT %s(?, ?, ?)", GetSettingString(db, "quack_authentication_function")),
 		    Value(session_id), Value(connection_request_message.AuthString()), Value(Token()));
-
-		if (auth_result.IsNull() ||
-		    (auth_result.type().id() == LogicalTypeId::BOOLEAN && !auth_result.GetValue<bool>())) {
-			return make_uniq<ErrorResponse>("Authentication failed");
+		if (auth.Denied()) {
+			return auth.Failure("Authentication");
 		}
 		string client_id_hash;
 		if (!connection_request_message.ClientId().empty()) {
@@ -603,14 +620,13 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		auto &connection = *connection_p;
 
 		// TODO do not do this if there is no fun set
-		auto auth_result = EvaluateAuthQuery(
+		auto authz = EvaluateAuthQuery(
 		    db, StringUtil::Format("SELECT %s(?, ?)", GetSettingString(db, "quack_authorization_function")),
 		    Value(prepare_request_message.ConnectionId()), Value(prepare_request_message.Query()));
-		if (auth_result.IsNull() ||
-		    (auth_result.type().id() == LogicalTypeId::BOOLEAN && !auth_result.GetValue<bool>())) {
-			return make_uniq<ErrorResponse>("Authorization failed");
+		if (authz.Denied()) {
+			return authz.Failure("Authorization");
 		}
-		auto effective_sql = (auth_result.type().id() == LogicalTypeId::VARCHAR) ? auth_result.GetValue<string>()
+		auto effective_sql = (authz.value.type().id() == LogicalTypeId::VARCHAR) ? authz.value.GetValue<string>()
 		                                                                         : prepare_request_message.Query();
 
 		// Stop the previous producer first. This joins its thread, so it frees the statement lock.
