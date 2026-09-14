@@ -597,6 +597,17 @@ private:
 	hugeint_t query_uuid {0, 0};
 };
 
+//! Keys quack adds to an error's extra info. They live in the ErrorData, not in ErrorResponse, so that they
+//! survive relaying: a quack server can be the client of another one, and there the error is caught and
+//! re-raised through DuckDB code that has never heard of quack. Extra info makes that hop, message fields do
+//! not.
+namespace QuackErrorInfo {
+//! The type the SERVER raised, when it was too severe to rethrow as-is (see ErrorResponse::FromWire)
+constexpr const char *ORIGINAL_EXCEPTION_TYPE = "original_exception_type";
+} // namespace QuackErrorInfo
+
+//! An error raised while handling a request. Type and extra info travel with the message, so the client
+//! rethrows the exception the server raised (a Catalog Error stays a Catalog Error).
 class ErrorResponse : public QuackMessage {
 public:
 	static constexpr MessageType TYPE = MessageType::ERROR_RESPONSE;
@@ -614,6 +625,23 @@ public:
 	const string &ErrorMessage() const {
 		return error.Message();
 	}
+	//! The exception type in its wire form (e.g. "Catalog"), empty if this response holds no error
+	string ExceptionTypeName() const;
+	//! The extra info minus the entries that only mean something in the process that raised the error
+	unordered_map<string, string> TransferableExtraInfo() const;
+
+	//! Whether the SENDER's database is now invalidated, i.e. the receiver should stop using this connection.
+	//! A bare flag rather than the sender's identity: a server behind a proxy does not know the address it is
+	//! reachable at, while the receiver always knows which server it dialed.
+	bool MustInvalidate() const {
+		return must_invalidate;
+	}
+	void SetMustInvalidate(bool must_invalidate_p) {
+		must_invalidate = must_invalidate_p;
+	}
+	//! Rebuild an error response from the wire fields - the inverse of Serialize
+	static unique_ptr<ErrorResponse> FromWire(const string &message, const string &exception_type,
+	                                          const unordered_map<string, string> &extra_info, bool must_invalidate);
 
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<ErrorResponse> Deserialize(Deserializer &deserializer);
@@ -624,6 +652,8 @@ protected:
 
 private:
 	ErrorData error;
+	//! Set by the server when its OWN database died with this error - see MustInvalidate()
+	bool must_invalidate = false;
 };
 
 class CancelRequestMessage : public QuackMessage {

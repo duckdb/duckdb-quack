@@ -165,7 +165,9 @@ public:
 	}
 
 protected:
+	//! Handle one request, turning any exception raised along the way into an ErrorResponse
 	unique_ptr<QuackMessage> HandleMessage(MemoryStream &read_stream);
+	unique_ptr<QuackMessage> DispatchMessage(MemoryStream &read_stream);
 	//! Drops caches idle past quack_result_ttl
 	void SweepExpiredCaches(DatabaseInstance &db);
 	//! Give `connection` its expiry-queue slot when its cache is created; caller must hold connection.lock.

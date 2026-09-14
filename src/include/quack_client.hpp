@@ -29,12 +29,22 @@ public:
 		if (response_message->Type() != TARGET::TYPE) {
 			if (response_message->Type() == MessageType::ERROR_RESPONSE) {
 				// if we get an error throw it immediately
+				NoteError(response_message->Cast<ErrorResponse>());
 				response_message->Cast<ErrorResponse>().Error().Throw();
 			}
 			throw IOException("Expected %s message, got %s instead", MessageTypeToString(TARGET::TYPE),
 			                  MessageTypeToString(response_message->Type()));
 		}
 		return unique_ptr_cast<QuackMessage, TARGET>(std::move(response_message));
+	}
+
+	//! Invalidate the owning connection if the error says the server's database died. Call before rethrowing.
+	void NoteError(const ErrorResponse &error_response);
+
+	//! The connection this client is checked out from - set by QuackClientWrapper. Null for the initial connect
+	//! and for a one-shot quack_query.
+	void SetOwnerConnection(optional_ptr<const QuackClientConnection> owner_connection_p) {
+		owner_connection = owner_connection_p;
 	}
 
 	//! POST already-serialized request bytes and return the raw response body, throwing on transport failure.
@@ -92,6 +102,8 @@ protected:
 	QuackUri uri;
 	//! HTTP transport-log logger, stamped at checkout (see SetRequestLogger).
 	shared_ptr<Logger> request_logger;
+	//! See SetOwnerConnection
+	optional_ptr<const QuackClientConnection> owner_connection;
 
 private:
 	virtual unique_ptr<QuackMessage> RequestInternal(optional_ptr<ClientContext> context,
@@ -117,10 +129,19 @@ public:
 		return heartbeat_timeout_seconds;
 	}
 
-	//! Get a client (either a cached one, or open a new one if required)
+	//! Get a client (either a cached one, or open a new one if required).
+	//! Throws once the server has told us its database is gone - see MarkServerInvalidated.
 	unique_ptr<QuackClientWrapper> GetClient(ClientContext &context) const;
 	//! Return a client back to the cache
 	void StoreClient(unique_ptr<QuackClient> client_p) const;
+
+	//! The server's database is invalidated, so this connection is a dead end - fail fast on it. Reconnecting
+	//! would be worse than useless: an invalidated server cannot run its authentication query either, so it
+	//! rejects every reconnect with a misleading "Authentication failed".
+	void MarkServerInvalidated() const;
+	bool ServerInvalidated() const {
+		return server_invalidated;
+	}
 
 private:
 	friend class QuackClient;
@@ -135,6 +156,7 @@ private:
 	//! Lease timeout accepted by the server during the connection handshake.
 	idx_t heartbeat_timeout_seconds;
 	mutable mutex lock;
+	mutable atomic<bool> server_invalidated {false};
 	//! Bounds cached_clients: each cached client holds a persistent socket that pins a server
 	//! connection slot, so an unbounded cache would let one attach starve the server's budget.
 	idx_t max_connections_cached;

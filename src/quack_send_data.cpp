@@ -52,6 +52,8 @@ public:
 		                  duration_ms, response->Type(), error);
 
 		if (response->Type() == MessageType::ERROR_RESPONSE) {
+			// this path decodes the response itself instead of going through Request(), so note the error here too
+			client.NoteError(response->Cast<ErrorResponse>());
 			response->Cast<ErrorResponse>().Error().Throw();
 		}
 		if (response->Type() != SendDataResponseMessage::TYPE) {
