@@ -17,10 +17,6 @@
 
 namespace duckdb {
 
-class ClientContext;
-class PhysicalOperator;
-struct PreparedStatementData;
-
 //! One sealed FETCH_RESPONSE chunk blob. The serve path writes its header, with the client-visible
 //! index, directly before the blob.
 struct QuackFetchPayload {
@@ -134,9 +130,5 @@ private:
 	std::condition_variable bind_cv;
 	bool bound = false;
 };
-
-//! Installed in ClientConfig::get_result_collector, so the query runs in parallel into `stream`.
-unique_ptr<PhysicalOperator> MakeQuackFetchCollector(ClientContext &context, PreparedStatementData &data,
-                                                     shared_ptr<QuackResultStream> stream);
 
 } // namespace duckdb
