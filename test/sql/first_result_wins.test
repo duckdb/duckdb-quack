@@ -1,0 +1,26 @@
+# name: test/sql/first_result_wins.test
+# description: The first statement that returns rows is the client's result, including statements the planner settles eagerly (CALL, INSERT ... RETURNING)
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+# a CALL followed by another statement: the CALL's rows are the result
+query I
+from quack_query({server}, 'call range(3); select 99', token='asdf')
+----
+0
+1
+2
+
+# INSERT ... RETURNING followed by another statement: the RETURNING rows are the result,
+# not the trailing insert's count (values chosen so the two cannot coincide)
+query I
+from quack_query({server}, 'create table frw(i int); insert into frw values (7) returning i; insert into frw values (8), (9)', token='asdf')
+----
+7
+
+# the statement after the claimed result still ran
+query I
+from quack_query({server}, 'select count(*) from frw', token='asdf')
+----
+3
