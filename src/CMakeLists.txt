@@ -5,7 +5,7 @@ add_library(
   quack_active_connections.cpp
   quack_rebalancer_core.cpp
   quack_rebalancer_sink.cpp
-  quack_fetch_collector.cpp
+  quack_format.cpp
   quack_clear_cache.cpp
   quack_client.cpp
   quack_extension.cpp

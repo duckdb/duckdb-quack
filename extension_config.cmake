@@ -17,5 +17,5 @@ duckdb_extension_load(httpfs
     # via CURLOPT_LOW_SPEED_* instead of hanging), and the fixes for duckdb main making configs/secrets take
     # Identifier instead of string. No APPLY_PATCHES: duckdb's only patch for this pin rewrites its own
     # autoloading .test expectations, which this repo does not run.
-    GIT_TAG 5dfa24ce370dda2ebb7f24ab80d4237093512260
+    GIT_TAG 96a2f2e88e5dd075facbc5a65dc3afd67aa2bb44
 )
