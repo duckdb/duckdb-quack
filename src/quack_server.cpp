@@ -19,7 +19,7 @@
 #include "quack_random.hpp"
 #include "quack_result_cache.hpp"
 #include "quack_storage.hpp"
-#include "quack_insert_stream.hpp"
+#include "quack_session_state.hpp"
 #include "quack_fetch_collector.hpp"
 #include "quack_rebalancer_sink.hpp"
 

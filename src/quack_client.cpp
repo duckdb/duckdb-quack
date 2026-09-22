@@ -6,8 +6,8 @@
 #include "duckdb/parallel/task_scheduler.hpp"
 
 #include "quack_client.hpp"
-#include "quack_insert_stream.hpp"
 #include "quack_secret.hpp"
+#include "quack_session_state.hpp"
 #include "quack_uri.hpp"
 
 namespace duckdb {
