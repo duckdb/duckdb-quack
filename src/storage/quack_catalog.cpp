@@ -206,7 +206,8 @@ DatabaseSize QuackCatalog::GetDatabaseSize(ClientContext &context) {
 }
 
 unique_ptr<TableRef> QuackCatalog::RemoteExecute(ClientContext &context, unique_ptr<QueryNode> node) {
-	return RemoteExecute(context, node->ToString());
+	// attached-catalog path: a read of this catalog, so it joins the local transaction
+	return CreateRemoteQueryRef(node->ToString(), false, true);
 }
 
 unique_ptr<TableRef> QuackCatalog::RemoteExecute(ClientContext &context, unique_ptr<SQLStatement> statement) {
@@ -216,14 +217,17 @@ unique_ptr<TableRef> QuackCatalog::RemoteExecute(ClientContext &context, unique_
 }
 
 unique_ptr<TableRef> QuackCatalog::RemoteExecute(ClientContext &context, const string &sql) {
-	return CreateRemoteQueryRef(sql, false);
+	// CONNECT forwards statements verbatim - no synthesized transaction, or a forwarded BEGIN would
+	// land inside it and COMMIT/ROLLBACK arrive after it has closed
+	return CreateRemoteQueryRef(sql, false, false);
 }
 
-unique_ptr<TableRef> QuackCatalog::CreateRemoteQueryRef(const string &sql, bool refresh_catalog) {
+unique_ptr<TableRef> QuackCatalog::CreateRemoteQueryRef(const string &sql, bool refresh_catalog,
+                                                        bool use_transaction_p) {
 	vector<unique_ptr<ParsedExpression>> args;
 	args.push_back(make_uniq<ConstantExpression>(Value(GetName())));
 	args.push_back(make_uniq<ConstantExpression>(Value(sql)));
-	auto use_transaction = make_uniq<ConstantExpression>(Value::BOOLEAN(true));
+	auto use_transaction = make_uniq<ConstantExpression>(Value::BOOLEAN(use_transaction_p));
 	use_transaction->SetAlias("use_transaction");
 	args.push_back(std::move(use_transaction));
 	if (refresh_catalog) {

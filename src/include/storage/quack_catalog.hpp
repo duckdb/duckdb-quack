@@ -87,7 +87,7 @@ private:
 
 	//! Build the "quack_query_by_name" table function call that runs "sql" on the server. Statements pushed
 	//! down by the RemotePushdownOptimizer change the remote catalog, so they ask for a catalog refresh
-	unique_ptr<TableRef> CreateRemoteQueryRef(const string &sql, bool refresh_catalog);
+	unique_ptr<TableRef> CreateRemoteQueryRef(const string &sql, bool refresh_catalog, bool use_transaction = true);
 
 	QuackLoadCatalogData LoadCatalog(ClientContext &context);
 
