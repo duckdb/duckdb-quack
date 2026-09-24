@@ -225,13 +225,13 @@ unique_ptr<TableRef> QuackCatalog::RemoteExecute(ClientContext &context, const s
 unique_ptr<TableRef> QuackCatalog::CreateRemoteQueryRef(const string &sql, bool refresh_catalog,
                                                         bool use_transaction_p) {
 	vector<unique_ptr<ParsedExpression>> args;
-	args.push_back(make_uniq<ConstantExpression>(Value(GetName())));
-	args.push_back(make_uniq<ConstantExpression>(Value(sql)));
-	auto use_transaction = make_uniq<ConstantExpression>(Value::BOOLEAN(use_transaction_p));
+	args.push_back(ConstantExpression::FromValue(Value(GetName())));
+	args.push_back(ConstantExpression::FromValue(Value(sql)));
+	auto use_transaction = ConstantExpression::FromValue(Value::BOOLEAN(use_transaction_p));
 	use_transaction->SetAlias("use_transaction");
 	args.push_back(std::move(use_transaction));
 	if (refresh_catalog) {
-		auto refresh = make_uniq<ConstantExpression>(Value::BOOLEAN(true));
+		auto refresh = ConstantExpression::FromValue(Value::BOOLEAN(true));
 		refresh->SetAlias("refresh_catalog");
 		args.push_back(std::move(refresh));
 	}
