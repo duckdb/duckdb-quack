@@ -52,6 +52,9 @@ static unique_ptr<BaseSecret> CreateQuackSecretFromConfig(ClientContext &, Creat
 		auto lower_name = StringUtil::Lower(named_param.first);
 		if (lower_name == "token") {
 			secret->secret_map["token"] = named_param.second.ToString();
+		} else if (lower_name == "ssl_fingerprint") {
+			// validated here so a typo fails at CREATE SECRET rather than at the first connection
+			secret->secret_map["ssl_fingerprint"] = QuackUri::NormalizeFingerprint(named_param.second.ToString());
 		} else {
 			throw InvalidInputException("Unknown named parameter for quack secret: %s", lower_name);
 		}
@@ -70,6 +73,7 @@ static void RegisterQuackSecretType(ExtensionLoader &loader) {
 
 	CreateSecretFunction config_fun = {QuackSecret::TYPE, "config", CreateQuackSecretFromConfig};
 	config_fun.named_parameters["token"] = LogicalType::VARCHAR;
+	config_fun.named_parameters["ssl_fingerprint"] = LogicalType::VARCHAR;
 	loader.RegisterFunction(config_fun);
 }
 
@@ -140,6 +144,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(QuackCancelFunction::GetFunction());
 	loader.RegisterFunction(QuackStopFunction::GetFunction());
 	loader.RegisterFunction(QuackServerListFunction::GetFunction());
+	loader.RegisterFunction(QuackGenerateKeysFunction::GetFunction());
 	loader.RegisterFunction(QuackClearCacheFunction::GetFunction());
 	loader.RegisterFunction(GetQuackIdentifyFunction());
 	loader.RegisterFunction(QuacktivityFunction::GetFunction());

@@ -1,0 +1,161 @@
+# name: test/sql/serve_ssl.test
+# description: quack_serve over HTTPS: generated self-signed keys, and clients pinning the server certificate
+# group: [sql]
+
+require quack
+
+require httpfs
+
+statement ok
+SET quack_default_client_id='';
+
+# --- 1. quack_generate_keys writes a self-signed pair and reports its fingerprint ---
+
+statement ok
+set variable keys = (select {'cert': cert_file, 'key': key_file, 'fingerprint': fingerprint, 'status': status} from quack_generate_keys(directory => '{TEST_DIR}/quack_certs'));
+
+query II
+select getvariable('keys').status like 'Key files generated in %', length(replace(getvariable('keys').fingerprint, ':', ''));
+----
+true	64
+
+# a second call leaves the existing keys alone and reports the same fingerprint
+query II
+select fingerprint = getvariable('keys').fingerprint, status like 'Key file(s) exist in %' from quack_generate_keys(directory => '{TEST_DIR}/quack_certs');
+----
+true	true
+
+# --- 2. serve over HTTPS with a checked-in pair (so the test can pin a literal fingerprint) ---
+# test/certs was made with quack_generate_keys; its fingerprint is 2B:31:...:EA (see server list below)
+
+statement ok
+set variable srv = (select {'uri': listen_uri, 'url': listen_url} from quack_serve('quack:localhost:0', disable_ssl => false, token => 'ssltoken', ssl_cert_file => 'test/certs/server.pem', ssl_key_file => 'test/certs/private_key.pem'));
+
+query I
+select getvariable('srv').url like 'https://localhost:%';
+----
+true
+
+query II
+select info['ssl'], info['ssl_fingerprint'] from quack_server_list();
+----
+true	2B:31:F0:0A:44:D3:E8:D0:5B:82:C4:0A:31:3D:EC:F2:31:01:1E:0A:3A:37:73:6B:50:99:BC:99:84:37:BC:EA
+
+# a plain-HTTP client (the localhost default) cannot talk to an HTTPS server
+statement error
+from quack_query(getvariable('srv').uri, 'select 42', token => 'ssltoken');
+----
+Failed to send message
+
+# --- 3. pinning: the client trusts exactly the certificate with this fingerprint ---
+
+query I
+from quack_query(getvariable('srv').uri, 'select 42', token => 'ssltoken', ssl_fingerprint => '2B:31:F0:0A:44:D3:E8:D0:5B:82:C4:0A:31:3D:EC:F2:31:01:1E:0A:3A:37:73:6B:50:99:BC:99:84:37:BC:EA');
+----
+42
+
+# case and separators do not matter, an optional sha256: prefix is accepted
+query I
+from quack_query(getvariable('srv').uri, 'select 42', token => 'ssltoken', ssl_fingerprint => 'sha256:2b31f00a44d3e8d05b82c40a313decf231011e0a3a37736b5099bc998437bcea');
+----
+42
+
+# any other certificate is rejected
+statement error
+from quack_query(getvariable('srv').uri, 'select 42', token => 'ssltoken', ssl_fingerprint => '0000000000000000000000000000000000000000000000000000000000000000');
+----
+does not match the pinned ssl_fingerprint
+
+statement error
+from quack_query(getvariable('srv').uri, 'select 42', token => 'ssltoken', ssl_fingerprint => 'not a fingerprint');
+----
+Invalid SSL fingerprint
+
+statement error
+from quack_query(getvariable('srv').uri, 'select 42', token => 'ssltoken', ssl_fingerprint => '2B:31:F0:0A:44:D3:E8:D0:5B:82:C4:0A:31:3D:EC:F2:31:01:1E:0A:3A:37:73:6B:50:99:BC:99:84:37:BC:EA', disable_ssl => true);
+----
+cannot be combined with disable_ssl
+
+# --- 4. ATTACH pins through an option ... ---
+
+statement ok
+attach getvariable('srv').uri as pinned (type quack, token 'ssltoken', ssl_fingerprint '2B:31:F0:0A:44:D3:E8:D0:5B:82:C4:0A:31:3D:EC:F2:31:01:1E:0A:3A:37:73:6B:50:99:BC:99:84:37:BC:EA');
+
+statement ok
+create table pinned.t as select 7 as v;
+
+query I
+from pinned.t;
+----
+7
+
+statement ok
+detach pinned;
+
+statement error
+attach getvariable('srv').uri as pinned (type quack, token 'ssltoken', ssl_fingerprint '1111111111111111111111111111111111111111111111111111111111111111');
+----
+does not match the pinned ssl_fingerprint
+
+# --- 5. ... or through the quack secret, which then also implies HTTPS ---
+
+statement ok
+create secret (type quack, token 'ssltoken', ssl_fingerprint '2B:31:F0:0A:44:D3:E8:D0:5B:82:C4:0A:31:3D:EC:F2:31:01:1E:0A:3A:37:73:6B:50:99:BC:99:84:37:BC:EA', scope 'quack:localhost');
+
+statement ok
+attach getvariable('srv').uri as pinned (type quack);
+
+query I
+from pinned.t;
+----
+7
+
+statement ok
+detach pinned;
+
+query I
+from quack_query(getvariable('srv').uri, 'select 8');
+----
+8
+
+statement ok
+drop secret __default_quack;
+
+statement error
+create secret (type quack, token 'ssltoken', ssl_fingerprint 'nope');
+----
+Invalid SSL fingerprint
+
+statement ok
+call quack_stop(getvariable('srv').uri);
+
+# --- 6. without key files, quack_serve generates the default pair under the home directory ---
+
+statement ok
+SET home_directory='{TEST_DIR}/quack_home';
+
+statement ok
+set variable srv = (select {'uri': listen_uri, 'url': listen_url} from quack_serve('quack:127.0.0.1:0', disable_ssl => false, token => 'ssltoken'));
+
+query I
+select getvariable('srv').url like 'https://127.0.0.1:%';
+----
+true
+
+query I
+select count(*) from glob('{TEST_DIR}/quack_home/.duckdb/extension_data/quack/*.pem');
+----
+2
+
+query I
+select info['ssl_fingerprint'] = (select fingerprint from quack_generate_keys(directory => '{TEST_DIR}/quack_home/.duckdb/extension_data/quack')) from quack_server_list();
+----
+true
+
+statement ok
+call quack_stop(getvariable('srv').uri);
+
+query I
+select count(*) from quack_server_list();
+----
+0

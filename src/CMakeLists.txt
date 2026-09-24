@@ -20,6 +20,7 @@ add_library(
   quack_secret.cpp
   quack_send_data.cpp
   quack_server.cpp
+  quack_ssl_key_generator.cpp
   quack_start_stop.cpp
   quack_storage.cpp
   quack_uri.cpp

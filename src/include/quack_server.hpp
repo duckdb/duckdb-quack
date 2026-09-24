@@ -159,6 +159,12 @@ public:
 		return uri;
 	}
 
+	//! SHA-256 fingerprint of the certificate served over HTTPS, empty for plain HTTP. Clients pin it
+	//! with ssl_fingerprint.
+	const string &SslFingerprint() const {
+		return ssl_fingerprint;
+	}
+
 	idx_t ActiveConnectionCount() {
 		std::lock_guard<std::mutex> lock(active_connections_mutex);
 		return active_connections.size();
@@ -187,6 +193,7 @@ protected:
 	std::priority_queue<CacheExpiryEntry, vector<CacheExpiryEntry>, CacheExpiresLater> cache_expiry_queue;
 
 	QuackUri uri;
+	string ssl_fingerprint;
 
 private:
 	bool RenewConnectionLease(const string &connection_id, const shared_ptr<QuackConnection> &connection);
@@ -201,7 +208,10 @@ private:
 
 class HttpQuackServer : public QuackServer {
 public:
-	HttpQuackServer(ClientContext &context_p, const QuackUri &uri_p, const string &token_p);
+	//! Listens over HTTPS when `uri_p.Ssl()`, using the PEM files given (both or neither); without them
+	//! the default self-signed pair in DuckDB's certificate directory is used, generated on first use.
+	HttpQuackServer(ClientContext &context_p, const QuackUri &uri_p, const string &token_p,
+	                const string &ssl_cert_file = string(), const string &ssl_key_file = string());
 
 	void StopAccepting() override;
 	void Close() override;
@@ -213,7 +223,7 @@ private:
 
 	unique_ptr<QuackMessage> ReadMessage(MemoryStream &read_stream);
 
-	unique_ptr<duckdb_httplib::Server> server;
+	unique_ptr<duckdb_httplib_openssl::Server> server;
 	mutex state_lock;
 	atomic<QuackServerState> server_state {QuackServerState::UNINITIALIZED};
 };

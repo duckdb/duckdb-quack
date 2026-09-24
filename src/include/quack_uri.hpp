@@ -29,6 +29,20 @@ public:
 	bool Ssl() const {
 		return ssl;
 	}
+	void SetSsl(bool ssl_p) {
+		ssl = ssl_p;
+	}
+	//! Normalized SHA-256 fingerprint of the one server certificate the client trusts (see
+	//! NormalizeFingerprint); empty means regular certificate verification.
+	const string &SslFingerprint() const {
+		return ssl_fingerprint;
+	}
+	void SetSslFingerprint(const string &fingerprint) {
+		ssl_fingerprint = NormalizeFingerprint(fingerprint);
+	}
+	//! Canonical form of a SHA-256 certificate fingerprint: 64 uppercase hex digits, no separators. Accepts
+	//! the colon-separated form `openssl x509 -fingerprint -sha256` prints, with or without a `sha256:` prefix.
+	static string NormalizeFingerprint(const string &fingerprint);
 	bool IPv6() const {
 		return ipv6;
 	}
@@ -36,7 +50,8 @@ public:
 		return StringUtil::Lower(host) == "localhost" || host == "127.0.0.1" || host == "::1";
 	}
 	bool operator==(const QuackUri &other) const {
-		return other.ssl == ssl && other.ipv6 == ipv6 && other.host == host && other.port == port && other.uri == uri;
+		return other.ssl == ssl && other.ipv6 == ipv6 && other.host == host && other.port == port && other.uri == uri &&
+		       other.ssl_fingerprint == ssl_fingerprint;
 	}
 	bool operator!=(const QuackUri &other) const {
 		return !(*this == other);
@@ -48,6 +63,7 @@ private:
 	string host;
 	uint16_t port; // default port!
 	string uri;
+	string ssl_fingerprint;
 };
 
 class QuackParseUriFunction {

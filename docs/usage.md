@@ -15,12 +15,15 @@ session can see (in-memory tables, attached files, schemas) becomes
 reachable over RPC.
 
 ```sql
--- HTTPS (default). Generates a self-signed cert on first use.
-CALL rpc_generate_keys();
-CALL rpc_start('quack:localhost');
+-- Plain HTTP: the default on localhost
+CALL quack_serve('quack:localhost');
 
--- Plain HTTP (no TLS)
-CALL rpc_start('quack:localhost', disable_ssl => true);
+-- HTTPS: the default on any other host. Generates a self-signed cert on first use.
+CALL quack_serve('quack:0.0.0.0', allow_other_hostname => true);
+
+-- HTTPS on localhost, with your own certificate
+CALL quack_serve('quack:localhost', disable_ssl => false,
+                 ssl_cert_file => '/etc/quack/server.pem', ssl_key_file => '/etc/quack/private_key.pem');
 ```
 
 `rpc_start` returns the listen URI, the HTTP(S) URL, and — when the
@@ -44,9 +47,34 @@ scalar function.
 
 ### TLS keys
 
-`rpc_generate_keys()` writes `server.pem`, `private_key.pem`, and
-`dh.pem` into DuckDB's default certificate directory. It is a no-op if
-keys already exist — delete them to regenerate.
+A server listens over HTTPS unless it is bound to localhost or started
+with `disable_ssl => true`. Without `ssl_cert_file`/`ssl_key_file` it
+uses the self-signed pair in DuckDB's certificate directory
+(`~/.duckdb/extension_data/quack/server.pem` and `private_key.pem`),
+generating it on first use. `quack_generate_keys(directory := ...)` does
+the same up front and returns the paths and the certificate's SHA-256
+fingerprint. It is a no-op if keys already exist — delete them to
+regenerate.
+
+Self-signed certificates do not verify against any CA, so clients
+authenticate the server by **pinning its certificate fingerprint**
+instead: pass `ssl_fingerprint` to `ATTACH`/`quack_query`, or store it in
+the quack secret. A pinned client trusts exactly the certificate with
+that fingerprint and nothing else. The running server's fingerprint is
+in the `info` map of `quack_server_list()`, or from
+`openssl x509 -in server.pem -noout -fingerprint -sha256`.
+
+```sql
+-- server side
+FROM quack_generate_keys();          -- prints the fingerprint
+CALL quack_serve('quack:0.0.0.0', allow_other_hostname => true);
+
+-- client side: pin per connection ...
+ATTACH 'quack:myhost' AS r (ssl_fingerprint '2B:31:F0:...:EA');
+-- ... or once, in the secret (implies HTTPS, even on localhost)
+CREATE SECRET (TYPE quack, token 'secret', ssl_fingerprint '2B:31:F0:...:EA', SCOPE 'quack:myhost');
+ATTACH 'quack:myhost' AS r;
+```
 
 ### Stopping a server
 
@@ -66,11 +94,11 @@ There are two ways to talk to an RPC server:
 Run any SQL against a remote server without mounting it:
 
 ```sql
--- Default: HTTPS
-FROM rpc_call('quack:localhost', 'SELECT 42');
+-- Plain HTTP: the default on localhost
+FROM quack_query('quack:localhost', 'SELECT 42');
 
--- Plain HTTP
-FROM rpc_call('quack:localhost', 'SELECT 42', disable_ssl => true);
+-- HTTPS: the default elsewhere; pin the server certificate to authenticate a self-signed server
+FROM quack_query('quack:myhost', 'SELECT 42', ssl_fingerprint => '2B:31:F0:...:EA');
 ```
 
 The query executes remotely and the result streams back. Errors from the
@@ -81,8 +109,8 @@ the client.
 
 ```sql
 ATTACH 'quack:localhost' AS rpc;
--- or without TLS:
-ATTACH 'quack:localhost' AS rpc (disable_ssl true);
+-- with TLS (the default for any host but localhost), pinning the server certificate:
+ATTACH 'quack:localhost' AS rpc (ssl_fingerprint '2B:31:F0:...:EA');
 -- with an explicit token, client id, and requested heartbeat lease:
 ATTACH 'quack:localhost' AS rpc (
     token 'super_secret', client_id 'my_client', heartbeat_timeout 30
@@ -136,15 +164,15 @@ SET rpc_default_token = '<token-from-rpc_start>';
 
 | Function                                     | Description                                               |
 |---------------------------------------------|-----------------------------------------------------------|
-| `rpc_start(uri, disable_ssl := false)`      | Start a server on `uri`. Returns listen URI, URL, token.  |
-| `rpc_stop(uri)`                             | Stop the server listening on `uri`.                       |
-| `rpc_generate_keys()`                       | Generate self-signed TLS keys in DuckDB's cert directory. |
+| `quack_serve(uri, disable_ssl, ssl_cert_file, ssl_key_file, ...)` | Start a server on `uri`. Returns listen URI, URL, token. HTTPS unless on localhost or `disable_ssl`. |
+| `quack_stop(uri)`                           | Stop the server listening on `uri`.                       |
+| `quack_generate_keys(directory)`            | Generate self-signed TLS keys (default: DuckDB's cert directory); returns paths and fingerprint. |
 
 ### Client queries
 
 | Function                                         | Description                                                                 |
 |-------------------------------------------------|-----------------------------------------------------------------------------|
-| `rpc_call(uri, query, disable_ssl := false)`    | Run `query` on remote `uri`, stream result back.                            |
+| `quack_query(uri, query, disable_ssl, ssl_fingerprint, ...)` | Run `query` on remote `uri`, stream result back.                |
 | `rpc_call_by_name(catalog, query)`              | Run `query` against an already-attached RPC catalog (used by `db.call()`). |
 
 ### Utility
@@ -159,7 +187,8 @@ SET rpc_default_token = '<token-from-rpc_start>';
 
 | Option              | Type    | Default                               | Description                                                                                                                                                                                                                                                                                                                                                                                                  |
 |---------------------|---------|---------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `disable_ssl`       | BOOLEAN | `false`                               | Use plain HTTP instead of HTTPS.                                                                                                                                                                                                                                                                                                                                                                             |
+| `disable_ssl`       | BOOLEAN | `true` on localhost, else `false`     | Use plain HTTP instead of HTTPS.                                                                                                                                                                                                                                                                                                                                                                             |
+| `ssl_fingerprint`   | VARCHAR | *(from the quack secret, if any)*     | SHA-256 fingerprint of the server certificate to trust, and nothing else. Implies HTTPS. Falls back to the `ssl_fingerprint` of the quack secret.                                                                                                                                                                                                                                                             |
 | `secret`            | VARCHAR | *(the default quack secret)*          | Name of the `quack` secret to use. Its token authenticates the connection, and its scope supplies the endpoint when the attached path is a bare `quack:`. Cannot be combined with `token`.                                                                                                                                                                                                                     |
 | `token`             | VARCHAR | quack secret / `rpc_default_token`    | Auth token sent to the server; overrides any matching quack secret.                                                                                                                                                                                                                                                                                                                                          |
 | `client_id`         | VARCHAR | `quack_default_client_id`             | Opaque client identifier; must be empty or at least 4 characters. Defaults to the `quack_default_client_id` setting when omitted — pass `''` to opt a single connection out. The server derives a stable per-client hash `HMAC-SHA256(server_hmac_key, client_id)` (keyed with a private per-server key, so it is not reproducible by clients), exposed as `client_id_hash` in `quack_active_connections()`. |

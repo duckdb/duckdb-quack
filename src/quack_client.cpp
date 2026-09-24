@@ -5,6 +5,11 @@
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 
+#include <openssl/ssl.h>
+#include <openssl/x509.h>
+
+#include "quack_ssl_key_generator.hpp"
+
 #include "quack_client.hpp"
 #include "quack_secret.hpp"
 #include "quack_session_state.hpp"
@@ -177,7 +182,99 @@ unique_ptr<QuackMessage> HttpsQuackClient::RequestInternal(optional_ptr<ClientCo
 	return response_message;
 }
 
+PinnedHttpsQuackClient::PinnedHttpsQuackClient(DatabaseInstance &db, const QuackUri &uri_p) : QuackClient(db, uri_p) {
+	D_ASSERT(uri.Ssl() && !uri.SslFingerprint().empty());
+	https_client = make_uniq<duckdb_httplib_openssl::Client>(uri.Http());
+	// The pin is the whole trust decision: accept exactly the certificate with this fingerprint, reject
+	// anything else. Accepting here also skips the CA and hostname checks, which a self-signed
+	// certificate cannot pass anyway.
+	auto expected_fingerprint = uri.SslFingerprint();
+	https_client->set_session_verifier([expected_fingerprint](duckdb_httplib_openssl::tls::session_t session)
+	                                       -> duckdb_httplib_openssl::SSLVerifierResponse {
+		auto ssl = static_cast<SSL *>(session);
+		auto cert = SSL_get1_peer_certificate(ssl);
+		if (!cert) {
+			return duckdb_httplib_openssl::SSLVerifierResponse::CertificateRejected;
+		}
+		auto fingerprint = QuackUri::NormalizeFingerprint(SslKeyGenerator::CertificateFingerprint(cert));
+		X509_free(cert);
+		return fingerprint == expected_fingerprint ? duckdb_httplib_openssl::SSLVerifierResponse::CertificateAccepted
+		                                           : duckdb_httplib_openssl::SSLVerifierResponse::CertificateRejected;
+	});
+	https_client->set_keep_alive(true);
+	https_client->set_tcp_nodelay(true);
+	// Same knob the httpfs transport honors, so a caller that raised http_timeout for long requests
+	// gets the same bound here (seconds).
+	Value timeout_val;
+	if (db.TryGetCurrentSetting("http_timeout", timeout_val) && !timeout_val.IsNull()) {
+		auto timeout_seconds = NumericCast<time_t>(timeout_val.GetValue<uint64_t>());
+		https_client->set_connection_timeout(timeout_seconds, 0);
+		https_client->set_read_timeout(timeout_seconds, 0);
+		https_client->set_write_timeout(timeout_seconds, 0);
+	}
+}
+
+PinnedHttpsQuackClient::~PinnedHttpsQuackClient() {
+}
+
+void PinnedHttpsQuackClient::PrepareTeardownRequest() {
+	// see HttpsQuackClient::EnsureHttpParams: the final DisconnectMessage must not hang on a dead peer
+	https_client->set_connection_timeout(2, 0);
+	https_client->set_read_timeout(2, 0);
+	https_client->set_write_timeout(2, 0);
+}
+
+string PinnedHttpsQuackClient::PostRawLocked(const_data_ptr_t data, idx_t size) {
+	auto result = https_client->Post("/quack", const_char_ptr_cast(data), size, "application/vnd.duckdb");
+	if (!result) {
+		auto error = result.error();
+		if (error == duckdb_httplib_openssl::Error::SSLServerVerification) {
+			throw IOException("Failed to send message: the certificate presented by %s does not match the pinned "
+			                  "ssl_fingerprint",
+			                  uri.Http());
+		}
+		throw IOException("Failed to send message: %s error for HTTP POST to '%s/quack'",
+		                  duckdb_httplib_openssl::to_string(error), uri.Http());
+	}
+	if (result->status != 200) {
+		throw IOException("Failed to send message: HTTP %d for HTTP POST to '%s/quack'", result->status, uri.Http());
+	}
+	return std::move(result->body);
+}
+
+string PinnedHttpsQuackClient::PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size) {
+	lock_guard<mutex> guard(request_mutex);
+	return PostRawLocked(data, size);
+}
+
+unique_ptr<QuackMessage> PinnedHttpsQuackClient::RequestInternal(optional_ptr<ClientContext> context,
+                                                                 unique_ptr<QuackMessage> request_message) {
+	D_ASSERT(request_message);
+
+	lock_guard<mutex> guard(request_mutex);
+
+	auto start_time = QuackNowMillis();
+	EncodeRequest(context, *request_message, write_stream);
+	auto response_body = PostRawLocked(write_stream.GetData(), write_stream.GetPosition());
+	auto response_message = DecodeResponse(response_body);
+	auto duration_ms = QuackNowMillis() - start_time;
+
+	string error;
+	if (response_message->Type() == MessageType::ERROR_RESPONSE) {
+		error = response_message->Cast<ErrorResponse>().ErrorMessage();
+	}
+	LogRequest(GetRequestLogger(context), request_message->Type(), request_message->ConnectionId(),
+	           request_message->ClientQueryId(), request_message->LoggableQuery(), duration_ms,
+	           response_message->Type(), error);
+
+	return response_message;
+}
+
 unique_ptr<QuackClient> QuackClient::GetClient(DatabaseInstance &db, const QuackUri &uri) {
+	if (uri.Ssl() && !uri.SslFingerprint().empty()) {
+		// pinned: our own TLS client, nothing from httpfs is involved
+		return make_uniq<PinnedHttpsQuackClient>(db, uri);
+	}
 	ExtensionHelper::AutoLoadExtension(db, "httpfs");
 	if (!db.ExtensionIsLoaded("httpfs")) {
 		throw MissingExtensionException("The rpc extension requires the httpfs extension to be loaded!");
@@ -283,11 +380,21 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 	// rejected here regardless of where it came from.
 	ValidateClientId(client_id);
 	ValidateHeartbeatTimeout(heartbeat_timeout_seconds);
-	// if no token is provided fetch it from the secret manager
-	if (token.empty()) {
+	// whatever the caller did not supply comes from the secret manager: the token, and the pinned server
+	// certificate fingerprint
+	auto server_uri = uri;
+	if (token.empty() || server_uri.SslFingerprint().empty()) {
 		auto secret = QuackSecret::Find(context, nullptr, uri.Uri());
 		if (secret) {
-			token = QuackSecret::GetToken(*secret);
+			if (token.empty()) {
+				token = QuackSecret::GetToken(*secret);
+			}
+			string secret_fingerprint;
+			if (server_uri.SslFingerprint().empty() && QuackSecret::TryGetSslFingerprint(*secret, secret_fingerprint)) {
+				// a pin only makes sense over TLS, so it turns HTTPS on
+				server_uri.SetSslFingerprint(secret_fingerprint);
+				server_uri.SetSsl(true);
+			}
 		}
 	}
 	if (token.empty()) {
@@ -295,7 +402,7 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 	}
 
 	// open a HTTP client to the server
-	auto client = QuackClient::GetClient(context, uri);
+	auto client = QuackClient::GetClient(context, server_uri);
 
 	// submit the connection request
 	auto connection_request_response = client->Request<ConnectionResponseMessage>(
@@ -312,8 +419,9 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 	// Cache at most one client per async send slot: pending SEND_DATA tasks can check out far more
 	// clients than ever POST concurrently, and each cached client pins a server connection slot.
 	idx_t pool_size = MaxValue<idx_t>(1, (idx_t)TaskScheduler::GetScheduler(context).NumberOfAsyncThreads());
-	auto connection = make_shared_ptr<QuackClientConnection>(
-	    *context.db, std::move(client), uri, std::move(connection_id), accepted_heartbeat_timeout_seconds, pool_size);
+	auto connection =
+	    make_shared_ptr<QuackClientConnection>(*context.db, std::move(client), server_uri, std::move(connection_id),
+	                                           accepted_heartbeat_timeout_seconds, pool_size);
 	connection->StartHeartbeat();
 	return connection;
 }

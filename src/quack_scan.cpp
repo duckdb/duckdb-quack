@@ -29,12 +29,27 @@ static unique_ptr<FunctionData> QuackScanBind(ClientContext &context, TableFunct
 
 	// no ssl on local by default
 	auto enable_ssl = !initial_uri.IsLocal();
-	if (input.named_parameters.find("disable_ssl") != input.named_parameters.end()) {
-		enable_ssl = !input.named_parameters["disable_ssl"].GetValue<bool>();
+	auto disable_ssl_entry = input.named_parameters.find("disable_ssl");
+	if (disable_ssl_entry != input.named_parameters.end()) {
+		enable_ssl = !disable_ssl_entry->second.GetValue<bool>();
+	}
+	// a pinned server certificate turns HTTPS on; the secret's pin (if any) is applied in ConnectToServer
+	string ssl_fingerprint;
+	auto fingerprint_entry = input.named_parameters.find("ssl_fingerprint");
+	if (fingerprint_entry != input.named_parameters.end() && !fingerprint_entry->second.IsNull()) {
+		ssl_fingerprint = fingerprint_entry->second.ToString();
+		if (!enable_ssl && disable_ssl_entry != input.named_parameters.end()) {
+			throw InvalidInputException("ssl_fingerprint pins the server's TLS certificate and cannot be combined "
+			                            "with disable_ssl");
+		}
+		enable_ssl = true;
 	}
 
 	auto bind_data = make_uniq<QuackScanBindData>();
 	auto server_uri = QuackUri(initial_uri.Uri(), enable_ssl);
+	if (!ssl_fingerprint.empty()) {
+		server_uri.SetSslFingerprint(ssl_fingerprint);
+	}
 
 	// Resolve auth token: prefer a quack secret scoped to this URI; fall back to the
 	// global rpc_default_token setting. Mirrors the logic in QuackCatalog::QuackCatalog.
@@ -476,6 +491,7 @@ TableFunction QuackScanFunction::GetFunction() {
 	auto fun = TableFunction("quack_query", {LogicalType::VARCHAR, LogicalType::VARCHAR}, QuackScan, QuackScanBind,
 	                         QuackScanInitGlobal, QuackScanInitLocal);
 	fun.named_parameters["disable_ssl"] = LogicalType::BOOLEAN;
+	fun.named_parameters["ssl_fingerprint"] = LogicalType::VARCHAR;
 	fun.named_parameters["token"] = LogicalType::VARCHAR;
 	fun.named_parameters["client_id"] = LogicalType::VARCHAR;
 	fun.named_parameters["heartbeat_timeout"] = LogicalType::UBIGINT;
