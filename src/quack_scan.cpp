@@ -486,6 +486,9 @@ TableFunction QuackScanFunction::GetFunction() {
 	fun.serialize = QuackScanSerialize;
 	fun.deserialize = QuackScanDeserialize;
 	fun.get_bind_info = QuackScanGetBindInfo;
+	// Filters would cross as SQL text and be bound in the server's session, so settings like
+	// integer_division or default_collation would decide what they mean:
+	// https://github.com/duckdb/duckdb/discussions/25579
 	// fun.filter_pushdown = true;
 	// fun.filter_prune = true;
 	return fun;
@@ -502,6 +505,9 @@ TableFunction QuackScanByNameFunction::GetFunction() {
 	fun.get_bind_info = QuackScanGetBindInfo;
 	fun.named_parameters["use_transaction"] = LogicalType::BOOLEAN;
 	fun.named_parameters["refresh_catalog"] = LogicalType::BOOLEAN;
+	// Filters would cross as SQL text and be bound in the server's session, so settings like
+	// integer_division or default_collation would decide what they mean:
+	// https://github.com/duckdb/duckdb/discussions/25579
 	// fun.filter_pushdown = true;
 	// fun.filter_prune = true;
 	return fun;
