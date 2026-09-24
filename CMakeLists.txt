@@ -8,10 +8,12 @@ set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 
 project(${TARGET_NAME})
 
-#set(CMAKE_CXX_STANDARD 17)
+# set(CMAKE_CXX_STANDARD 17)
 
-include_directories(src/include duckdb/third_party/httplib duckdb/extension/autocomplete/include
-                    duckdb/third_party/mbedtls/include)
+include_directories(
+  src/include duckdb/third_party/httplib duckdb/extension/autocomplete/include
+  duckdb/third_party/mbedtls/include)
+
 add_subdirectory(src)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
