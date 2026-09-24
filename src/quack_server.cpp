@@ -19,7 +19,7 @@
 #include "quack_random.hpp"
 #include "quack_result_cache.hpp"
 #include "quack_storage.hpp"
-#include "quack_insert_stream.hpp"
+#include "quack_session_state.hpp"
 #include "quack_fetch_collector.hpp"
 #include "quack_rebalancer_sink.hpp"
 
@@ -401,7 +401,7 @@ string QuackServer::CreateNewConnection(const string &session_id, const string &
 	new_connection->duckdb_connection = make_uniq<Connection>(*db);
 	auto &connection_context = *new_connection->duckdb_connection->context;
 	// scan_data_from_quack_client registers its streams here, and SEND_DATA finds them by connection.
-	connection_context.registered_state->Insert(QuackSessionState::KEY, make_shared_ptr<QuackSessionState>());
+	connection_context.registered_state->Insert(QuackSessionState::KEY, make_shared_ptr<QuackSessionState>(session_id));
 	connection_context.config.enable_progress_bar = false;
 	// new_connection->duckdb_connection->context->config.streaming_buffer_size = 10 * 1000000; // 10 MB
 	active_connections[session_id] = std::move(new_connection);

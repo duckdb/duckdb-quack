@@ -1,0 +1,67 @@
+# name: test/sql/connect_transactions.test
+# description: once CONNECT-ed, BEGIN/COMMIT/ROLLBACK are forwarded verbatim and are the remote's to decide
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok
+attach {server} as q (token 'asdf')
+
+statement ok
+CONNECT q;
+
+# BEGIN is shipped as-is. It used to land inside a synthesized per-statement transaction,
+# so the remote refused it (and the matching COMMIT/ROLLBACK arrived after that transaction
+# had already closed).
+statement ok
+BEGIN;
+
+statement ok
+CREATE TABLE connect_tx(i INT);
+
+statement ok
+INSERT INTO connect_tx VALUES (42);
+
+# the open remote transaction sees its own uncommitted rows
+query I
+SELECT i FROM connect_tx;
+----
+42
+
+statement ok
+ROLLBACK;
+
+# the rollback was the remote's: the table never landed
+statement error
+SELECT i FROM connect_tx;
+----
+connect_tx
+
+# ... and a committed one does land
+statement ok
+BEGIN;
+
+statement ok
+CREATE TABLE connect_tx(i INT);
+
+statement ok
+INSERT INTO connect_tx VALUES (7);
+
+statement ok
+COMMIT;
+
+query I
+SELECT i FROM connect_tx;
+----
+7
+
+statement ok
+DROP TABLE connect_tx;
+
+statement ok
+DISCONNECT;
+
+statement ok
+detach q;
+
+include test/template/quack_teardown.test_template

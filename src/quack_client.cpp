@@ -7,6 +7,7 @@
 
 #include "quack_client.hpp"
 #include "quack_secret.hpp"
+#include "quack_session_state.hpp"
 #include "quack_uri.hpp"
 
 namespace duckdb {
@@ -339,6 +340,15 @@ unique_ptr<QuackClientWrapper> QuackClientConnection::GetClient(ClientContext &c
 		    "The Quack server at %s invalidated its database, so this attached database is gone with it. The "
 		    "server has to be restarted; DETACH and ATTACH again to use it afterwards.",
 		    uri.Uri());
+	}
+	// An in-process server shares the attached catalogs with its clients. A statement it runs for connection X
+	// must not send a request over X: it would supersede itself and hang.
+	if (auto session_state = QuackSessionState::Get(context)) {
+		if (session_state->ConnectionId() == connection_id) {
+			throw InvalidInputException("A statement cannot route back through its own connection (database %s is "
+			                            "attached through the connection this statement runs for)",
+			                            uri.Uri());
+		}
 	}
 	auto result = TakeClient(context);
 	return make_uniq<QuackClientWrapper>(std::move(result), shared_from_this());

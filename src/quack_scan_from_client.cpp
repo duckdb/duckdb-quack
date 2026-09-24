@@ -10,6 +10,7 @@
 
 #include "quack_fetch_collector.hpp"
 #include "quack_insert_stream.hpp"
+#include "quack_session_state.hpp"
 
 namespace duckdb {
 
