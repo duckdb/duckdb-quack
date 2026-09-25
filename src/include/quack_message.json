@@ -32,9 +32,27 @@
         "name": "message",
         "type": "string",
         "serialize_property": "error.RawMessage()"
+      },
+      {
+        "id": 2,
+        "name": "exception_type",
+        "type": "string",
+        "serialize_property": "ExceptionTypeName()"
+      },
+      {
+        "id": 3,
+        "name": "extra_info",
+        "type": "unordered_map<string, string>",
+        "serialize_property": "TransferableExtraInfo()"
+      },
+      {
+        "id": 4,
+        "name": "must_invalidate",
+        "type": "bool"
       }
     ],
-    "constructor": ["message"]
+    "constructor": ["message", "exception_type", "extra_info", "must_invalidate"],
+    "constructor_method": "ErrorResponse::FromWire"
   },
   {
     "class": "PrepareRequestMessage",
@@ -48,6 +66,12 @@
         "id": 2,
         "name": "query_uuid",
         "type": "hugeint_t"
+      },
+      {
+        "id": 3,
+        "name": "inline_rows",
+        "type": "optional_idx",
+        "default": "optional_idx()"
       }
     ]
   },
@@ -58,6 +82,18 @@
         "id": 1,
         "name": "uuid",
         "type": "hugeint_t"
+      },
+      {
+        "id": 2,
+        "name": "batch_index",
+        "type": "idx_t",
+        "default": 0
+      },
+      {
+        "id": 3,
+        "name": "ack_index",
+        "type": "idx_t",
+        "default": 0
       }
     ]
   },
@@ -105,48 +141,24 @@
     "members": [
       {
         "id": 1,
-        "name": "schema_name",
+        "name": "stream_id",
         "type": "string"
       },
       {
         "id": 2,
-        "name": "table_name",
-        "type": "string"
+        "name": "chunk_count",
+        "type": "idx_t",
+        "default": 0
       },
       {
         "id": 3,
-        "name": "chunks",
-        "type": "vector<unique_ptr<DataChunkWrapper>>"
-      },
-      {
-        "id": 4,
-        "name": "query_uuid",
-        "type": "hugeint_t"
-      },
-      {
-        "id": 5,
-        "name": "batch_index",
-        "type": "optional_idx"
-      },
-      {
-        "id": 6,
-        "name": "sequence_index",
-        "type": "idx_t"
-      },
-      {
-        "id": 7,
-        "name": "is_last_in_batch",
-        "type": "bool"
-      },
-      {
-        "id": 8,
-        "name": "batch_watermark",
+        "name": "total_batches",
         "type": "optional_idx",
         "default": "optional_idx()"
       },
       {
-        "id": 9,
-        "name": "dead_range_end",
+        "id": 4,
+        "name": "batch_index",
         "type": "optional_idx",
         "default": "optional_idx()"
       }
@@ -163,33 +175,25 @@
     ]
   },
   {
-    "class": "FinalizeMessage",
-    "members": [
-      {
-        "id": 1,
-        "name": "query_uuid",
-        "type": "hugeint_t"
-      },
-      {
-        "id": 2,
-        "name": "min_batch_watermark",
-        "type": "optional_idx",
-        "default": "optional_idx()"
-      }
-    ]
-  },
-  {
     "class": "FetchResponseMessage",
     "members": [
       {
         "id": 1,
-        "name": "results",
-        "type": "vector<unique_ptr<DataChunkWrapper>>"
+        "name": "chunk_count",
+        "type": "idx_t",
+        "default": 0
       },
       {
         "id": 2,
+        "name": "total_batches",
+        "type": "optional_idx",
+        "default": "optional_idx()"
+      },
+      {
+        "id": 3,
         "name": "batch_index",
-        "type": "optional_idx"
+        "type": "optional_idx",
+        "default": "optional_idx()"
       }
     ]
   },
@@ -235,6 +239,11 @@
         "id": 6,
         "name": "client_id",
         "type": "string"
+      },
+      {
+        "id": 7,
+        "name": "heartbeat_timeout_seconds",
+        "type": "idx_t"
       }
     ]
   },
@@ -255,11 +264,27 @@
         "id": 3,
         "name": "quack_version",
         "type": "idx_t"
+      },
+      {
+        "id": 4,
+        "name": "heartbeat_timeout_seconds",
+        "type": "idx_t"
       }
     ]
   },
   {
-    "class": "AcknowledgementMessage",
+    "class": "HeartbeatRequestMessage",
     "members": []
+  },
+  {
+    "class": "AcknowledgementMessage",
+    "members": [
+      {
+        "id": 1,
+        "name": "query_uuid",
+        "type": "hugeint_t",
+        "default": "hugeint_t(0, 0)"
+      }
+    ]
   }
 ]

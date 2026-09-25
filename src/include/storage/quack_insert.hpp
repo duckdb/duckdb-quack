@@ -11,15 +11,9 @@
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/common/index_vector.hpp"
 
-namespace duckdb {
+#include "quack_rebalancer_sink.hpp"
 
-//! How an INSERT preserves source order when uploading rows to the server.
-enum class AppendOrderMode : uint8_t {
-	UNORDERED,        //! preserve_insertion_order=false → fast path, no stamp.
-	PARALLEL_ORDERED, //! parallel thread executors (table/parquet scans); each thread stamps chunks with
-	                  //! (executor batch_index, sequence_index, is_last_in_batch); server reorders.
-	SERIAL_ORDERED    //! single-threaded sink (e.g. range()); the lone producer mints a new batch per flush.
-};
+namespace duckdb {
 
 class QuackInsert : public PhysicalOperator {
 public:

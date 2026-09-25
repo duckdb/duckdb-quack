@@ -1,0 +1,176 @@
+# name: test/sql/result_cache.test
+# description: server-side result cache (quack_enable_reconnects): gated on the setting, holds the last client query only, survives internal catalog traffic, cleared by the client's ACK, capped by quack_cache_max_rows, transparent to errors
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok quack_db:quack_server_con
+CREATE TABLE tbl AS SELECT range AS i FROM range(5);
+
+statement ok quack_db:quack_server_con
+CREATE TABLE tbl2 AS SELECT range AS i FROM range(7);
+
+statement ok quack_db:quack_server_con
+CREATE TABLE empty_t (i BIGINT);
+
+statement ok quack_db:quack_server_con
+CREATE TABLE big AS SELECT range AS i FROM range(300000);
+
+statement ok
+CREATE SECRET (TYPE quack, TOKEN 'asdf');
+
+statement ok
+ATTACH {server} AS remote;
+
+# --- caching disabled (default): nothing is retained ---
+
+query I
+SELECT i FROM remote.tbl ORDER BY i;
+----
+0
+1
+2
+3
+4
+
+query I quack_db:quack_server_con
+SELECT cached_rows FROM quack_active_connections();
+----
+NULL
+
+# --- server-side caching is the GLOBAL half of quack_enable_reconnects ---
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_enable_reconnects = true;
+
+# The client does not ack (its quack_enable_reconnects is off), so the result stays cached.
+query I
+SELECT i FROM remote.tbl ORDER BY i;
+----
+0
+1
+2
+3
+4
+
+query I quack_db:quack_server_con
+SELECT cached_rows FROM quack_active_connections();
+----
+5
+
+# Internal catalog/metadata traffic (query_uuid 0) must not displace the retained result.
+statement ok
+CALL quack_clear_cache();
+
+query I quack_db:quack_server_con
+SELECT cached_rows FROM quack_active_connections();
+----
+5
+
+# Only the last client query is retained.
+query I
+SELECT count(*) FROM remote.tbl2;
+----
+7
+
+query I quack_db:quack_server_con
+SELECT cached_rows IS NOT NULL AND cached_rows <> 5 FROM quack_active_connections();
+----
+true
+
+# An empty result is still a (zero-row) cached result; the plain projection avoids a 1-row aggregate pushdown.
+query I
+SELECT i FROM remote.empty_t;
+----
+
+query I quack_db:quack_server_con
+SELECT cached_rows FROM quack_active_connections();
+----
+0
+
+# --- the client's ACK clears the cache ---
+
+statement ok
+SET quack_enable_reconnects = true;
+
+query I
+SELECT i FROM remote.tbl ORDER BY i;
+----
+0
+1
+2
+3
+4
+
+query I quack_db:quack_server_con
+SELECT cached_rows FROM quack_active_connections();
+----
+NULL
+
+statement ok
+SET quack_enable_reconnects = false;
+
+# --- quack_cache_max_rows caps retention; larger results stream through uncached ---
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_cache_max_rows = 100;
+
+# Keep the quack_query session alive via a prepared statement so it stays inspectable.
+statement ok
+PREPARE p AS SELECT sum(i) FROM quack_query({server}, 'FROM big', token=>'asdf');
+
+# Over the cap the result is still correct and neither session (ATTACH acked clean, quack_query capped) retains rows.
+query I
+EXECUTE p;
+----
+44999850000
+
+query II quack_db:quack_server_con
+SELECT count(*), count(cached_rows) FROM quack_active_connections();
+----
+2	0
+
+# cap 0 = unlimited: a fresh prepared statement is fully retained (re-EXECUTE would not re-run the spent stream).
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_cache_max_rows = 0;
+
+statement ok
+PREPARE p2 AS SELECT sum(i) FROM quack_query({server}, 'FROM big', token=>'asdf');
+
+query I
+EXECUTE p2;
+----
+44999850000
+
+query I quack_db:quack_server_con
+SELECT max(cached_rows) FROM quack_active_connections();
+----
+300000
+
+statement ok
+DEALLOCATE p2;
+
+statement ok quack_db:quack_server_con
+RESET GLOBAL quack_cache_max_rows;
+
+# --- errors surface unchanged while caching is on ---
+
+# error at PREPARE time
+statement error
+SELECT * FROM quack_query({server}, 'SELECT error(''early boom'')', token=>'asdf');
+----
+early boom
+
+# error mid-stream, during a later FETCH: the errored tail is handed back and the cache dropped
+statement error
+SELECT count(*) FROM quack_query({server}, 'SELECT CASE WHEN i < 50000 THEN i ELSE error(''late boom'') END FROM range(60000) t(i)', token=>'asdf');
+----
+late boom
+
+statement ok
+DEALLOCATE p;
+
+statement ok
+DETACH remote;
+
+include test/template/quack_teardown.test_template

@@ -1,0 +1,34 @@
+# name: test/sql/fetch_error.test
+# description: a server-side execution error reaches the client with its own message
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+# the query fails before it seals a batch
+statement error
+SELECT * FROM quack_query({server}, 'SELECT CASE WHEN i >= 100 THEN error(''small boom'') ELSE i END FROM range(200) t(i)', token='asdf');
+----
+small boom
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_target_batch_bytes = 65536;
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_prepare_inline_rows = 1;
+
+statement ok quack_db:quack_server_con
+CREATE TABLE big AS SELECT range AS i, hash(range) AS pad FROM range(200000);
+
+# the query fails after PREPARE inlined a batch and the client fetched more
+statement error
+SELECT * FROM quack_query({server}, 'SELECT CASE WHEN i >= 150000 THEN error(''late boom'') ELSE i END AS i, pad FROM big', token='asdf');
+----
+late boom
+
+statement ok quack_db:quack_server_con
+RESET GLOBAL quack_target_batch_bytes;
+
+statement ok quack_db:quack_server_con
+RESET GLOBAL quack_prepare_inline_rows;
+
+include test/template/quack_teardown.test_template

@@ -1,0 +1,66 @@
+# name: test/sql/attach_computed_default.test
+# description: ATTACH must not fail when remote tables have computed DEFAULT expressions (issue #132)
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+foreach server 'quack:localhost'
+
+statement ok con1
+call quack_serve({server}, token='asdf');
+
+# constant default (always worked)
+statement ok con1
+create table t_const (x integer not null default 1);
+
+# computed defaults — previously aborted client ATTACH with "Catalog does not exist"
+statement ok con1
+create table t_expr (x integer not null default 1 + 0);
+
+statement ok con1
+create table t_ts (ts timestamptz default current_timestamp, v integer);
+
+statement ok con1
+insert into t_const default values;
+insert into t_expr default values;
+insert into t_ts (v) values (42);
+
+statement ok con2
+attach {server} as r (token 'asdf')
+
+# catalog must expose all three tables
+query I con2
+select count(*) from r.t_const
+----
+1
+
+query I con2
+select count(*) from r.t_expr
+----
+1
+
+query I con2
+select v from r.t_ts
+----
+42
+
+# remote INSERT DEFAULT still runs server-side
+statement ok con2
+insert into r.t_expr default values
+
+query I con2
+select count(*) from r.t_expr
+----
+2
+
+statement ok con2
+detach r
+
+statement ok con1
+call quack_stop({server})
+
+endloop

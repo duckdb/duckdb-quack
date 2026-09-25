@@ -65,15 +65,18 @@ from rpc.xxx.yyy;
 ----
 schema "xxx" does not exist
 
-# TODO
-# query II
-# from rpc.moo.fuu2;
-# ----
-# 42	43
-#
-#
-# statement ok
-# create schema rpc.fuuschema;
+query II
+from rpc.moo.fuu2;
+----
+44	45
+
+statement ok
+create schema rpc.fuuschema;
+
+query I
+select count(*) from duckdb_schemas() where database_name='rpc' and schema_name='fuuschema';
+----
+1
 
 statement ok
 begin transaction

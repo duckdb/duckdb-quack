@@ -1,0 +1,50 @@
+# name: test/sql/result_cache_spill.test
+# description: retained results must stay evictable
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok quack_db:quack_server_con
+CREATE TABLE t AS SELECT range AS i FROM range(100);
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_enable_reconnects = true;
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_result_ttl = 0;
+
+# A block is 256KB, so 100 caches that each pin one are 25MB
+statement ok quack_db:quack_server_con
+SET GLOBAL temp_directory = '__TEST_DIR__/quack_cache_spill';
+
+statement ok quack_db:quack_server_con
+SET GLOBAL memory_limit = '16MB';
+
+statement ok
+CREATE SECRET (TYPE quack, TOKEN 'asdf');
+
+# The client never acknowledges, so every connection keeps its result cached.
+statement ok
+SET quack_enable_reconnects = false;
+
+loop i 0 100
+
+statement ok
+ATTACH {server} AS c{i};
+
+query I
+SELECT count(*) FROM c{i}.t;
+----
+100
+
+endloop
+
+query I quack_db:quack_server_con
+SELECT count(cached_rows) FROM quack_active_connections();
+----
+100
+
+statement ok quack_db:quack_server_con
+RESET GLOBAL memory_limit;
+
+include test/template/quack_teardown.test_template

@@ -1,0 +1,66 @@
+# name: test/sql/self_connect.test
+# description: a statement the server runs must not route back through the connection it runs for
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+# The loop needs a server and a client in ONE database: the server's sessions then see the catalogs the client
+# attaches. quack_db:client_con is a second connection to the database that quack_server_con serves.
+statement ok quack_db:client_con
+create secret (type quack, token 'asdf')
+
+statement ok quack_db:client_con
+attach {server} as qk
+
+query I quack_db:client_con
+from quack_query_by_name('qk', 'select 42')
+----
+42
+
+# The server runs the outer statement for the connection that qk is attached through, and the inner statement
+# would send a PREPARE over that same connection. It used to supersede the outer statement and wedge the
+# session (every later request hung), so it is refused before it leaves.
+statement error quack_db:client_con
+from quack_query_by_name('qk', 'from quack_query_by_name(''qk'', ''select 43'')')
+----
+A statement cannot route back through its own connection
+
+# the session is still usable
+query I quack_db:client_con
+from quack_query_by_name('qk', 'select 44')
+----
+44
+
+# CONNECT to the database the statement is served from: the server session binds to its own client connection
+statement ok quack_db:client_con
+from quack_query_by_name('qk', 'connect qk')
+
+statement error quack_db:client_con
+from quack_query_by_name('qk', 'select 45')
+----
+A statement cannot route back through its own connection
+
+statement ok quack_db:client_con
+from quack_query_by_name('qk', 'disconnect')
+
+query I quack_db:client_con
+from quack_query_by_name('qk', 'select 46')
+----
+46
+
+# a plain reference to the catalog from a server statement is the same loop
+statement ok quack_db:quack_server_con
+create table t as select 1 as i
+
+statement ok quack_db:client_con
+call quack_clear_cache()
+
+statement error quack_db:client_con
+from quack_query_by_name('qk', 'select * from qk.t')
+----
+A statement cannot route back through its own connection
+
+query I quack_db:client_con
+from quack_query_by_name('qk', 'select 47')
+----
+47

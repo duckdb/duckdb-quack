@@ -9,9 +9,7 @@
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/parallel/async_result.hpp"
 
-#include <condition_variable>
-#include <map>
-
+#include "quack_claim_buffer.hpp"
 #include "quack_client.hpp"
 
 namespace duckdb {
@@ -27,45 +25,6 @@ enum class QuackFetchResult : uint8_t {
 	FINISHED,
 	//! Batch not ready; the scan yielded via input.async_result and will be rescheduled.
 	BLOCKED
-};
-
-//! Claim-based delivery: FETCH batch indices are dense, so each scan thread claims the next index and
-//! waits for exactly that batch — per-thread order is monotone; downstream sinks reassemble global order.
-class QuackFetchBuffer {
-public:
-	enum class PopStatus : uint8_t {
-		BATCH,
-		EMPTY,
-		FINISHED,
-		ERRORED,
-	};
-
-	//! Claim the next batch index to consume; each index gets exactly one claimant.
-	idx_t ClaimBatch();
-	//! Publish a decoded batch under its server-assigned index.
-	void PushBatch(idx_t batch_index, vector<unique_ptr<DataChunk>> chunks);
-	//! Pop the claimed batch if present. FINISHED means the stream ended and the claim can never arrive.
-	PopStatus TryPopClaimed(idx_t claim, vector<unique_ptr<DataChunk>> &chunks_out);
-	//! Register a per-claim wake event; nullptr when the claim is already poppable (caller retries).
-	shared_ptr<ReadAheadJobCompletion> RegisterWaiter(idx_t claim);
-	//! Block until the claimed batch arrives, the stream ends, or a short timeout elapses.
-	void WaitForBatch(idx_t claim);
-
-	void Finish();
-	void SetError(ErrorData error_p);
-	ErrorData GetError();
-
-private:
-	annotated_mutex lock;
-	std::condition_variable cv;
-	idx_t next_claim DUCKDB_GUARDED_BY(lock) = 1;
-	//! batch_index -> decoded chunks, awaiting its claimant.
-	std::map<idx_t, vector<unique_ptr<DataChunk>>> batches DUCKDB_GUARDED_BY(lock);
-	//! batch_index -> wake event for the parked claimant; publishing that index fires exactly this one.
-	std::map<idx_t, shared_ptr<ReadAheadJobCompletion>> waiters DUCKDB_GUARDED_BY(lock);
-	bool finished DUCKDB_GUARDED_BY(lock) = false;
-	bool errored DUCKDB_GUARDED_BY(lock) = false;
-	ErrorData error DUCKDB_GUARDED_BY(lock);
 };
 
 //! Client-side FETCH read-ahead: keeps up to `depth` fetches in flight on the ASYNC pool so scan
@@ -90,10 +49,14 @@ public:
 	void StopAndDrain();
 
 private:
-	//! Register fetch tasks until in-flight + buffered batches reach `depth`.
-	void TopUp();
+	//! Register fetch tasks until the batches in flight and in the buffer reach `depth`. Each task
+	//! names its batch and holds its own payload, so a transport retry asks for the SAME batch.
+	void TopUp(ClientContext &context);
 	//! Account one popped batch and refill the pipeline.
-	void BatchConsumed();
+	void BatchConsumed(ClientContext &context);
+	void RecordReceived(idx_t index);
+	//! The highest index for which all of 1..ack arrived. The server can drop the batches below it.
+	idx_t CurrentAck();
 	//! Return a checked-out client to the idle stack.
 	void ReturnClient(unique_ptr<QuackClientWrapper> client);
 	//! Task epilogue: recycle the client, settle counters, finish the buffer after the last fetch.
@@ -102,9 +65,7 @@ private:
 private:
 	unique_ptr<ManagedAsyncTaskQueue> queue;
 	shared_ptr<QuackFetchBuffer> buffer;
-	//! The FETCH request bytes, encoded once; identical for every fetch of the query.
-	unique_ptr<MemoryStream> payload;
-	idx_t payload_size = 0;
+	hugeint_t query_uuid;
 	string connection_id;
 	optional_idx client_query_id;
 	//! Context logger captured on the creating thread; pool threads have no ClientContext.
@@ -119,9 +80,17 @@ private:
 	//! In-flight fetches + buffered batches not yet popped; bounded by depth.
 	atomic<idx_t> outstanding {0};
 	atomic<idx_t> in_flight {0};
+	//! The next index to request. Requests go out in dense order, as the scan threads claim them.
+	atomic<idx_t> next_request {1};
+	//! The contiguous prefix of these is the ack the client sends to the server.
+	mutex ack_lock;
+	QuackDenseIndexSet acked;
 	atomic<bool> stop {false};
 	//! Set on the first empty FETCH response; no further fetches are issued.
 	atomic<bool> no_more_fetches {false};
+	//! The total the terminal FETCH response announced, INVALID_INDEX until it arrives. Finish reads
+	//! it, so a short stream errors instead of truncating.
+	atomic<uint64_t> expected_total {DConstants::INVALID_INDEX};
 };
 
 } // namespace duckdb

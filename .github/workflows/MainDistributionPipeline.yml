@@ -12,26 +12,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Pin the duckdb build to the commit our submodule references (.github/duckdb-version), instead of
-  # tracking duckdb main — otherwise upstream-main API drift breaks CI on changes unrelated to this repo.
-  get-duckdb-version:
-    name: Get DuckDB version
-    runs-on: ubuntu-latest
-    outputs:
-      duckdb_version: ${{ steps.version.outputs.duckdb_version }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          sparse-checkout: .github
-      - id: version
-        run: echo "duckdb_version=$(cat .github/duckdb-version)" >> $GITHUB_OUTPUT
+  duckdb-submodule-version:
+    uses: duckdb/extension-ci-tools/.github/workflows/_submodule_version.yml@main
 
   duckdb-stable-build:
     name: Build extension binaries
-    needs: get-duckdb-version
+    needs: duckdb-submodule-version
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
     with:
-      duckdb_version: ${{ needs.get-duckdb-version.outputs.duckdb_version }}
+      duckdb_version: ${{ needs.duckdb-submodule-version.outputs.version }}
       ci_tools_version: main
       extension_name: quack
       # Export QUACK_CLIENT_ID so quack_default_client_id_env.test (require-env gated) runs instead of skipping.
@@ -39,10 +28,30 @@ jobs:
 
   code-quality-check:
     name: Code Quality Check
-    needs: get-duckdb-version
+    needs: duckdb-submodule-version
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@main
     with:
-      duckdb_version: ${{ needs.get-duckdb-version.outputs.duckdb_version }}
+      duckdb_version: ${{ needs.duckdb-submodule-version.outputs.version }}
       ci_tools_version: main
       extension_name: quack
       format_checks: 'format'
+
+  check-protocol-version:
+    name: Check protocol & QUACK_VERSION
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need full history to diff against origin/main
+
+      - name: Compare schema and QUACK_VERSION against main
+        run: |
+          git fetch origin main
+          schema_changed=$(git diff origin/main -- src/include/quack_message.json)
+          version_changed=$(git diff origin/main -- src/include/quack_message.hpp | grep -c "QUACK_VERSION" || true)
+
+          if [[ -n "$schema_changed" && "$version_changed" -eq 0 ]]; then
+            echo "::error::quack_messages.json changed vs main, but QUACK_VERSION was not bumped in quack_message.hpp."
+            exit 1
+          fi

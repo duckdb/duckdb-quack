@@ -31,7 +31,7 @@ struct QuackCancelBindData : FunctionData {
 };
 
 static unique_ptr<FunctionData> QuackCancelBind(ClientContext &context, TableFunctionBindInput &input,
-                                                vector<LogicalType> &return_types, vector<string> &names) {
+                                                vector<LogicalType> &return_types, vector<Identifier> &names) {
 	if (input.inputs[0].IsNull() || input.inputs[1].IsNull()) {
 		throw BinderException("quack_cancel arguments cannot be NULL");
 	}
@@ -60,9 +60,9 @@ static void QuackCancelScan(ClientContext &, TableFunctionInput &input, DataChun
 		return;
 	}
 	data.finished = true;
-	output.SetValue(0, 0, data.target_connection_id);
-	output.SetValue(1, 0, Value::BOOLEAN(data.cancelled));
-	output.SetCardinality(1);
+	output.data[0].SetValue(0, data.target_connection_id);
+	output.data[1].SetValue(0, Value::BOOLEAN(data.cancelled));
+	output.SetChildCardinality(1);
 }
 
 TableFunction QuackCancelFunction::GetFunction() {

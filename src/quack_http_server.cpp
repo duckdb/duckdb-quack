@@ -1,10 +1,12 @@
 #include "duckdb/common/serializer/memory_stream.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/client_data.hpp"
 #include "duckdb/main/config.hpp"
 
 #include "quack_server.hpp"
 #include "quack_message.hpp"
 #include "quack_uri.hpp"
+#include "quack_ssl_key_generator.hpp"
 
 #include "httplib.hpp"
 
@@ -17,7 +19,7 @@ namespace duckdb {
 //! httplib hands each accepted socket to the task queue as one task spanning the connection's whole
 //! keep-alive lifetime, so a fixed pool deadlocks once idle connections pin every worker. This pool
 //! grows a thread per connection up to `max_threads` and sheds at the cap (clients retry).
-class ElasticThreadPool final : public duckdb_httplib::TaskQueue {
+class ElasticThreadPool final : public duckdb_httplib_openssl::TaskQueue {
 public:
 	explicit ElasticThreadPool(idx_t max_threads_p) : max_threads(max_threads_p) {
 	}
@@ -186,9 +188,32 @@ void HttpQuackServer::ListenThread(HttpQuackServer *server, const string &listen
 	}
 }
 
-HttpQuackServer::HttpQuackServer(ClientContext &context_p, const QuackUri &uri_p, const string &token_p)
+HttpQuackServer::HttpQuackServer(ClientContext &context_p, const QuackUri &uri_p, const string &token_p,
+                                 const string &ssl_cert_file, const string &ssl_key_file)
     : QuackServer(context_p, uri_p, token_p) {
-	server = make_uniq<duckdb_httplib::Server>();
+	if (uri_p.Ssl()) {
+		auto cert_file = ssl_cert_file;
+		auto key_file = ssl_key_file;
+		if (cert_file.empty()) {
+			auto &fs = FileSystem::GetFileSystem(context_p);
+			auto certificate_directory =
+			    SslKeyGenerator::GetDefaultCertificateDirectory(fs, ClientData::Get(context_p).file_opener.get());
+			cert_file = SslKeyGenerator::GetDefaultCertificateFile(fs, certificate_directory);
+			key_file = SslKeyGenerator::GetDefaultPrivateKeyFile(fs, certificate_directory);
+			if (!fs.FileExists(cert_file) || !fs.FileExists(key_file)) {
+				SslKeyGenerator::GenerateSslKeys(cert_file, key_file, "", SslKeyGenerator::DEFAULT_DAYS_VALID);
+				SslKeyGenerator::RestrictPermissions(key_file);
+			}
+		}
+		server = make_uniq<duckdb_httplib_openssl::SSLServer>(cert_file.c_str(), key_file.c_str());
+		if (!server->is_valid()) {
+			throw IOException("Failed to set up TLS for the DuckDB Quack RPC server from certificate %s and key %s",
+			                  cert_file, key_file);
+		}
+		ssl_fingerprint = SslKeyGenerator::CertificateFingerprint(cert_file);
+	} else {
+		server = make_uniq<duckdb_httplib_openssl::Server>();
+	}
 
 	// The elastic pool makes idle cached client connections cheap (one sleeping thread each,
 	// reaped on close) and turns pool exhaustion into load shedding instead of deadlock.
@@ -210,21 +235,21 @@ HttpQuackServer::HttpQuackServer(ClientContext &context_p, const QuackUri &uri_p
 	server->set_tcp_nodelay(true);
 	server->set_socket_options([](socket_t sock) {});
 
-	server->Get("/", [=](const duckdb_httplib::Request &, duckdb_httplib::Response &res) {
+	server->Get("/", [=](const duckdb_httplib_openssl::Request &, duckdb_httplib_openssl::Response &res) {
 		res.set_content("This is a DuckDB Quack RPC endpoint. Use ATTACH 'quack:...' to connect here.\n", "text/plain");
 	});
 
 	// TODO: this is very liberal, and there might be reasonable cases to restrict to trusted domains (note, this is
 	// only relevant from within a Web browser, since other actors can just ignore the CORS convention
-	server->Options("/quack", [](const duckdb_httplib::Request &, duckdb_httplib::Response &res) {
+	server->Options("/quack", [](const duckdb_httplib_openssl::Request &, duckdb_httplib_openssl::Response &res) {
 		res.set_header("Access-Control-Allow-Origin", "*");
 		res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
 		res.set_header("Access-Control-Allow-Headers", "*");
 		res.status = 204;
 	});
 
-	server->Post("/quack", [&](const duckdb_httplib::Request &, duckdb_httplib::Response &res,
-	                           const duckdb_httplib::ContentReader &content_reader) {
+	server->Post("/quack", [&](const duckdb_httplib_openssl::Request &, duckdb_httplib_openssl::Response &res,
+	                           const duckdb_httplib_openssl::ContentReader &content_reader) {
 		res.set_header("Access-Control-Allow-Origin", "*");
 		MemoryStream stream;
 		content_reader([&](const char *data, size_t data_length) {
@@ -232,8 +257,23 @@ HttpQuackServer::HttpQuackServer(ClientContext &context_p, const QuackUri &uri_p
 			return true;
 		});
 		auto response = HandleMessage(stream);
-		response->ToMemoryStream(stream);
-		res.set_content((const char *)stream.GetData(), stream.GetPosition(), "application/vnd.duckdb");
+		auto raw = response->RawPayload();
+		if (raw) {
+			// Already serialized: httplib sends the bytes with no copy. The shared_ptr keeps them alive.
+			auto body_start = response->RawPayloadStart();
+			auto data = const_char_ptr_cast(raw->GetData()) + body_start;
+			auto size = raw->GetPosition() - body_start;
+			shared_ptr<QuackMessage> owned(std::move(response));
+			res.set_content_provider(
+			    size, "application/vnd.duckdb",
+			    [owned, data](size_t offset, size_t length, duckdb_httplib_openssl::DataSink &sink) {
+				    sink.write(data + offset, length);
+				    return true;
+			    });
+		} else {
+			response->ToMemoryStream(stream);
+			res.set_content((const char *)stream.GetData(), stream.GetPosition(), "application/vnd.duckdb");
+		}
 	});
 
 	if (!server->is_valid()) {

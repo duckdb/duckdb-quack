@@ -6,28 +6,50 @@ require parquet
 
 include test/template/quack_setup.test_template
 
+# hash() makes the rows hard to compress. Batches are cut on SERIALIZED size, so plain integers
+# would fit one batch, PREPARE would inline it, and no FETCH would run.
 statement ok quack_db:quack_server_con
-create table big as select range i from range(100000);
+create table big as select range i, hash(range) pad from range(100000);
 
 statement ok quack_db:quack_server_con
-create table big500 as select range i from range(500000);
+create table big500 as select range i, hash(range) pad from range(500000);
 
 # remote parquet source: the server-side scan is parallel/multi-row-group, but FETCH batch
 # indices are minted by the quack server, so client-side ordering must be unaffected
 statement ok quack_db:quack_server_con
-copy (select range i from range(500000)) to '{TEST_DIR}/fetch_ord.parquet' (row_group_size 50000);
+copy (select range i, hash(range) pad from range(500000)) to '{TEST_DIR}/fetch_ord.parquet' (row_group_size 50000);
 
 statement ok quack_db:quack_server_con
-create view big_pq as select i from '{TEST_DIR}/fetch_ord.parquet';
+create view big_pq as select i, pad from '{TEST_DIR}/fetch_ord.parquet';
 
 statement ok
 attach {server} as rpc (token 'asdf')
 
-# one DataChunk per FETCH response => many FETCH round-trips, exercising the read-ahead pipeline.
+# small batches and a one-batch PREPARE drain give many FETCH round trips
 # Set AFTER the attach: the catalog enumeration itself is otherwise truncated to one chunk and
 # loses the views (pre-existing ExecuteCommandInternal FIXME).
 statement ok quack_db:quack_server_con
-set global quack_fetch_batch_rows=1;
+set global quack_prepare_inline_rows=1;
+
+statement ok quack_db:quack_server_con
+set global quack_target_batch_bytes=65536;
+
+# make sure this shape really produces more than one FETCH
+statement ok
+CALL enable_logging('Quack');
+
+query II
+select count(*), sum(i) from quack_query({server}, 'from big', token='asdf')
+----
+100000	4999950000
+
+query I
+select count(*) > 1 from duckdb_logs_parsed('Quack') where message_type = 'FETCH_REQUEST'
+----
+true
+
+statement ok
+CALL disable_logging();
 
 # the scan must behave the same whether fetches run on the ASYNC pool or inline (async_threads=0)
 foreach at 0 1 8
@@ -47,7 +69,7 @@ select count(*), sum(i) from quack_query_by_name('rpc', 'from big')
 
 # order preservation: server-assigned batch indices flow into an order-preserving CTAS
 statement ok
-create or replace table local_ctas as from quack_query({server}, 'select i from big order by i', token='asdf');
+create or replace table local_ctas as from quack_query({server}, 'select i, pad from big order by i', token='asdf');
 
 query I
 select count(*) from (select i, row_number() over () - 1 rn from local_ctas) where i != rn
@@ -57,7 +79,7 @@ select count(*) from (select i, row_number() over () - 1 rn from local_ctas) whe
 # larger ordered CTAS through the attached catalog: fetches complete out of order, but scan
 # threads must observe monotonically increasing batch indices (order-preserving plan asserts it)
 statement ok
-create or replace table ordered_ctas as select i from rpc.big500;
+create or replace table ordered_ctas as select i, pad from rpc.big500;
 
 query I
 select count(*) from (select i, row_number() over () - 1 rn from ordered_ctas) where i != rn
@@ -66,7 +88,7 @@ select count(*) from (select i, row_number() over () - 1 rn from ordered_ctas) w
 
 # same, sourced from a remote parquet view (parallel multi-row-group scan on the server)
 statement ok
-create or replace table ordered_ctas_pq as select i from rpc.big_pq;
+create or replace table ordered_ctas_pq as select i, pad from rpc.big_pq;
 
 query I
 select count(*) from (select i, row_number() over () - 1 rn from ordered_ctas_pq) where i != rn
@@ -118,7 +140,7 @@ statement ok
 SET quack_debug_fetch_delay_ms=15;
 
 statement ok
-create or replace table delayed_ctas as select i from rpc.big500;
+create or replace table delayed_ctas as select i, pad from rpc.big500;
 
 query I
 select count(*) from (select i, row_number() over () - 1 rn from delayed_ctas) where i != rn
@@ -147,5 +169,11 @@ query II
 select count(*), sum(i) from quack_query({server}, 'from big', token='asdf')
 ----
 100000	4999950000
+
+statement ok quack_db:quack_server_con
+reset global quack_target_batch_bytes;
+
+statement ok quack_db:quack_server_con
+reset global quack_prepare_inline_rows;
 
 include test/template/quack_teardown.test_template
