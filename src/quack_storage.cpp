@@ -23,8 +23,9 @@ QuackStorageExtensionInfo &QuackStorageExtensionInfo::GetState(const DatabaseIns
 }
 
 QuackServer &QuackStorageExtensionInfo::CreateServer(ClientContext &context, const QuackUri &listen_uri,
-                                                     const string &token) {
-	auto server = make_uniq<HttpQuackServer>(context, listen_uri, token);
+                                                     const string &token, const string &ssl_cert_file,
+                                                     const string &ssl_key_file) {
+	auto server = make_uniq<HttpQuackServer>(context, listen_uri, token, ssl_cert_file, ssl_key_file);
 
 	auto &actual_uri = server->ListenUri();
 	auto key = actual_uri.CanonicalUri();
@@ -50,6 +51,10 @@ vector<QuackStorageExtensionInfo::ServerSnapshot> QuackStorageExtensionInfo::Lis
 		snap.port = uri.Port();
 		snap.active_connections = kv.second->ActiveConnectionCount();
 		snap.info.emplace_back("ipv6", uri.IPv6() ? "true" : "false");
+		snap.info.emplace_back("ssl", uri.Ssl() ? "true" : "false");
+		if (uri.Ssl()) {
+			snap.info.emplace_back("ssl_fingerprint", kv.second->SslFingerprint());
+		}
 		result.push_back(std::move(snap));
 	}
 	return result;
@@ -125,8 +130,24 @@ static unique_ptr<Catalog> QuackAttach(optional_ptr<StorageExtensionInfo> storag
 
 	// no ssl on local by default
 	auto enable_ssl = !initial_uri.IsLocal();
-	if (attach_options.options.find("disable_ssl") != attach_options.options.end()) {
-		enable_ssl = !attach_options.options["disable_ssl"].GetValue<bool>();
+	auto disable_ssl_entry = attach_options.options.find("disable_ssl");
+	if (disable_ssl_entry != attach_options.options.end()) {
+		enable_ssl = !disable_ssl_entry->second.GetValue<bool>();
+	}
+	// a pinned server certificate: explicit option first, then the secret we already resolved
+	string ssl_fingerprint;
+	auto fingerprint_entry = attach_options.options.find("ssl_fingerprint");
+	if (fingerprint_entry != attach_options.options.end()) {
+		ssl_fingerprint = fingerprint_entry->second.ToString();
+	} else if (secret) {
+		QuackSecret::TryGetSslFingerprint(*secret, ssl_fingerprint);
+	}
+	if (!ssl_fingerprint.empty()) {
+		if (!enable_ssl && disable_ssl_entry != attach_options.options.end()) {
+			throw InvalidInputException("ssl_fingerprint pins the server's TLS certificate and cannot be combined "
+			                            "with disable_ssl");
+		}
+		enable_ssl = true;
 	}
 	string token;
 	if (has_token) {
@@ -140,8 +161,11 @@ static unique_ptr<Catalog> QuackAttach(optional_ptr<StorageExtensionInfo> storag
 	auto heartbeat_timeout_entry = attach_options.options.find("heartbeat_timeout");
 	auto heartbeat_timeout = QuackClient::ResolveHeartbeatTimeout(
 	    context, heartbeat_timeout_entry != attach_options.options.end() ? &heartbeat_timeout_entry->second : nullptr);
-	return make_uniq<QuackCatalog>(db, QuackUri(uri, enable_ssl), context, token, std::move(client_id),
-	                               heartbeat_timeout);
+	QuackUri server_uri(uri, enable_ssl);
+	if (!ssl_fingerprint.empty()) {
+		server_uri.SetSslFingerprint(ssl_fingerprint);
+	}
+	return make_uniq<QuackCatalog>(db, server_uri, context, token, std::move(client_id), heartbeat_timeout);
 }
 
 static unique_ptr<TransactionManager> QuackCreateTransactionManager(optional_ptr<StorageExtensionInfo> storage_info,

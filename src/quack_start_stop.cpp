@@ -1,8 +1,10 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/client_data.hpp"
 
 #include "quack_random.hpp"
 #include "quack_secret.hpp"
+#include "quack_ssl_key_generator.hpp"
 #include "quack_startstop.hpp"
 #include "quack_storage.hpp"
 
@@ -17,6 +19,9 @@ struct QuackStartStopFunctionData : public TableFunctionData {
 	string token;
 	//! Persist the token as the default quack secret once the server is up
 	bool create_secret = false;
+	//! PEM files for HTTPS; both empty means the default self-signed pair, generated on first use
+	string ssl_cert_file;
+	string ssl_key_file;
 };
 
 static unique_ptr<FunctionData> QuackServeBind(ClientContext &context, TableFunctionBindInput &input,
@@ -70,11 +75,39 @@ static unique_ptr<FunctionData> QuackServeBind(ClientContext &context, TableFunc
 		}
 	}
 
-	bind_data->listen_uri = QuackUri(listen_uri, /* the server will always listen without SSL */ false);
+	// Mirrors the client default: plain HTTP on localhost, HTTPS elsewhere, disable_ssl overrides either way
+	auto initial_uri = QuackUri(listen_uri);
+	auto enable_ssl = !initial_uri.IsLocal();
+	auto disable_ssl_entry = input.named_parameters.find("disable_ssl");
+	if (disable_ssl_entry != input.named_parameters.end() && !disable_ssl_entry->second.IsNull()) {
+		enable_ssl = !disable_ssl_entry->second.GetValue<bool>();
+	}
+	bind_data->listen_uri = QuackUri(listen_uri, enable_ssl);
 	if (!allow_other_hostname && !bind_data->listen_uri.IsLocal()) {
 		throw InvalidInputException(
 		    "Only localhost is allowed as a Quack RPC hostname by default, set allow_other_hostname=true to override. "
 		    "We strongly recommend reverse-proxying the Quack RPC when making it publicly available.");
+	}
+
+	auto cert_entry = input.named_parameters.find("ssl_cert_file");
+	auto key_entry = input.named_parameters.find("ssl_key_file");
+	bool has_cert = cert_entry != input.named_parameters.end() && !cert_entry->second.IsNull();
+	bool has_key = key_entry != input.named_parameters.end() && !key_entry->second.IsNull();
+	if (has_cert != has_key) {
+		throw InvalidInputException("ssl_cert_file and ssl_key_file must be specified together");
+	}
+	if (has_cert) {
+		if (!enable_ssl) {
+			throw InvalidInputException("ssl_cert_file and ssl_key_file only apply when serving over HTTPS");
+		}
+		bind_data->ssl_cert_file = cert_entry->second.GetValue<string>();
+		bind_data->ssl_key_file = key_entry->second.GetValue<string>();
+		auto &fs = FileSystem::GetFileSystem(context);
+		for (auto &file : {bind_data->ssl_cert_file, bind_data->ssl_key_file}) {
+			if (file.empty() || !fs.FileExists(file)) {
+				throw InvalidInputException("TLS file \"%s\" does not exist", file);
+			}
+		}
 	}
 
 	return_types.emplace_back(LogicalType::VARCHAR);
@@ -104,8 +137,9 @@ static void QuackServe(ClientContext &context, TableFunctionInput &data_p, DataC
 		return;
 	}
 
-	auto &server =
-	    QuackStorageExtensionInfo::GetState(*context.db).CreateServer(context, bind_data.listen_uri, bind_data.token);
+	auto &server = QuackStorageExtensionInfo::GetState(*context.db)
+	                   .CreateServer(context, bind_data.listen_uri, bind_data.token, bind_data.ssl_cert_file,
+	                                 bind_data.ssl_key_file);
 	if (bind_data.create_secret) {
 		// only once the server is actually up: a token that never made it onto a socket is not worth persisting
 		QuackSecret::CreateDefault(context, bind_data.token);
@@ -123,6 +157,8 @@ TableFunctionSet QuackServeFunction::GetFunction() {
 	TableFunctionSet set("quack_serve");
 	auto fun = TableFunction("quack_serve", {LogicalType::VARCHAR}, QuackServe, QuackServeBind);
 	fun.named_parameters["disable_ssl"] = LogicalType::BOOLEAN;
+	fun.named_parameters["ssl_cert_file"] = LogicalType::VARCHAR;
+	fun.named_parameters["ssl_key_file"] = LogicalType::VARCHAR;
 	fun.named_parameters["allow_other_hostname"] = LogicalType::BOOLEAN;
 	fun.named_parameters["token"] = LogicalType::VARCHAR;
 	fun.named_parameters["secret"] = LogicalType::VARCHAR;
@@ -220,4 +256,76 @@ static void QuackServerList(ClientContext &context, TableFunctionInput &data_p, 
 
 TableFunction QuackServerListFunction::GetFunction() {
 	return TableFunction("quack_server_list", {}, QuackServerList, QuackServerListBind);
+}
+
+struct QuackGenerateKeysFunctionData : public TableFunctionData {
+	QuackGenerateKeysFunctionData() {
+	}
+
+	bool finished = false;
+	string certificate_directory;
+};
+
+static unique_ptr<FunctionData> QuackGenerateKeysBind(ClientContext &context, TableFunctionBindInput &input,
+                                                      vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto result = make_uniq<QuackGenerateKeysFunctionData>();
+	auto directory_entry = input.named_parameters.find("directory");
+	if (directory_entry != input.named_parameters.end() && !directory_entry->second.IsNull()) {
+		result->certificate_directory = directory_entry->second.GetValue<string>();
+		if (result->certificate_directory.empty()) {
+			throw InvalidInputException("Invalid certificate directory specified");
+		}
+	}
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("cert_file");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("key_file");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("fingerprint");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("status");
+	return std::move(result);
+}
+
+static void QuackGenerateKeysFun(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &bind_data = data_p.bind_data->CastNoConst<QuackGenerateKeysFunctionData>();
+	if (bind_data.finished) {
+		return;
+	}
+	output.SetCardinality(1);
+	bind_data.finished = true;
+
+	auto &fs = FileSystem::GetFileSystem(context);
+	auto certificate_directory = bind_data.certificate_directory;
+	if (certificate_directory.empty()) {
+		certificate_directory =
+		    SslKeyGenerator::GetDefaultCertificateDirectory(fs, ClientData::Get(context).file_opener.get());
+	} else if (!fs.DirectoryExists(certificate_directory)) {
+		fs.CreateDirectoriesRecursive(certificate_directory);
+	}
+
+	auto server_key_file = SslKeyGenerator::GetDefaultCertificateFile(fs, certificate_directory);
+	auto private_key_file = SslKeyGenerator::GetDefaultPrivateKeyFile(fs, certificate_directory);
+	output.data[0].SetValue(0, server_key_file);
+	output.data[1].SetValue(0, private_key_file);
+
+	if (fs.FileExists(server_key_file) || fs.FileExists(private_key_file)) {
+		output.data[2].SetValue(0, fs.FileExists(server_key_file)
+		                               ? Value(SslKeyGenerator::CertificateFingerprint(server_key_file))
+		                               : Value());
+		output.data[3].SetValue(
+		    0, StringUtil::Format("Key file(s) exist in %s - remove to recreate them", certificate_directory));
+		return;
+	}
+	SslKeyGenerator::GenerateSslKeys(server_key_file, private_key_file, "", SslKeyGenerator::DEFAULT_DAYS_VALID);
+	SslKeyGenerator::RestrictPermissions(private_key_file);
+
+	output.data[2].SetValue(0, SslKeyGenerator::CertificateFingerprint(server_key_file));
+	output.data[3].SetValue(0, StringUtil::Format("Key files generated in %s", certificate_directory));
+}
+
+TableFunction QuackGenerateKeysFunction::GetFunction() {
+	auto fun = TableFunction("quack_generate_keys", {}, QuackGenerateKeysFun, QuackGenerateKeysBind);
+	fun.named_parameters["directory"] = LogicalType::VARCHAR;
+	return fun;
 }

@@ -100,4 +100,14 @@ string QuackSecret::GetToken(const SecretEntry &entry) {
 	return token_value.ToString();
 }
 
+bool QuackSecret::TryGetSslFingerprint(const SecretEntry &entry, string &result) {
+	auto &kv_secret = dynamic_cast<const KeyValueSecret &>(*entry.secret);
+	Value fingerprint_value;
+	if (!kv_secret.TryGetValue("ssl_fingerprint", fingerprint_value) || fingerprint_value.IsNull()) {
+		return false;
+	}
+	result = fingerprint_value.ToString();
+	return !result.empty();
+}
+
 } // namespace duckdb
