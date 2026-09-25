@@ -35,6 +35,19 @@ target_link_libraries(${EXTENSION_NAME} duckdb_mbedtls ${OPENSSL_LIBRARIES})
 target_link_libraries(${LOADABLE_EXTENSION_NAME} duckdb_mbedtls
                       ${OPENSSL_LIBRARIES})
 
+# On macOS, httplib (with OpenSSL support) loads root certificates from the
+# system keychain by default, which references CoreFoundation and Security
+# symbols. Link the frameworks explicitly, like httpfs does, or the loadable
+# extension fails with "Undefined symbols" for _CFArrayGetCount & co.
+if(APPLE)
+  find_library(COREFOUNDATION_FRAMEWORK CoreFoundation)
+  find_library(SECURITY_FRAMEWORK Security)
+  target_link_libraries(${EXTENSION_NAME} ${COREFOUNDATION_FRAMEWORK}
+                        ${SECURITY_FRAMEWORK})
+  target_link_libraries(${LOADABLE_EXTENSION_NAME} ${COREFOUNDATION_FRAMEWORK}
+                        ${SECURITY_FRAMEWORK})
+endif()
+
 install(
   TARGETS ${EXTENSION_NAME}
   EXPORT "${DUCKDB_EXPORT_SET}"
