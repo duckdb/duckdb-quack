@@ -100,7 +100,6 @@ const QuackUri &QuackCatalog::GetServerUri() {
 }
 
 unique_ptr<ColumnDataCollection> QuackCatalog::ExecuteCommandInternal(ClientContext &context, const string &query) {
-	// FIXME this will break with many results!
 	auto chunk_collection = make_uniq<ColumnDataCollection>(Allocator::DefaultAllocator());
 	// get a client to query
 	auto client_wrapper = client_connection->GetClient(context);
@@ -110,6 +109,25 @@ unique_ptr<ColumnDataCollection> QuackCatalog::ExecuteCommandInternal(ClientCont
 	chunk_collection->Initialize(response->Types());
 	for (auto &chunk : response->MutableResults()) {
 		chunk_collection->Append(chunk->Chunk());
+	}
+	// The PREPARE response only carries the leading batches (up to quack_prepare_inline_rows rows).
+	// These commands load the catalog, so anything left behind is not a truncated result set - it
+	// is a schema, table or view that silently ceases to exist. Drain the rest. Internal catalog
+	// traffic keeps uuid 0 (see PrepareRequestMessage above), and FETCH names that same uuid.
+	auto query_uuid = response->QueryUUID();
+	if (response->NeedsMoreFetch()) {
+		for (idx_t batch_index = 1;; batch_index++) {
+			// ack everything before this batch: we never ask for an earlier batch again
+			auto fetch_response = client.Request<FetchResponseMessage>(
+			    context, make_uniq<FetchRequestMessage>(GetConnectionId(), query_uuid, batch_index, batch_index - 1));
+			if (fetch_response->MutableResults().empty()) {
+				// an empty FETCH is how the server says the result is exhausted (cf. QuackScan)
+				break;
+			}
+			for (auto &chunk : fetch_response->MutableResults()) {
+				chunk_collection->Append(*chunk);
+			}
+		}
 	}
 	return chunk_collection;
 }

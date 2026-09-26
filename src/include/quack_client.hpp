@@ -180,6 +180,8 @@ private:
 
 class HttpsQuackClient : public QuackClient {
 public:
+	static constexpr uint64_t HTTP_TIMEOUT_SECONDS = 86400;
+
 	HttpsQuackClient(DatabaseInstance &db, const QuackUri &uri_p);
 	~HttpsQuackClient() override;
 
@@ -196,6 +198,9 @@ private:
 
 private:
 	unique_ptr<HTTPParams> http_params;
+	//! Extra HTTP headers resolved once from the `quack` secret (EXTRA_HTTP_HEADERS),
+	//! injected into every request. Loaded lazily alongside http_params.
+	HTTPHeaders extra_headers;
 	//! Persistent keep-alive HTTP client: reused across requests so the TCP connection (and its
 	//! warm congestion window) survives between POSTs; replaced by the retry path on dead sockets.
 	unique_ptr<HTTPClient> http_client;

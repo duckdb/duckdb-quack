@@ -1,3 +1,5 @@
+#include "duckdb/catalog/catalog_transaction.hpp"
+#include "duckdb/common/types/value.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/common/random_engine.hpp"
 #include "duckdb/main/database.hpp"
@@ -28,6 +30,28 @@ string GetUriPart(T ele) {
 		throw InvalidInputException("Invalid URI");
 	}
 	return string(ele.first, ele.afterLast - ele.first);
+}
+
+//! Resolve the optional EXTRA_HTTP_HEADERS from the `quack` secret scoped to this URI and add them
+//! to `headers`. Silently does nothing when no matching secret / header map is present.
+static void LoadExtraHttpHeaders(optional_ptr<ClientContext> context, DatabaseInstance &db, const QuackUri &uri,
+                                 HTTPHeaders &headers) {
+	auto &secret_manager = SecretManager::Get(db);
+	auto transaction = context ? CatalogTransaction::GetSystemCatalogTransaction(*context)
+	                           : CatalogTransaction::GetSystemTransaction(db);
+	auto match = secret_manager.LookupSecret(transaction, uri.Uri(), "quack");
+	if (!match.HasMatch()) {
+		return;
+	}
+	const auto &kv = dynamic_cast<const KeyValueSecret &>(*match.secret_entry->secret);
+	Value headers_value;
+	if (!kv.TryGetValue("extra_http_headers", headers_value) || headers_value.IsNull()) {
+		return;
+	}
+	for (const auto &entry : MapValue::GetChildren(headers_value)) {
+		const auto &kv_pair = StructValue::GetChildren(entry);
+		headers.Insert(kv_pair[0].ToString(), kv_pair[1].ToString());
+	}
 }
 
 void QuackClientConnection::CancelQuery(hugeint_t query_uuid) {
@@ -102,7 +126,7 @@ string HttpsQuackClient::PostRawLocked(const_data_ptr_t data, idx_t size) {
 	D_ASSERT(http_params);
 	auto &http_util = HTTPUtil::Get(db);
 	auto request_url = uri.Http() + "/quack";
-	HTTPHeaders headers;
+	HTTPHeaders headers = extra_headers;
 	PostRequestInfo post_request(request_url, headers, *http_params, data, size);
 	unique_ptr<HTTPResponse> response;
 	try {
@@ -127,7 +151,11 @@ void HttpsQuackClient::EnsureHttpParams(optional_ptr<ClientContext> context) {
 		} else {
 			http_params = http_util.InitializeParameters(db, request_url);
 		}
+		// Resolve EXTRA_HTTP_HEADERS from the quack secret once; reused for every request on this client.
+		LoadExtraHttpHeaders(context, db, uri, extra_headers);
 	}
+	http_params->timeout = HTTP_TIMEOUT_SECONDS;
+	http_params->retries = 0;
 	// http_params is cached across checkouts; re-scope its logger each request so a context-less
 	// teardown on a pooled client never logs under a prior query's scope.
 	if (request_logger) {
@@ -384,7 +412,8 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 	// certificate fingerprint
 	auto server_uri = uri;
 	if (token.empty() || server_uri.SslFingerprint().empty()) {
-		auto secret = QuackSecret::Find(context, nullptr, uri.Uri());
+		// canonical form, so the scope match does not depend on how the endpoint was spelled
+		auto secret = QuackSecret::Find(context, nullptr, uri.CanonicalUri());
 		if (secret) {
 			if (token.empty()) {
 				token = QuackSecret::GetToken(*secret);

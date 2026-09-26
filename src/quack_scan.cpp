@@ -1,5 +1,6 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/query_result.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/main/secret/secret.hpp"
 #include "duckdb/planner/filter/conjunction_filter.hpp"
@@ -78,6 +79,10 @@ static unique_ptr<FunctionData> QuackScanBind(ClientContext &context, TableFunct
 	for (auto &col_name : bind_response->Names()) {
 		names.push_back(Identifier(col_name));
 	}
+	// the remote query may produce duplicate column names (e.g. SELECT 1 AS x, 2 AS x) - a table
+	// function binding requires unique names, so rename the repeats (x, x_1, ...). Columns are
+	// referenced positionally everywhere below, so this is purely the name we expose to the binder.
+	QueryResult::DeduplicateColumns(names);
 
 	bind_data->results = std::move(bind_response->MutableResults());
 	bind_data->needs_more_fetch = bind_response->NeedsMoreFetch();
@@ -131,6 +136,7 @@ static unique_ptr<FunctionData> QuackScanBindCatalogName(ClientContext &context,
 	for (auto &col_name : bind_response->Names()) {
 		names.push_back(Identifier(col_name));
 	}
+	QueryResult::DeduplicateColumns(names);
 
 	// new stuff
 	bind_data->results = std::move(bind_response->MutableResults());
@@ -190,10 +196,11 @@ struct QuackScanLocalState : public LocalTableFunctionState {
 struct QuackScanGlobalState : GlobalTableFunctionState {
 	explicit QuackScanGlobalState(vector<ColumnIndex> column_ids_p, vector<idx_t> projection_id_p,
 	                              vector<ChunkResult> results_p, bool needs_more_fetch_p, hugeint_t query_uuid_p,
-	                              bool reconnects_enabled_p)
+	                              bool reconnects_enabled_p, ChunkResultPushdownType fetch_pushdown_type_p)
 	    : max_threads(needs_more_fetch_p ? MAX_THREADS : 1), column_ids(std::move(column_ids_p)),
 	      projection_ids(std::move(projection_id_p)), query_uuid(query_uuid_p),
-	      reconnects_enabled(reconnects_enabled_p), results(std::move(results_p)) {
+	      reconnects_enabled(reconnects_enabled_p), fetch_pushdown_type(fetch_pushdown_type_p),
+	      results(std::move(results_p)) {
 	}
 	idx_t MaxThreads() const override {
 		return max_threads;
@@ -205,6 +212,9 @@ struct QuackScanGlobalState : GlobalTableFunctionState {
 	//! FETCH read-ahead pipeline; set when the PREPARE response signals more batches to fetch.
 	shared_ptr<QuackFetcher> fetcher;
 	bool reconnects_enabled;
+	//! How every chunk of this scan must be treated, initial batch and fetched continuations
+	//! alike. Derived in QuackScanInitGlobal.
+	ChunkResultPushdownType fetch_pushdown_type;
 	//! Number of active scanners
 	atomic<idx_t> active_scanners {0};
 	atomic<bool> ack_sent {false};
@@ -232,8 +242,12 @@ static string BuildPushdownQuery(const QuackScanBindData &bind_data, const Table
 			}
 			if (col_id.IsVirtualColumn()) {
 				auto virtual_column = col_id.GetPrimaryIndex();
-				if (virtual_column == COLUMN_IDENTIFIER_EMPTY || virtual_column == COLUMN_IDENTIFIER_ROW_ID) {
-					query += "NULL::BIGINT";
+				if (virtual_column == COLUMN_IDENTIFIER_EMPTY) {
+					// count(*) marker: the value is never read, so any NULL will do - but it must
+					// match the type we declared for it in QuackGetVirtualColumns.
+					query += "NULL::BOOLEAN";
+				} else if (virtual_column == COLUMN_IDENTIFIER_ROW_ID) {
+					throw NotImplementedException("quack does not support rowid on remote tables");
 				} else {
 					throw InternalException("Unsupported virtual column index");
 				}
@@ -306,9 +320,16 @@ unique_ptr<GlobalTableFunctionState> QuackScanInitGlobal(ClientContext &context,
 	vector<ChunkResult> results;
 	bool needs_more_fetch = bind_data.needs_more_fetch;
 	hugeint_t query_uuid;
+	// The chunks are already projected only if the query we send carries the projection, which is
+	// exactly when BuildPushdownQuery emits a SELECT list - it degrades to a full-width
+	// "FROM <table>" on an empty column_indexes.
+	auto fetch_pushdown_type = ChunkResultPushdownType::REQUIRES_PUSHDOWN;
 	if (!bind_data.qualified_table_name.Path().empty()) {
 		// apply pushdown to the query
 		auto query = BuildPushdownQuery(bind_data, input);
+		if (!input.column_indexes.empty()) {
+			fetch_pushdown_type = ChunkResultPushdownType::PUSHDOWN_ALREADY_APPLIED;
+		}
 		auto &client_connection = *bind_data.client_connection;
 		auto client_wrapper = client_connection.GetClient(context);
 		auto &client = client_wrapper->GetClient();
@@ -319,18 +340,19 @@ unique_ptr<GlobalTableFunctionState> QuackScanInitGlobal(ClientContext &context,
 		// fetch the result
 		for (auto &chunk_ref : response_message->MutableResults()) {
 			auto &chunk = chunk_ref->Chunk();
-			results.emplace_back(chunk, ChunkResultPushdownType::PUSHDOWN_ALREADY_APPLIED);
+			results.emplace_back(chunk, fetch_pushdown_type);
 		}
 	} else {
 		for (auto &chunk_ref : bind_data.results) {
 			auto &chunk = chunk_ref->Chunk();
-			results.emplace_back(chunk, ChunkResultPushdownType::REQUIRES_PUSHDOWN);
+			results.emplace_back(chunk, fetch_pushdown_type);
 		}
 		query_uuid = bind_data.query_uuid;
 	}
 	// we only multithread if there is more to fetch
-	auto global_state = make_uniq<QuackScanGlobalState>(input.column_indexes, input.projection_ids, std::move(results),
-	                                                    needs_more_fetch, query_uuid, ReconnectsEnabled(context));
+	auto global_state =
+	    make_uniq<QuackScanGlobalState>(input.column_indexes, input.projection_ids, std::move(results),
+	                                    needs_more_fetch, query_uuid, ReconnectsEnabled(context), fetch_pushdown_type);
 	if (needs_more_fetch) {
 		// start pipelining FETCH requests on the ASYNC pool before the first scan call
 		global_state->fetcher = make_shared_ptr<QuackFetcher>(context, *bind_data.client_connection, query_uuid,
@@ -406,12 +428,32 @@ static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChu
 				if (!chunk.RequiresPushdown()) {
 					output.Reference(response_chunk);
 				} else {
-					for (idx_t i = 0; i < global_state.column_ids.size(); i++) {
-						auto &index = global_state.column_ids[i];
+					// With filter_prune, projection_ids indexes into column_ids and lists only the
+					// columns that reach the output - filter-only columns stay in column_ids but are
+					// not emitted. Without it, projection_ids is empty and the output IS column_ids.
+					// filter_prune is currently disabled, so the projection_ids branch is not reachable
+					// yet; it is written now so that enabling it cannot silently reintroduce the
+					// full-width overrun this loop exists to prevent.
+					auto &projection_ids = global_state.projection_ids;
+					auto output_columns =
+					    projection_ids.empty() ? global_state.column_ids.size() : projection_ids.size();
+					for (idx_t i = 0; i < output_columns; i++) {
+						auto &index = projection_ids.empty() ? global_state.column_ids[i]
+						                                     : global_state.column_ids[projection_ids[i]];
 						if (index.IsVirtualColumn()) {
-							// TODO
+							// Handled exactly as BuildPushdownQuery does for the server-side path - keep
+							// the two in step: the count(*) marker materializes as NULL, rowid is an error.
+							// Note `continue`, not `return`: returning here skipped SetCardinality, and a
+							// cardinality of 0 reads to DuckDB as end-of-scan, i.e. a silently EMPTY result.
+							auto virtual_column = index.GetPrimaryIndex();
+							if (virtual_column == COLUMN_IDENTIFIER_ROW_ID) {
+								throw NotImplementedException("quack does not support rowid on remote tables");
+							}
+							if (virtual_column != COLUMN_IDENTIFIER_EMPTY) {
+								throw InternalException("Unsupported virtual column index");
+							}
 							output.data[i].Reference(Value(output.data[i].GetType()), count_t(response_chunk.size()));
-							return;
+							continue;
 						}
 						auto col_idx = index.GetPrimaryIndex();
 						output.data[i].Reference(response_chunk.data[col_idx]);
@@ -428,13 +470,9 @@ static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChu
 			vector<unique_ptr<DataChunk>> chunks;
 			switch (global_state.fetcher->GetBatch(context, input, local_state.fetch_claim, batch_index, chunks)) {
 			case QuackFetchResult::BATCH: {
-				// tag fetched chunks like the initial batch (see QuackScanInitGlobal): direct queries
-				// return full-width chunks that still need projection, the catalog path already projected
-				auto fetched_pushdown_type = bind_data.qualified_table_name.Path().empty()
-				                                 ? ChunkResultPushdownType::REQUIRES_PUSHDOWN
-				                                 : ChunkResultPushdownType::PUSHDOWN_ALREADY_APPLIED;
+				// tag fetched chunks exactly like the initial batch (see QuackScanInitGlobal)
 				for (auto &chunk : chunks) {
-					local_state.results.emplace(*chunk, fetched_pushdown_type);
+					local_state.results.emplace(*chunk, global_state.fetch_pushdown_type);
 				}
 				local_state.current_batch_index = batch_index;
 				continue;
@@ -479,6 +517,17 @@ unique_ptr<FunctionData> QuackScanDeserialize(Deserializer &deserializer, TableF
 	throw NotImplementedException("Quack scans cannot be deserialized (yet?)");
 }
 
+//! Declare the EMPTY virtual column - the "give me any column, I just need the row count" marker
+//! DuckDB uses for count(*); without it count(*) would pick rowid. rowid is declared too, so a
+//! query that binds it (one planned locally, not pushed down whole) reaches the scan and gets a
+//! clean NotImplemented error rather than an INTERNAL "failed to find referenced virtual column".
+static virtual_column_map_t QuackGetVirtualColumns(ClientContext &, optional_ptr<FunctionData>) {
+	virtual_column_map_t result;
+	result.insert(make_pair(COLUMN_IDENTIFIER_EMPTY, TableColumn("", LogicalType::BOOLEAN)));
+	result.insert(make_pair(COLUMN_IDENTIFIER_ROW_ID, TableColumn("rowid", LogicalType::ROW_TYPE)));
+	return result;
+}
+
 BindInfo QuackScanGetBindInfo(const optional_ptr<FunctionData> bind_data_p) {
 	auto &bind_data = bind_data_p->CastNoConst<QuackScanBindData>();
 	if (bind_data.table_entry) {
@@ -501,6 +550,7 @@ TableFunction QuackScanFunction::GetFunction() {
 	fun.to_string = QuackScanToString;
 	fun.serialize = QuackScanSerialize;
 	fun.deserialize = QuackScanDeserialize;
+	fun.get_virtual_columns = QuackGetVirtualColumns;
 	fun.get_bind_info = QuackScanGetBindInfo;
 	// fun.filter_pushdown = true;
 	// fun.filter_prune = true;
@@ -515,6 +565,7 @@ TableFunction QuackScanByNameFunction::GetFunction() {
 	fun.to_string = QuackScanToString;
 	fun.serialize = QuackScanSerialize;
 	fun.deserialize = QuackScanDeserialize;
+	fun.get_virtual_columns = QuackGetVirtualColumns;
 	fun.get_bind_info = QuackScanGetBindInfo;
 	fun.named_parameters["use_transaction"] = LogicalType::BOOLEAN;
 	fun.named_parameters["refresh_catalog"] = LogicalType::BOOLEAN;

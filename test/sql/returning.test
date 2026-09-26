@@ -1,0 +1,92 @@
+# name: test/sql/returning.test
+# description: RETURNING over quack returns the real rows when the statement is pushed down, and is a clean error - never silently-wrong data - when the insert is planned locally
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+foreach server 'quack:localhost'
+
+statement ok con1
+call quack_serve({server}, token='asdf');
+
+statement ok con2
+attach {server} as d (token 'asdf');
+
+statement ok con2
+create table d.items(id integer, name varchar);
+
+# INSERT ... RETURNING used to plan fine and hand back the insert COUNT coerced into
+# column 0, with the remaining columns uninitialized (duckdb-quack#114). A single-row
+# insert disguises it: (1, 'apple') RETURNING * came back as (1, <empty>), and that 1 is
+# the count, not the id. A statement that only touches the remote side is pushed down
+# whole, so the server evaluates RETURNING and these must be the real rows.
+query II con2
+insert into d.items values (1, 'apple') returning *;
+----
+1	apple
+
+query I con2
+insert into d.items values (2, 'pear'), (5, 'fig') returning id;
+----
+2
+5
+
+query II con2
+insert into d.items select 3, 'plum' returning id, name;
+----
+3	plum
+
+# An insert that reads local rows cannot be pushed down, so QUACK_INSERT plans it - and
+# that operator has no RETURNING. It must throw instead of returning the count.
+statement ok con2
+create table local_src as select 4 as id, 'kiwi' as name;
+
+statement error con2
+insert into d.items select * from local_src returning *;
+----
+RETURNING not yet supported for QUACK_INSERT
+
+# the rejected insert must not have written anything
+query II con2
+select id, name from d.items order by id;
+----
+1	apple
+2	pear
+3	plum
+5	fig
+
+# plain INSERT from local rows (no RETURNING) keeps working
+statement ok con2
+insert into d.items select * from local_src;
+
+query II con2
+select id, name from d.items order by id;
+----
+1	apple
+2	pear
+3	plum
+4	kiwi
+5	fig
+
+# UPDATE / DELETE ... RETURNING are pushed down whole as well
+query II con2
+update d.items set name = 'x' where id = 1 returning *;
+----
+1	x
+
+query II con2
+delete from d.items where id = 1 returning *;
+----
+1	x
+
+statement ok con2
+detach d;
+
+statement ok con1
+call quack_stop({server});
+
+endloop

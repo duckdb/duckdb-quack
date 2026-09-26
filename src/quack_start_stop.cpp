@@ -58,7 +58,10 @@ static unique_ptr<FunctionData> QuackServeBind(ClientContext &context, TableFunc
 
 	// An explicit name selects the secret; without one we use the default secret for this endpoint (if any).
 	// Without a URI the secret decides where we listen, so a lone secret counts as the default one.
-	auto secret = QuackSecret::Find(context, has_secret_name ? &secret_entry->second : nullptr, listen_uri,
+	// Look an explicit endpoint up by its canonical form: secret scopes are matched as plain string
+	// prefixes, so the surface spelling would make the match depend on how the endpoint was written.
+	auto lookup_path = explicit_uri ? QuackUri(listen_uri).CanonicalUri() : listen_uri;
+	auto secret = QuackSecret::Find(context, has_secret_name ? &secret_entry->second : nullptr, lookup_path,
 	                                explicit_uri ? QuackSecret::DefaultLookup::SCOPE_MATCH_ONLY
 	                                             : QuackSecret::DefaultLookup::ALLOW_SINGLE_SECRET);
 

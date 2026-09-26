@@ -52,6 +52,9 @@ static unique_ptr<BaseSecret> CreateQuackSecretFromConfig(ClientContext &, Creat
 		auto lower_name = StringUtil::Lower(named_param.first);
 		if (lower_name == "token") {
 			secret->secret_map["token"] = named_param.second.ToString();
+		} else if (lower_name == "extra_http_headers") {
+			// Stored as a MAP(VARCHAR, VARCHAR) Value; injected into every quack HTTP request.
+			secret->secret_map["extra_http_headers"] = named_param.second;
 		} else if (lower_name == "ssl_fingerprint") {
 			// validated here so a typo fails at CREATE SECRET rather than at the first connection
 			secret->secret_map["ssl_fingerprint"] = QuackUri::NormalizeFingerprint(named_param.second.ToString());
@@ -73,6 +76,7 @@ static void RegisterQuackSecretType(ExtensionLoader &loader) {
 
 	CreateSecretFunction config_fun = {QuackSecret::TYPE, "config", CreateQuackSecretFromConfig};
 	config_fun.named_parameters["token"] = LogicalType::VARCHAR;
+	config_fun.named_parameters["extra_http_headers"] = LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR);
 	config_fun.named_parameters["ssl_fingerprint"] = LogicalType::VARCHAR;
 	loader.RegisterFunction(config_fun);
 }

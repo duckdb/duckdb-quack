@@ -1,0 +1,42 @@
+# name: test/sql/attach_view_fetch_projection.test
+# description: projected scan of an attached view spanning multiple fetch batches, by result size
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+foreach server 'quack:localhost'
+
+statement ok con1
+call quack_serve({server}, token='asdf');
+
+# 3-column view so a projected scan is narrower than the wire chunks
+statement ok
+create view big_view as select i, i * 2 as j, 'payload_' || i as k from range(10_000_000) t(i);
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+# view scans go through quack_query_by_name (bind-time result, client-side pushdown);
+# before the fix, fetch batch 2+ crashed here
+query II
+select count(*), sum(i) from rpc.big_view
+----
+10000000	49999995000000
+
+# a projected multi-batch quack_query takes the same path
+query II
+select count(*), sum(i) from quack_query({server}, 'from big_view', token='asdf')
+----
+10000000	49999995000000
+
+statement ok con2
+detach rpc;
+
+statement ok con1
+call quack_stop({server});
+
+endloop

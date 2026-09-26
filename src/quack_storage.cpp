@@ -63,7 +63,9 @@ vector<QuackStorageExtensionInfo::ServerSnapshot> QuackStorageExtensionInfo::Lis
 vector<QuackConnectionSnapshot> QuackStorageExtensionInfo::GetActiveConnectionSnaps() {
 	vector<QuackConnectionSnapshot> result;
 	std::lock_guard<std::mutex> lock(servers_mutex);
-	for (auto &[uri, server] : servers) {
+	for (auto &server_kv : servers) {
+		auto &uri = server_kv.first;
+		auto &server = server_kv.second;
 		for (auto &snapshot : server->GetActiveConnectionSnap()) {
 			snapshot.server_id = uri;
 			result.push_back(std::move(snapshot));
