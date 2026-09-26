@@ -350,9 +350,9 @@ unique_ptr<GlobalTableFunctionState> QuackScanInitGlobal(ClientContext &context,
 		query_uuid = bind_data.query_uuid;
 	}
 	// we only multithread if there is more to fetch
-	auto global_state = make_uniq<QuackScanGlobalState>(input.column_indexes, input.projection_ids, std::move(results),
-	                                                    needs_more_fetch, query_uuid, ReconnectsEnabled(context),
-	                                                    fetch_pushdown_type);
+	auto global_state =
+	    make_uniq<QuackScanGlobalState>(input.column_indexes, input.projection_ids, std::move(results),
+	                                    needs_more_fetch, query_uuid, ReconnectsEnabled(context), fetch_pushdown_type);
 	if (needs_more_fetch) {
 		// start pipelining FETCH requests on the ASYNC pool before the first scan call
 		global_state->fetcher = make_shared_ptr<QuackFetcher>(context, *bind_data.client_connection, query_uuid,
