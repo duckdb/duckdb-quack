@@ -2,16 +2,7 @@
 # description: test large fetch using attach
 # group: [sql]
 
-require quack
-
-require httpfs
-
-set ignore_error_messages __none__
-
-foreach server 'quack:localhost'
-
-statement ok con1
-call quack_serve({server}, token='asdf');
+include test/template/quack_setup.test_template
 
 statement ok
 attach {server} as rpc (token 'asdf')
@@ -29,15 +20,23 @@ select count(*), sum(i) from quack_query_by_name('rpc', 'from big_tbl')
 ----
 10000000	49999995000000
 
-statement ok con2
+statement ok
 detach rpc;
+
+# large fetch must behave the same with the read-ahead on the ASYNC pool or inline (async_threads=0)
+foreach at 0 8
+
+statement ok
+SET async_threads={at};
 
 query II
 select count(*), sum(i) from quack_query({server}, 'from big_tbl', token='asdf')
 ----
 10000000	49999995000000
 
-statement ok con1
-call quack_stop({server});
-
 endloop
+
+statement ok
+reset async_threads;
+
+include test/template/quack_teardown.test_template

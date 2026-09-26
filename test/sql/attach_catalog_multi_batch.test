@@ -10,7 +10,10 @@ set ignore_error_messages __none__
 
 # one chunk per fetch batch: the catalog listing no longer fits in the PREPARE response
 statement ok
-set global quack_fetch_batch_chunks=1;
+set global quack_prepare_inline_rows=1;
+
+statement ok
+set global quack_target_batch_bytes=1;
 
 foreach server 'quack:localhost'
 

@@ -1,0 +1,176 @@
+# name: test/remote_pushdown/remote_pushdown_merge.test
+# description: MERGE INTO pushdown for remote catalogs
+# group: [remote_pushdown]
+
+include test/template/quack_setup.test_template
+
+statement ok quack_db:quack_server_con
+create table target(k int primary key, v int);
+
+statement ok quack_db:quack_server_con
+insert into target values (1, 10), (2, 20), (3, 30);
+
+statement ok quack_db:quack_server_con
+create table source(k int, v int);
+
+statement ok quack_db:quack_server_con
+insert into source values (2, 200), (3, 300), (4, 400);
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+statement ok
+create table local_src(k int, v int)
+
+statement ok
+insert into local_src values (2, 999)
+
+# --- a fully remote MERGE is shipped whole ---
+
+# no local merge operator, a quack query instead
+# note: EXPLAIN binds the pushed statement and the server executes on PREPARE, so this merge does run
+query II
+explain merge into rpc.target t using rpc.source s on t.k = s.k
+  when matched then update set v = s.v
+  when not matched then insert values (s.k, s.v)
+----
+physical_plan	<REGEX>:.*Quack Query.*
+
+query II
+select k, v from rpc.target order by k
+----
+1	10
+2	200
+3	300
+4	400
+
+# it really ran on the server
+query II quack_db:quack_server_con
+select k, v from target order by k
+----
+1	10
+2	200
+3	300
+4	400
+
+# --- RETURNING ---
+
+query III
+merge into rpc.target t using rpc.source s on t.k = s.k
+  when matched then update set v = s.v * 2
+  returning t.k, t.v, merge_action
+----
+2	400	UPDATE
+3	600	UPDATE
+4	800	UPDATE
+
+# --- DELETE action / NOT MATCHED BY SOURCE ---
+
+statement ok
+merge into rpc.target t using rpc.source s on t.k = s.k
+  when not matched by source then delete
+
+query I
+select count(*) from rpc.target
+----
+3
+
+query I
+select count(*) from rpc.target where k = 1
+----
+0
+
+# --- USING column list instead of ON ---
+
+statement ok
+merge into rpc.target using rpc.source using (k)
+  when matched then update set v = 1
+
+query I
+select distinct v from rpc.target
+----
+1
+
+# --- catalog-qualified column references are stripped before sending ---
+
+statement ok
+merge into rpc.target t using rpc.source s on rpc.t.k = rpc.s.k
+  when matched then update set v = 7
+
+query I
+select distinct v from rpc.target
+----
+7
+
+# --- subquery source ---
+
+statement ok
+merge into rpc.target t using (select k, v * 2 as v from rpc.source where k = 2) s on t.k = s.k
+  when matched then update set v = s.v
+
+query II
+select k, v from rpc.target order by k
+----
+2	400
+3	7
+4	7
+
+# --- source with a CTE ---
+
+statement ok
+merge into rpc.target t using (with c as (select k, v from rpc.source) select * from c) s on t.k = s.k
+  when matched then update set v = s.v
+
+query II
+select k, v from rpc.target order by k
+----
+2	200
+3	300
+4	400
+
+# --- conditional actions ---
+
+statement ok
+merge into rpc.target t using rpc.source s on t.k = s.k
+  when matched and s.v > 250 then update set v = 0
+  when matched then delete
+
+query II
+select k, v from rpc.target order by k
+----
+3	0
+4	0
+
+# --- mixed locality ---
+
+# a local target with a remote source still works, through the quack table scan
+statement ok
+create table local_tgt(k int, v int)
+
+statement ok
+insert into local_tgt values (3, 3), (9, 9)
+
+statement ok
+merge into local_tgt t using rpc.source s on t.k = s.k
+  when matched then update set v = s.v
+
+query II
+select k, v from local_tgt order by k
+----
+3	300
+9	9
+
+# a purely local MERGE is untouched
+query II
+explain merge into local_tgt t using local_src s on t.k = s.k when matched then update set v = s.v
+----
+physical_plan	<!REGEX>:.*Quack Query.*
+
+# a remote target with a local source cannot be pushed, and the catalog layer does not support it -
+# the same pre-existing boundary as UPDATE/DELETE on a remote table with local data
+statement error
+merge into rpc.target t using local_src s on t.k = s.k when matched then update set v = s.v
+----
+
+statement ok quack_db:quack_server_con
+call quack_stop('quack:localhost')

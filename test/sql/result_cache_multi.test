@@ -1,0 +1,105 @@
+# name: test/sql/result_cache_multi.test
+# description: several connections cache results simultaneously; ACK and TTL expiry act per connection
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok quack_db:quack_server_con
+CREATE TABLE t5 AS SELECT range AS i FROM range(5);
+
+statement ok quack_db:quack_server_con
+CREATE TABLE t7 AS SELECT range AS i FROM range(7);
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_enable_reconnects = true;
+
+statement ok
+CREATE SECRET (TYPE quack, TOKEN 'asdf');
+
+statement ok
+ATTACH {server} AS remote;
+
+statement ok
+ATTACH {server} AS remote2;
+
+# Neither client acks, so both connections retain their result at the same time.
+query I
+SELECT i FROM remote.t5 ORDER BY i;
+----
+0
+1
+2
+3
+4
+
+query I
+SELECT i FROM remote2.t7 ORDER BY i;
+----
+0
+1
+2
+3
+4
+5
+6
+
+query I quack_db:quack_server_con
+SELECT cached_rows FROM quack_active_connections() ORDER BY cached_rows;
+----
+5
+7
+
+# An ACK clears only the acking connection's cache.
+statement ok
+SET quack_enable_reconnects = true;
+
+query I
+SELECT i FROM remote.t5 ORDER BY i;
+----
+0
+1
+2
+3
+4
+
+query I quack_db:quack_server_con
+SELECT cached_rows FROM quack_active_connections() ORDER BY cached_rows NULLS LAST;
+----
+7
+NULL
+
+statement ok
+SET quack_enable_reconnects = false;
+
+# Age remote2's cache, then re-cache on remote so the two idle times differ.
+sleep 3 seconds
+
+query I
+SELECT i FROM remote.t5 ORDER BY i;
+----
+0
+1
+2
+3
+4
+
+# The sweep reaps only the cache idle past the TTL.
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_result_ttl = 2;
+
+statement ok
+CALL quack_clear_cache();
+
+query I quack_db:quack_server_con
+SELECT cached_rows FROM quack_active_connections() ORDER BY cached_rows NULLS LAST;
+----
+5
+NULL
+
+statement ok
+DETACH remote2;
+
+statement ok
+DETACH remote;
+
+include test/template/quack_teardown.test_template

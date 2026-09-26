@@ -1,0 +1,50 @@
+# name: test/sql/fetch_projection.test
+# description: projection over quack_query results that span multiple FETCH batches
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+# A small batch target and a hash() column that is hard to compress make the result span more than
+# one FETCH batch. Batches are cut on SERIALIZED size, so plain data would fit one inlined batch.
+statement ok quack_db:quack_server_con
+set global quack_target_batch_bytes=65536;
+
+statement ok quack_db:quack_server_con
+set global quack_prepare_inline_rows=1;
+
+statement ok quack_db:quack_server_con
+create table big as select range as a, range * 2 as b, hash(range) as pad from range(30000);
+
+statement ok
+CALL enable_logging('Quack');
+
+# Inner query returns 2 columns; the outer aggregate only needs column a, so DuckDB
+# prunes the scan output to width 1. Fetched chunks are still full-width and must be
+# projected locally — previously this raised an INTERNAL error (vector index overrun).
+query III
+select count(*), min(a), max(a) from quack_query({server}, 'SELECT * FROM big', token='asdf')
+----
+30000	0	29999
+
+# make sure the result really spans more than one FETCH
+query I
+select count(*) > 1 from duckdb_logs_parsed('Quack') where message_type = 'FETCH_REQUEST'
+----
+true
+
+# Projecting the second column verifies the local projection picks the right column index.
+query III
+select count(*), min(b), max(b) from quack_query({server}, 'SELECT * FROM big', token='asdf')
+----
+30000	0	59998
+
+statement ok
+CALL disable_logging();
+
+statement ok quack_db:quack_server_con
+reset global quack_target_batch_bytes;
+
+statement ok quack_db:quack_server_con
+reset global quack_prepare_inline_rows;
+
+include test/template/quack_teardown.test_template

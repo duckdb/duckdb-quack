@@ -1,0 +1,67 @@
+# name: test/sql/server_connection_limits.test
+# description: quack_server_max_connections sheds excess concurrent connections cleanly (clients retry and still complete); idle sockets closed by quack_server_keep_alive_timeout self-heal on the client.
+# group: [sql]
+
+require quack
+
+require httpfs
+
+test-env QUACK_SERVER quack:localhost
+
+# Server with a hard cap of 2 concurrent connections and a 1-second keep-alive, so both limits
+# are exercised. Settings must be in place before quack_serve reads them.
+statement ok quack_db:quack_server_con
+SET quack_server_max_connections=2;
+
+statement ok quack_db:quack_server_con
+SET quack_server_keep_alive_timeout=1;
+
+statement ok quack_db:quack_server_con
+set variable actual_listen_uri = (select listen_uri from quack_serve('{QUACK_SERVER}:0', token='asdf'));
+
+query I quack_db:quack_server_con
+set variable listen_uri = concat('''', getvariable('actual_listen_uri'), '''');
+
+set variable server <variable:quack_server_con:listen_uri>
+
+# --- Cap shedding under concurrent load ---
+# Drive more concurrent in-flight requests than the cap. Excess connections are shed at the
+# server (the ElasticThreadPool refuses work past max_connections) and the httplib clients
+# retry transparently, so every request still returns the correct result — the cap sheds
+# cleanly under overload rather than deadlocking or corrupting responses. This asserts the
+# guarantee via genuinely concurrent requests, without depending on an idle connection
+# happening to still pin a worker at the instant a second client connects (which is racy).
+concurrentloop i 0 8
+
+query I
+FROM quack_query({server}, 'select count(*) from range(3000000)', token='asdf');
+----
+3000000
+
+endloop
+
+# --- keep-alive self-heal ---
+# A cached client connection outlives the server's keep-alive: after the server closes the
+# idle socket, the client must transparently reconnect on the next use.
+statement ok
+ATTACH {server} AS rpc (TYPE quack, TOKEN 'asdf');
+
+statement ok
+CREATE TABLE rpc.t1 AS SELECT range AS i FROM range(100);
+
+query I
+SELECT count(*) FROM rpc.t1;
+----
+100
+
+# Idle past the server keep-alive (1s): the server closes the socket. The client's cached
+# connection is now stale and must self-heal (retry on a fresh socket) transparently.
+sleep 2 seconds
+
+query I
+SELECT count(*) FROM rpc.t1;
+----
+100
+
+statement ok
+DETACH rpc;

@@ -6,7 +6,7 @@ require quack
 
 require httpfs
 
-# Start a server on the explicit form. listen_uri column preserves what was sent.
+# Start a server with the explicit form. listen_uri column preserves what was sent.
 query III
 FROM quack_serve('quack:127.0.0.1:9494', token='abcd');
 ----

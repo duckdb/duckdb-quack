@@ -1,0 +1,186 @@
+# name: test/sql/attach_insert_client_driven.test
+# description: the client names the statement and the stream; SEND_DATA only carries chunks
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+statement ok
+create table src as select * from range(20000) t(i);
+
+# Small batches, so an insert really produces several SEND_DATA messages.
+statement ok
+SET GLOBAL quack_target_batch_bytes = 16384;
+
+# --- the schema now travels in the statement, not in the first chunk ---
+
+# A zero-row insert sends no chunk, so no chunk can carry the column types. It still binds, because
+# the statement names them.
+statement ok
+create table rpc.no_rows(i bigint, s varchar);
+
+statement ok
+insert into rpc.no_rows select i, i::varchar from src where false;
+
+query I
+select count(*) from rpc.no_rows;
+----
+0
+
+# The same for a first batch that shows nothing about its values.
+statement ok
+create table rpc.all_null(i bigint, s varchar);
+
+statement ok
+insert into rpc.all_null select NULL::bigint, NULL::varchar from range(5000);
+
+query III
+select count(*), count(i), count(s) from rpc.all_null;
+----
+5000	0	0
+
+# --- the statement reports what the server changed, on the terminal message ---
+
+statement ok
+create table rpc.counted(i bigint);
+
+query I
+insert into rpc.counted select i from src;
+----
+20000
+
+# An insert of nothing reports zero. The terminal message still ends the stream.
+query I
+insert into rpc.counted select i from src where false;
+----
+0
+
+# --- a lost batch fails the statement, and inserts nothing ---
+
+statement ok
+create table rpc.short_stream(i bigint);
+
+statement ok
+SET quack_debug_drop_batch = 1;
+
+statement error
+insert into rpc.short_stream select i from src;
+----
+batches received
+
+statement ok
+SET quack_debug_drop_batch = 0;
+
+# The failed statement is atomic. It left nothing behind.
+query I
+select count(*) from rpc.short_stream;
+----
+0
+
+# The connection still works after the failure.
+statement ok
+insert into rpc.short_stream select i from src;
+
+query III
+select count(*), min(i), max(i) from rpc.short_stream;
+----
+20000	0	19999
+
+# --- the schema travels as SQL text, so every type must survive that round trip ---
+
+statement ok
+create table rpc.typed(d decimal(18,3), l bigint[], s struct(a integer, b varchar), m enum ('sad', 'ok', 'happy'), t timestamptz, b blob);
+
+statement ok
+insert into rpc.typed
+select (i / 7)::decimal(18,3), [i, i + 1], {'a': i::integer, 'b': i::varchar}, (['sad', 'ok', 'happy'])[i % 3 + 1],
+       ('2026-01-01 00:00:00'::timestamp + interval (i) second)::timestamptz, ('\x00' || i::varchar)::blob
+from src;
+
+query IIIIII
+select count(*), sum(d), sum(l[2]), sum(s.a), count(*) filter (where m = 'happy'), max(t)::varchar from rpc.typed;
+----
+20000	28570000.000	200010000	199990000	6666	2026-01-01 05:33:19+00
+
+# --- a source that fails on the client leaves no statement behind on the server ---
+
+statement ok
+create table rpc.failed_source(i bigint);
+
+statement error
+insert into rpc.failed_source select (i::varchar || 'x')::bigint from src;
+----
+Conversion Error
+
+query I
+select count(*) from rpc.failed_source;
+----
+0
+
+statement ok
+insert into rpc.failed_source select i from src;
+
+query I
+select count(*) from rpc.failed_source;
+----
+20000
+
+# --- a statement that fails on the server stops the client's sends ---
+
+statement ok
+create table rpc.keyed(i bigint primary key);
+
+statement ok
+insert into rpc.keyed values (5);
+
+statement ok
+create table big_src as select i from range(200000) t(i);
+
+statement ok
+set enable_logging = true; set logging_storage = 'memory'; set logging_level = 'debug';
+
+# The first batch already hits the existing key. The server refuses the sends after that, so the
+# client does not load all ~100 batches. The delay keeps the sends slower than the server's
+# failure, so the early stop is deterministic.
+statement ok
+set quack_debug_send_delay_ms=5;
+
+statement error
+insert into rpc.keyed select i from big_src;
+----
+Duplicate key
+
+statement ok
+reset quack_debug_send_delay_ms;
+
+query II
+select count(*) filter (where message like '%ERROR_RESPONSE%') > 0,
+       count(*) filter (where message like '%SEND_DATA_RESPONSE%') < 98
+from duckdb_logs where message like '%SEND_DATA_REQUEST%';
+----
+true	true
+
+query I
+select count(*) from rpc.keyed;
+----
+1
+
+statement ok
+insert into rpc.keyed select i + 10 from src;
+
+query I
+select count(*) from rpc.keyed;
+----
+20001
+
+# --- the internal scan is not callable by hand ---
+
+statement error
+select * from scan_data_from_quack_client('made-up', NULL::STRUCT(i BIGINT));
+----
+internal function
+
+statement ok quack_db:quack_server_con
+call quack_stop('quack:localhost')

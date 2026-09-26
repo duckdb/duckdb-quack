@@ -1,0 +1,86 @@
+# name: test/sql/quack_default_client_id.test
+# description: quack_default_client_id supplies a client_id when ATTACH / quack_query omit one; '' opts out
+# group: [sql]
+
+require quack
+
+# Precomputed at load (from $QUACK_CLIENT_ID or a random per-instance id), so non-empty by default.
+query I
+SELECT length(current_setting('quack_default_client_id')) >= 4;
+----
+true
+
+# The setup template pins the default to ''; opt back in below to exercise the resolution path.
+include test/template/quack_setup.test_template
+
+statement ok
+SET quack_default_client_id='auto_default_client';
+
+# No explicit client_id -> inherits the default -> a non-NULL client_id_hash appears.
+statement ok
+attach {server} as rpc_def (token 'asdf');
+
+query I quack_db:quack_server_con
+SELECT count(*) FILTER (WHERE client_id_hash IS NOT NULL) FROM quack_active_connections();
+----
+1
+
+# Default-derived and explicit client_id with the same value yield one distinct hash.
+statement ok
+attach {server} as rpc_exp (token 'asdf', client_id 'auto_default_client');
+
+query II quack_db:quack_server_con
+SELECT count(*) FILTER (WHERE client_id_hash IS NOT NULL), count(DISTINCT client_id_hash)
+  FROM quack_active_connections() WHERE client_id_hash IS NOT NULL;
+----
+2	1
+
+statement ok
+detach rpc_def;
+
+statement ok
+detach rpc_exp;
+
+# An explicit empty client_id opts a single connection out even while a default is set.
+statement ok
+attach {server} as rpc_optout (token 'asdf', client_id '');
+
+query I quack_db:quack_server_con
+SELECT count(*) FILTER (WHERE client_id_hash IS NOT NULL) FROM quack_active_connections();
+----
+0
+
+statement ok
+detach rpc_optout;
+
+# Emptying the setting opts out globally.
+statement ok
+SET quack_default_client_id='';
+
+statement ok
+attach {server} as rpc_none (token 'asdf');
+
+query I quack_db:quack_server_con
+SELECT count(*) FILTER (WHERE client_id_hash IS NOT NULL) FROM quack_active_connections();
+----
+0
+
+statement ok
+detach rpc_none;
+
+# A too-short explicit client_id is rejected (mirrors the >= 4 token rule).
+statement error
+attach {server} as rpc_bad (token 'asdf', client_id 'ab');
+----
+client_id must be at least 4 characters long
+
+# A too-short default is likewise rejected at connect time.
+statement ok
+SET quack_default_client_id='ab';
+
+statement error
+attach {server} as rpc_bad2 (token 'asdf');
+----
+client_id must be at least 4 characters long
+
+include test/template/quack_teardown.test_template

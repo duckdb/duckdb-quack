@@ -1,9 +1,12 @@
 #include "storage/quack_catalog.hpp"
+#include "storage/quack_schema.hpp"
 #include "storage/quack_table.hpp"
 #include "quack_scan.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/statement/create_statement.hpp"
+#include "duckdb/parser/parsed_data/alter_info.hpp"
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
+#include "duckdb/planner/binder.hpp"
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
 #include "storage/quack_view.hpp"
 
@@ -14,8 +17,7 @@ unique_ptr<CreateInfo> ParseCreateTable(const string &sql) {
 	parser.ParseQuery(sql);
 	if (parser.statements.size() != 1 || parser.statements[0]->type != StatementType::CREATE_STATEMENT) {
 		throw BinderException(
-		    "Failed to create view from SQL string - \"%s\" - statement did not contain a single SELECT statement",
-		    sql);
+		    "Failed to parse CREATE TABLE from the remote catalog - \"%s\" - expected a single CREATE statement", sql);
 	}
 	auto &create = parser.statements[0]->Cast<CreateStatement>();
 	return std::move(create.info);
@@ -25,9 +27,10 @@ QuackTableSet::QuackTableSet(ClientContext &context, QuackSchemaCatalogEntry &pa
                              const QuackLoadCatalogData &load_data)
     : QuackCatalogSet(parent.ParentCatalog().Cast<QuackCatalog>()), schema(parent) {
 	for (auto &row : load_data.tables->Rows()) {
-		auto schema_name = row.GetValue(0).GetValue<string>();
-		if (schema_name != parent.name) {
-			// does not belong to this schema
+		auto schema_oid = row.GetValue(0).GetValue<int64_t>();
+		if (schema_oid != parent.RemoteOid()) {
+			// does not belong to this schema. Matching on the remote oid rather than the schema name keeps
+			// schemas of the same name (in different catalogs, or nested in different parents) apart
 			continue;
 		}
 		// parse the SQL to get the table definition
@@ -39,18 +42,30 @@ QuackTableSet::QuackTableSet(ClientContext &context, QuackSchemaCatalogEntry &pa
 			if (info->type != CatalogType::TABLE_ENTRY) {
 				throw InternalException("Expected a CREATE TABLE");
 			}
-			// bind to resolve the types
+			// Bind to resolve the types. SKIP_BINDING leaves the column DEFAULT expressions unbound:
+			// binding them here would resolve functions through the catalog we are still constructing,
+			// which is not registered yet - a computed DEFAULT (now(), 1 + 0, nextval(...)) then aborts
+			// the entire ATTACH with a misleading "Catalog \"...\" does not exist" (issue #132).
+			// The parsed DEFAULT stays on the column and binds on first use, once the catalog exists.
 			auto binder = Binder::CreateBinder(context);
-			auto bound_info = binder->BindCreateTableInfo(std::move(info), schema);
+			unique_ptr<BoundCreateTableInfo> bound_info;
+			try {
+				bound_info = binder->BindCreateTableInfo(std::move(info), schema, AlterBindMode::SKIP_BINDING);
+			} catch (std::exception &ex) {
+				throw BinderException(
+				    "Failed to bind remote table while attaching quack catalog \"%s\" (schema \"%s\"): %s\nSQL: %s",
+				    catalog.GetName().GetIdentifierName(), schema.name.GetIdentifierName(), ex.what(), sql);
+			}
 			auto table = make_uniq<QuackTableCatalogEntry>(catalog, parent, bound_info->Base());
 			entry = std::move(table);
 		} else {
-			auto view_name = row.GetValue(1).GetValue<string>();
+			auto view_name = Identifier(row.GetValue(1).GetValue<string>());
 			// bind a remote procedure call to the view on the server side
 			// we don't actually care what the view contains server-side, we just treat it like an opaque object we can
 			// query
 			CreateViewInfo info(schema, view_name);
-			info.sql = QuackViewCatalogEntry::CreateViewSQL(catalog.GetName(), schema.name, view_name);
+			info.sql = QuackViewCatalogEntry::CreateViewSQL(catalog.GetName().GetIdentifierName(),
+			                                                parent.GetRemoteName(view_name));
 			info.query = CreateViewInfo::ParseSelect(info.sql);
 
 			// bind to resolve the types
@@ -66,11 +81,13 @@ QuackTableSet::QuackTableSet(QuackSchemaCatalogEntry &parent)
 }
 
 string QuackTableSet::GetLoadQuery() {
+	// the schema is identified by its oid - the name alone is ambiguous once schemas can be nested or live in
+	// different catalogs on the server
 	return R"(
-SELECT schema_name, sql, 'table'
+SELECT schema_oid, sql, 'table'
 FROM duckdb_tables()
 UNION ALL
-SELECT schema_name, view_name, 'view'
+SELECT schema_oid, view_name, 'view'
 FROM duckdb_views()
 	)";
 }
@@ -79,11 +96,13 @@ TableFunction QuackTableCatalogEntry::GetScanFunction(ClientContext &context, un
 	auto &quack_catalog = catalog.Cast<QuackCatalog>();
 	auto bind_data = make_uniq<QuackScanBindData>();
 	bind_data->client_connection = quack_catalog.GetClientConnection();
-	bind_data->table_name = name;
+	// the scan runs on the server: refer to the table the way the server sees it
+	bind_data->qualified_table_name = schema.Cast<QuackSchemaCatalogEntry>().GetRemoteName(name);
 	for (auto &col : GetColumns().Physical()) {
-		bind_data->column_names.push_back(col.Name());
+		bind_data->column_names.emplace_back(col.Name());
 		bind_data->column_types.push_back(col.Type());
 	}
+	bind_data->table_entry = this;
 	bind_data_p = std::move(bind_data);
 	return QuackScanFunction::GetFunction();
 }
@@ -93,7 +112,8 @@ unique_ptr<BaseStatistics> QuackTableCatalogEntry::GetStatistics(ClientContext &
 }
 
 TableStorageInfo QuackTableCatalogEntry::GetStorageInfo(ClientContext &context) {
-	throw NotImplementedException("GetStorageInfo not implemented yet");
+	// the table is stored on the server - there is no local storage or index to report
+	return TableStorageInfo();
 }
 
 } // namespace duckdb

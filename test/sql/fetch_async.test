@@ -1,0 +1,179 @@
+# name: test/sql/fetch_async.test
+# description: async FETCH read-ahead: non-blocking quack scan pipelines fetches on the ASYNC pool
+# group: [sql]
+
+require parquet
+
+include test/template/quack_setup.test_template
+
+# hash() makes the rows hard to compress. Batches are cut on SERIALIZED size, so plain integers
+# would fit one batch, PREPARE would inline it, and no FETCH would run.
+statement ok quack_db:quack_server_con
+create table big as select range i, hash(range) pad from range(100000);
+
+statement ok quack_db:quack_server_con
+create table big500 as select range i, hash(range) pad from range(500000);
+
+# remote parquet source: the server-side scan is parallel/multi-row-group, but FETCH batch
+# indices are minted by the quack server, so client-side ordering must be unaffected
+statement ok quack_db:quack_server_con
+copy (select range i, hash(range) pad from range(500000)) to '{TEST_DIR}/fetch_ord.parquet' (row_group_size 50000);
+
+statement ok quack_db:quack_server_con
+create view big_pq as select i, pad from '{TEST_DIR}/fetch_ord.parquet';
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+# small batches and a one-batch PREPARE drain give many FETCH round trips
+# Set AFTER the attach: the catalog enumeration itself is otherwise truncated to one chunk and
+# loses the views (pre-existing ExecuteCommandInternal FIXME).
+statement ok quack_db:quack_server_con
+set global quack_prepare_inline_rows=1;
+
+statement ok quack_db:quack_server_con
+set global quack_target_batch_bytes=65536;
+
+# make sure this shape really produces more than one FETCH
+statement ok
+CALL enable_logging('Quack');
+
+query II
+select count(*), sum(i) from quack_query({server}, 'from big', token='asdf')
+----
+100000	4999950000
+
+query I
+select count(*) > 1 from duckdb_logs_parsed('Quack') where message_type = 'FETCH_REQUEST'
+----
+true
+
+statement ok
+CALL disable_logging();
+
+# the scan must behave the same whether fetches run on the ASYNC pool or inline (async_threads=0)
+foreach at 0 1 8
+
+statement ok
+SET async_threads={at};
+
+query II
+select count(*), sum(i) from quack_query({server}, 'from big', token='asdf')
+----
+100000	4999950000
+
+query II
+select count(*), sum(i) from quack_query_by_name('rpc', 'from big')
+----
+100000	4999950000
+
+# order preservation: server-assigned batch indices flow into an order-preserving CTAS
+statement ok
+create or replace table local_ctas as from quack_query({server}, 'select i, pad from big order by i', token='asdf');
+
+query I
+select count(*) from (select i, row_number() over () - 1 rn from local_ctas) where i != rn
+----
+0
+
+# larger ordered CTAS through the attached catalog: fetches complete out of order, but scan
+# threads must observe monotonically increasing batch indices (order-preserving plan asserts it)
+statement ok
+create or replace table ordered_ctas as select i, pad from rpc.big500;
+
+query I
+select count(*) from (select i, row_number() over () - 1 rn from ordered_ctas) where i != rn
+----
+0
+
+# same, sourced from a remote parquet view (parallel multi-row-group scan on the server)
+statement ok
+create or replace table ordered_ctas_pq as select i, pad from rpc.big_pq;
+
+query I
+select count(*) from (select i, row_number() over () - 1 rn from ordered_ctas_pq) where i != rn
+----
+0
+
+# early termination: LIMIT stops the scan with fetches still in flight; a follow-up query must work
+query I
+select i from quack_query({server}, 'select i from big order by i', token='asdf') limit 1
+----
+0
+
+query II
+select count(*), sum(i) from quack_query({server}, 'from big', token='asdf')
+----
+100000	4999950000
+
+# explicit read-ahead depths
+statement ok
+set quack_fetch_read_ahead=1;
+
+query II
+select count(*), sum(i) from quack_query({server}, 'from big', token='asdf')
+----
+100000	4999950000
+
+statement ok
+set quack_fetch_read_ahead=8;
+
+query II
+select count(*), sum(i) from quack_query({server}, 'from big', token='asdf')
+----
+100000	4999950000
+
+statement ok
+reset quack_fetch_read_ahead;
+
+endloop
+
+statement ok
+reset async_threads;
+
+# reorder stress: quack_debug_fetch_delay_ms randomly delays each fetch task's publish, scrambling
+# completion order far more aggressively than the network does; ordered delivery must still hold
+statement ok
+SET async_threads=8;
+
+statement ok
+SET quack_debug_fetch_delay_ms=15;
+
+statement ok
+create or replace table delayed_ctas as select i, pad from rpc.big500;
+
+query I
+select count(*) from (select i, row_number() over () - 1 rn from delayed_ctas) where i != rn
+----
+0
+
+query II
+select count(*), sum(i) from quack_query({server}, 'from big', token='asdf')
+----
+100000	4999950000
+
+statement ok
+reset quack_debug_fetch_delay_ms;
+
+statement ok
+reset async_threads;
+
+# mid-stream error: the cast fails long after the PREPARE batch, so the error surfaces on a FETCH
+statement error
+select * from quack_query({server}, 'select (case when range < 90000 then range::varchar else ''oops'' end)::int from range(100000)', token='asdf')
+----
+Could not convert string
+
+# the connection survives the failed scan
+query II
+select count(*), sum(i) from quack_query({server}, 'from big', token='asdf')
+----
+100000	4999950000
+
+statement ok quack_db:quack_server_con
+reset global quack_target_batch_bytes;
+
+statement ok quack_db:quack_server_con
+reset global quack_prepare_inline_rows;
+
+include test/template/quack_teardown.test_template

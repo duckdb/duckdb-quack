@@ -1,0 +1,57 @@
+# name: test/sql/reconnects_ack_best_effort.test
+# description: a failed acknowledgement round-trip must NOT fail an already fully-fetched query; it is swallowed but logged at WARNING (quack_enable_reconnects).
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok quack_db:quack_server_con
+CREATE TABLE tbl AS SELECT range AS i FROM range(3);
+
+# Serve a second endpoint whose idle keep-alive sockets die after 1s. Stopping a server only
+# closes its listener; cached client sockets keep working until the keep-alive window expires,
+# so the short timeout is what makes the ACK failure below deterministic.
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_server_keep_alive_timeout = 1;
+
+statement ok quack_db:quack_server_con
+set variable actual_listen_uri2 = (select listen_uri from quack_serve('{QUACK_SERVER}:0', token='asdf'));
+
+query I quack_db:quack_server_con
+set variable listen_uri2 = concat('''', getvariable('actual_listen_uri2'), '''');
+
+set variable server2 <variable:quack_server_con:listen_uri2>
+
+statement ok
+CREATE SECRET (TYPE quack, TOKEN 'asdf');
+
+statement ok
+SET quack_enable_reconnects = true;
+
+statement ok
+CALL enable_logging(level='warning');
+
+statement ok
+PREPARE p AS SELECT i FROM quack_query({server2}, 'FROM tbl', token=>'asdf');
+
+# Take the server down and outlive the keep-alive window so the client's cached socket is
+# dead too. The ACK POST will now fail with a connection error.
+statement ok quack_db:quack_server_con
+CALL quack_stop({server2});
+
+sleep 2 seconds
+
+query I
+EXECUTE p;
+----
+0
+1
+2
+
+# The swallowed failure is not silent
+query I
+SELECT count(*) FROM duckdb_logs
+WHERE log_level = 'WARNING' AND contains(message, 'acknowledgement failed and was ignored');
+----
+1
+
+include test/template/quack_teardown.test_template

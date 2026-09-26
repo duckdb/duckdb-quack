@@ -2,44 +2,44 @@
 # description: Reject quack_serve() tokens shorter than 4 chars; accept 4+; accept no token (auto-generated).
 # group: [sql]
 
-require quack
+include test/template/quack_setup.test_template
 
-require httpfs
+statement ok quack_db:quack_server_con
+CALL quack_stop({server})
 
 # Reject empty token
-statement error
-FROM quack_serve('quack:127.0.0.1', token='');
+statement error quack_db:quack_server_con
+FROM quack_serve({server}, token='');
 ----
 Quack server token must be at least 4 characters long
 
 # Reject 1-char token
-statement error
-FROM quack_serve('quack:127.0.0.1', token='1');
+statement error quack_db:quack_server_con
+FROM quack_serve({server}, token='1');
 ----
 Quack server token must be at least 4 characters long
 
 # Reject 2-char token
-statement error
-FROM quack_serve('quack:127.0.0.1', token='12');
+statement error quack_db:quack_server_con
+FROM quack_serve({server}, token='12');
 ----
 Quack server token must be at least 4 characters long
 
 # Reject 3-char token
-statement error
-FROM quack_serve('quack:127.0.0.1', token='123');
+statement error quack_db:quack_server_con
+FROM quack_serve({server}, token='123');
 ----
 Quack server token must be at least 4 characters long
 
 # Accept 4-char token (boundary).
-statement ok
-FROM quack_serve('quack:127.0.0.1', token='1234');
+statement ok quack_db:quack_server_con
+FROM quack_serve({server}, token='1234');
 
-statement ok
-CALL quack_stop('quack:127.0.0.1');
+statement ok quack_db:quack_server_con
+CALL quack_stop({server});
 
 # No token argument -> auto-generated 32-char hex token, should succeed.
-statement ok
-FROM quack_serve('quack:127.0.0.1');
+statement ok quack_db:quack_server_con
+FROM quack_serve({server});
 
-statement ok
-CALL quack_stop('quack:127.0.0.1');
+include test/template/quack_teardown.test_template

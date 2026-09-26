@@ -1,0 +1,455 @@
+# name: test/sql/attach_insert_order.test
+# description: order-preserving rpc INSERT: PARALLEL_ORDERED (scan/parquet), SERIAL_ORDERED (range), batch splitting, trailing + internal executor batch-index gaps, wire reorder, producer gate, async sweep, CTAS, unordered fast path
+# group: [sql]
+
+require parquet
+
+include test/template/quack_setup.test_template
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+# Local ordered source. Parallel table scan supplies executor batch indices (PARALLEL_ORDERED path).
+statement ok
+create table src as select * from range(300000) t(i);
+
+statement ok
+SET threads=4;
+
+# --- PARALLEL_ORDERED: parallel table-scan source must land in source order despite concurrent producers.
+statement ok
+create table rpc.t_scan(i bigint);
+
+statement ok
+insert into rpc.t_scan select i from src;
+
+query III
+select count(*), min(i), max(i) from rpc.t_scan;
+----
+300000	0	299999
+
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_scan) where i != rn;
+----
+0
+
+# First stored row must be 0.
+query I
+select i from (select i, row_number() over () as rn from rpc.t_scan) where rn = 1;
+----
+0
+
+# --- SERIAL_ORDERED: range() has no executor batch index; the single producer mints one batch per flush.
+# Upload still runs async; order must be exact.
+statement ok
+create table rpc.t_range(i bigint);
+
+statement ok
+insert into rpc.t_range select * from range(300000) t(i);
+
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_range) where i != rn;
+----
+0
+
+# --- Parquet multi-row-group source (PARALLEL_ORDERED via parallel parquet scan).
+statement ok
+copy (select * from range(300000) t(i)) to '{TEST_DIR}/ord.parquet' (row_group_size 50000);
+
+statement ok
+create table rpc.t_parq(i bigint);
+
+statement ok
+insert into rpc.t_parq select i from read_parquet('{TEST_DIR}/ord.parquet');
+
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_parq) where i != rn;
+----
+0
+
+# --- Batch splitting: quack_target_batch_bytes says where the rebalancer cuts a dense batch, and
+# one batch is one SEND_DATA_REQUEST. A small 16KB target cuts the source into many messages. The
+# order must stay exact, and the client must send many more messages than there are row groups.
+statement ok
+CALL enable_logging(['Quack'], storage='memory');
+
+statement ok
+SET quack_target_batch_bytes=16384;
+
+statement ok
+create table rpc.t_split(i bigint);
+
+statement ok
+insert into rpc.t_split select i from src;
+
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_split) where i != rn;
+----
+0
+
+# server != '' selects only client-side outgoing requests (not server-side echoes).
+# 2.4MB of rows at a 16KB target gives ~150 messages, far above the 1 message with no splitting.
+query I
+select count(*) > 50 from duckdb_logs_parsed('Quack')
+where message_type = 'SEND_DATA_REQUEST' and server is not null and server != '';
+----
+true
+
+# Async SEND_DATA POSTs log through the context logger captured on the producer thread, so client-side
+# SEND_DATA logs are CONNECTION-scoped and carry the query's context ids. Assert none is mis-attributed
+# (previously these were DATABASE-scoped with null query_id/transaction_id, emitted via the db logger).
+query I
+select count(*) from duckdb_logs_parsed('Quack')
+where message_type = 'SEND_DATA_REQUEST' and server is not null and server != ''
+  and (scope != 'CONNECTION' or query_id is null or transaction_id is null);
+----
+0
+
+statement ok
+reset quack_target_batch_bytes;
+
+statement ok
+CALL disable_logging();
+
+# --- Trailing gap: a WHERE predicate empties the high morsels, so the batch-index sequence runs
+# 0..M then stops. The server delivers 0..M and finishes; there is nothing above to skip.
+statement ok
+create table rpc.t_filt(i bigint);
+
+statement ok
+insert into rpc.t_filt select i from src where i < 150000;
+
+query II
+select count(*), (select count(*) from src where i < 150000) from rpc.t_filt;
+----
+150000	150000
+
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_filt) where i != rn;
+----
+0
+
+# --- Internal gap: a predicate empties whole parquet row groups *between* live ones, so the executor
+# batch-index sequence has a hole. The rebalancer stamps dense indices, so its own stream has no hole
+# by construction. The rows after the gap must still land in order.
+statement ok
+copy (select * from range(300000) t(i)) to '{TEST_DIR}/gap.parquet' (row_group_size 50000);
+
+statement ok
+create table rpc.t_gap(i bigint);
+
+statement ok
+insert into rpc.t_gap
+select i from read_parquet('{TEST_DIR}/gap.parquet') where i < 4096 or (i >= 200000 and i < 204096);
+
+query III
+select count(*), min(i), max(i) from rpc.t_gap;
+----
+8192	0	204095
+
+# rows land in source order across the gap: 0..4095 then 200000..204095
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_gap)
+where (rn < 4096 and i != rn) or (rn >= 4096 and i != rn + 195904);
+----
+0
+
+# All row groups filtered out: no live batch, no stream, 0 rows — must not hang.
+statement ok
+create table rpc.t_alldead(i bigint);
+
+statement ok
+insert into rpc.t_alldead select i from read_parquet('{TEST_DIR}/gap.parquet') where i > 1000000;
+
+query I
+select count(*) from rpc.t_alldead;
+----
+0
+
+# Leading dead row group (0) + an internal one (2): live groups are 1 and 3.
+statement ok
+create table rpc.t_lead(i bigint);
+
+statement ok
+insert into rpc.t_lead
+select i from read_parquet('{TEST_DIR}/gap.parquet') where (i >= 50000 and i < 54096) or (i >= 150000 and i < 154096);
+
+query III
+select count(*), min(i), max(i) from rpc.t_lead;
+----
+8192	50000	154095
+
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_lead)
+where (rn < 4096 and i != rn + 50000) or (rn >= 4096 and i != rn + 145904);
+----
+0
+
+# Alternating live/dead row groups (0,2,4 live; 1,3,5 dead): many holes in the executor sequence.
+statement ok
+create table rpc.t_alt(i bigint);
+
+statement ok
+insert into rpc.t_alt select i from read_parquet('{TEST_DIR}/gap.parquet') where (i % 100000) < 4096;
+
+query III
+select count(*), min(i), max(i) from rpc.t_alt;
+----
+12288	0	204095
+
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_alt)
+where (rn < 4096 and i != rn) or (rn >= 4096 and rn < 8192 and i != rn + 95904) or (rn >= 8192 and i != rn + 191808);
+----
+0
+
+# --- async_threads sweep: order holds for synchronous (=0), single-async (=1), and wide (=8) modes.
+foreach at 0 1 8
+
+statement ok
+SET async_threads={at};
+
+statement ok
+create table rpc.t_at(i bigint);
+
+statement ok
+insert into rpc.t_at select i from src;
+
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_at) where i != rn;
+----
+0
+
+statement ok
+drop table rpc.t_at;
+
+endloop
+
+statement ok
+reset async_threads;
+
+# --- CTAS preserves order.
+statement ok
+create table rpc.t_ctas as select i from src;
+
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_ctas) where i != rn;
+----
+0
+
+# --- UNORDERED fast path (preserve_insertion_order=false): all rows arrive, order not asserted.
+statement ok
+SET preserve_insertion_order=false;
+
+statement ok
+create table rpc.t_fast(i bigint);
+
+statement ok
+insert into rpc.t_fast select i from src;
+
+query II
+select count(*), sum(i) from rpc.t_fast;
+----
+300000	44999850000
+
+statement ok
+reset preserve_insertion_order;
+
+# --- Skew race: a slow leading row group (an expensive md5 column on group 0) means a later batch is
+# ready before the earlier one. The rebalancer must hold the later batch until the slow one settles
+# below the watermark, so the dense stream still carries the source order.
+statement ok
+SET threads=2;
+
+statement ok
+copy (
+    select i, case when i < 50000 then md5(i::varchar) else 'x' end as s
+    from range(300000) t(i)
+) to '{TEST_DIR}/slow_leading.parquet' (row_group_size 50000);
+
+statement ok
+create table rpc.t_race(i bigint, l bigint);
+
+statement ok
+insert into rpc.t_race
+select i, length(s)
+from read_parquet('{TEST_DIR}/slow_leading.parquet')
+where i < 4096 or (i >= 200000 and i < 204096);
+
+query III
+select count(*), min(i), max(i) from rpc.t_race;
+----
+8192	0	204095
+
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_race)
+where (rn < 4096 and i != rn) or (rn >= 4096 and i != rn + 195904);
+----
+0
+
+# --- Wire reorder: a random delay before each SEND_DATA POST makes the arrival order on the server
+# random, and a small batch target makes many messages. The dense indices must rebuild source order.
+statement ok
+SET threads=4;
+
+statement ok
+SET async_threads=8;
+
+statement ok
+SET quack_debug_send_delay_ms=15;
+
+statement ok
+SET quack_target_batch_bytes=65536;
+
+statement ok
+create table rpc.t_jitter(i bigint);
+
+statement ok
+insert into rpc.t_jitter select i from src;
+
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_jitter) where i != rn;
+----
+0
+
+statement ok
+create table rpc.t_jitter_parq(i bigint);
+
+statement ok
+insert into rpc.t_jitter_parq select i from read_parquet('{TEST_DIR}/ord.parquet');
+
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_jitter_parq) where i != rn;
+----
+0
+
+statement ok
+reset quack_debug_send_delay_ms;
+
+statement ok
+reset async_threads;
+
+# --- Duplicate sends: every batch goes out two times, as a transport retry would do. The receiver
+# keys on the dense index and drops the second copy, so the row count must not change and the
+# FINALIZE count check must still agree.
+statement ok
+SET quack_target_batch_bytes=65536;
+
+statement ok
+CALL enable_logging(['Quack'], storage='memory');
+
+# the split section above left its own entries behind
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+create table dup_sends(label varchar, n bigint);
+
+# baseline: the same insert with no duplication, to count the batches
+statement ok
+create table rpc.t_dup_base(i bigint);
+
+statement ok
+insert into rpc.t_dup_base select i from src;
+
+statement ok
+insert into dup_sends select 'base', count(*) from duckdb_logs_parsed('Quack')
+where message_type = 'SEND_DATA_REQUEST' and server is not null and server != '';
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+SET quack_debug_duplicate_sends=1;
+
+statement ok
+create table rpc.t_dup(i bigint);
+
+statement ok
+insert into rpc.t_dup select i from src;
+
+statement ok
+insert into dup_sends select 'dup', count(*) from duckdb_logs_parsed('Quack')
+where message_type = 'SEND_DATA_REQUEST' and server is not null and server != '';
+
+# The setting really did send every batch two times. Each count also holds the terminal message.
+# That message carries no chunks and goes out one time, so dup = 2 * base - 1.
+query I
+select (select n from dup_sends where label = 'dup') = 2 * (select n from dup_sends where label = 'base') - 1
+   and (select n from dup_sends where label = 'base') > 2;
+----
+true
+
+# ... and the duplicates changed nothing
+query III
+select count(*), min(i), max(i) from rpc.t_dup;
+----
+300000	0	299999
+
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_dup) where i != rn;
+----
+0
+
+# the unordered path drops duplicates too
+statement ok
+SET preserve_insertion_order=false;
+
+statement ok
+create table rpc.t_dup_un(i bigint);
+
+statement ok
+insert into rpc.t_dup_un select i from src;
+
+query II
+select count(*), sum(i) from rpc.t_dup_un;
+----
+300000	44999850000
+
+statement ok
+reset preserve_insertion_order;
+
+statement ok
+reset quack_debug_duplicate_sends;
+
+statement ok
+CALL disable_logging();
+
+# --- Producer gate: a very small pending-bytes budget makes a non-minimum producer stop and help to
+# emit, on a skewed source. The insert must still complete, because the minimum producer is never
+# gated, and the order must hold.
+statement ok
+copy (
+    select i, case when i < 50000 then md5(i::varchar) else 'x' end as s
+    from range(300000) t(i)
+) to '{TEST_DIR}/gate_src.parquet' (row_group_size 50000);
+
+statement ok
+SET quack_rebalance_buffer_bytes=65536;
+
+statement ok
+create table rpc.t_gate(i bigint, l bigint);
+
+statement ok
+insert into rpc.t_gate select i, length(s) from read_parquet('{TEST_DIR}/gate_src.parquet');
+
+query III
+select count(*), min(i), max(i) from rpc.t_gate;
+----
+300000	0	299999
+
+query I
+select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_gate) where i != rn;
+----
+0
+
+statement ok
+reset quack_rebalance_buffer_bytes;
+
+statement ok
+reset quack_target_batch_bytes;
+
+statement ok con2
+detach rpc;
+
+include test/template/quack_teardown.test_template

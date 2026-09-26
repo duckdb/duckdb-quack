@@ -8,7 +8,7 @@ require httpfs
 
 set ignore_error_messages __none__
 
-statement ok con1
+statement ok quack_db:quack_server_con
 call quack_serve('quack:localhost', token='asdf');
 
 statement ok con2
@@ -35,5 +35,5 @@ SELECT count(*) FROM exec_log;
 ----
 1
 
-statement ok con1
+statement ok quack_db:quack_server_con
 call quack_stop('quack:localhost');
