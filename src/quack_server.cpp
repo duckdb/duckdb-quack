@@ -808,10 +808,10 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			stream_uuid = connection.statement.uuid;
 			abort_error = connection.statement.abort_error;
 		}
-		if (!stream && stream_uuid == fetch_request_message.uuid && abort_error.HasError()) {
+		if (!stream && stream_uuid == fetch_request_message.QueryUUID() && abort_error.HasError()) {
 			return make_uniq<ErrorResponse>(abort_error);
 		}
-		if (!stream || stream_uuid != fetch_request_message.uuid) {
+		if (!stream || stream_uuid != fetch_request_message.QueryUUID()) {
 			return make_uniq<ErrorResponse>("Result has been closed");
 		}
 		if (fetch_request_message.batch_index == 0) {
