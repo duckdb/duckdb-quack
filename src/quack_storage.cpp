@@ -157,6 +157,14 @@ static unique_ptr<Catalog> QuackAttach(optional_ptr<StorageExtensionInfo> storag
 	} else if (secret) {
 		token = QuackSecret::GetToken(*secret);
 	}
+	string schema_filter;
+	auto schema_entry = attach_options.options.find("schema");
+	if (schema_entry != attach_options.options.end()) {
+		if (schema_entry->second.IsNull() || schema_entry->second.GetValue<string>().empty()) {
+			throw InvalidInputException("schema cannot be NULL or empty");
+		}
+		schema_filter = schema_entry->second.GetValue<string>();
+	}
 	auto client_id_entry = attach_options.options.find("client_id");
 	auto client_id = QuackClient::ResolveClientId(
 	    context, client_id_entry != attach_options.options.end() ? &client_id_entry->second : nullptr);
@@ -167,7 +175,8 @@ static unique_ptr<Catalog> QuackAttach(optional_ptr<StorageExtensionInfo> storag
 	if (!ssl_fingerprint.empty()) {
 		server_uri.SetSslFingerprint(ssl_fingerprint);
 	}
-	return make_uniq<QuackCatalog>(db, server_uri, context, token, std::move(client_id), heartbeat_timeout);
+	return make_uniq<QuackCatalog>(db, server_uri, context, token, std::move(client_id), heartbeat_timeout,
+	                               std::move(schema_filter));
 }
 
 static unique_ptr<TransactionManager> QuackCreateTransactionManager(optional_ptr<StorageExtensionInfo> storage_info,

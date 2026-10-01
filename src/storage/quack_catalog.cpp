@@ -1,4 +1,5 @@
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/database_manager.hpp"
@@ -27,8 +28,9 @@
 namespace duckdb {
 
 QuackCatalog::QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri, ClientContext &context,
-                           const string &token, string client_id, idx_t heartbeat_timeout_seconds)
-    : Catalog(db_p) {
+                           const string &token, string client_id, idx_t heartbeat_timeout_seconds,
+                           string schema_filter_p)
+    : Catalog(db_p), schema_filter(std::move(schema_filter_p)) {
 	// connect to the server
 	client_connection =
 	    QuackClient::ConnectToServer(context, server_uri, token, std::move(client_id), heartbeat_timeout_seconds);
@@ -40,8 +42,8 @@ QuackCatalog::QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri, C
 
 QuackLoadCatalogData QuackCatalog::LoadCatalog(ClientContext &context) {
 	QuackLoadCatalogData result;
-	result.schemas = ExecuteCommandInternal(context, QuackSchemaSet::GetLoadQuery());
-	result.tables = ExecuteCommandInternal(context, QuackTableSet::GetLoadQuery());
+	result.schemas = ExecuteCommandInternal(context, QuackSchemaSet::GetLoadQuery(schema_filter));
+	result.tables = ExecuteCommandInternal(context, QuackTableSet::GetLoadQuery(schema_filter));
 	return result;
 }
 
@@ -178,6 +180,11 @@ optional_ptr<CatalogEntry> QuackCatalog::CreateSchema(CatalogTransaction transac
 		parent = &parent_entry->Cast<QuackSchemaCatalogEntry>();
 		target_set = parent->Schemas();
 	}
+	if (!schema_filter.empty() && (!parent || parent->IsCatalogWrapper()) &&
+	    !StringUtil::CIEquals(info.SchemaName().GetIdentifierName(), schema_filter)) {
+		throw CatalogException("Cannot create schema \"%s\" through schema-scoped Quack catalog \"%s\"",
+		                       info.SchemaName().GetIdentifierName(), schema_filter);
+	}
 
 	// create the schema remotely - the local schema path is exactly how the server sees it, so the statement
 	// only needs the local catalog name (the ATTACH alias) removed
@@ -268,14 +275,26 @@ string QuackCatalog::GetDBPath() {
 void QuackCatalog::DropSchema(ClientContext &context, DropInfo &info) {
 	// the resolved path is [catalog, parent schemas..., schema]; drop it remotely under the name the server
 	// knows it by - the local schema path is exactly the remote qualification, only the ATTACH alias is local
-	auto remote_name = info.GetQualifiedName();
-	remote_name.StripCatalog();
-	auto &schema_path = remote_name.Path();
+	auto schema_path = info.GetQualifiedName().Path();
+	if (schema_path.size() > 1) {
+		schema_path.erase(schema_path.begin());
+	}
 	if (schema_path.empty()) {
 		throw InternalException("DropSchema called without a schema name");
 	}
+	if (!schema_filter.empty()) {
+		EntryLookupInfo lookup(CatalogType::SCHEMA_ENTRY, info.GetQualifiedName());
+		auto entry = LookupSchema(GetCatalogTransaction(context), lookup, info.if_not_found);
+		if (!entry) {
+			return;
+		}
+		if (entry->Cast<QuackSchemaCatalogEntry>().IsCatalogWrapper()) {
+			throw CatalogException("Cannot drop a remote catalog through a schema-scoped Quack attachment");
+		}
+	}
 	auto drop_info = info.Copy();
-	drop_info->SetQualifiedName(remote_name);
+	drop_info->SetQualifiedName(
+	    QualifiedName(vector<Identifier>(schema_path.begin(), schema_path.end() - 1), schema_path.back()));
 	auto &transaction = QuackTransaction::Get(context, *this);
 	transaction.Query(drop_info->ToString());
 
@@ -304,6 +323,11 @@ bool QuackCatalog::SupportsPushdown(const TableRef &ref) {
 		return false;
 	}
 	return true;
+}
+
+bool QuackCatalog::SupportsPushdown(const SQLStatement &) {
+	// Local catalog lookup enforces schema_filter before remote DDL executes.
+	return schema_filter.empty();
 }
 
 } // namespace duckdb
