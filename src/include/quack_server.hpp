@@ -37,8 +37,8 @@ struct QuackStatementState {
 	mutex lock;
 	shared_ptr<QuackResultStream> stream;
 	std::thread thread;
-	hugeint_t uuid = 0;
-	//! A late FETCH for this uuid gets this error. The stream and its payloads can then go away.
+	hugeint_t query_uuid = 0;
+	//! A late FETCH for this query_uuid gets this error. The stream and its payloads can then go away.
 	ErrorData abort_error;
 };
 
@@ -55,7 +55,7 @@ struct QuackConnection {
 	mutex lock;
 	//! Held for a whole statement, because `duckdb_connection` runs one at a time. Only the query
 	//! driver takes it. Request handlers must not.
-	mutex statement_lock;
+	mutex execution_lock;
 	unique_ptr<Connection> duckdb_connection;
 	//! Replay cache of the last client query's result stream, null unless quack_enable_reconnects.
 	unique_ptr<QuackResultCache> result_cache;
@@ -63,8 +63,6 @@ struct QuackConnection {
 	shared_ptr<atomic<idx_t>> live_caches;
 	//! Rows held by result_cache
 	atomic<idx_t> cached_rows {DConstants::INVALID_INDEX};
-	//! Current query UUID
-	hugeint_t query_uuid;
 	string connection_id;
 
 	void SyncCachedRows() {

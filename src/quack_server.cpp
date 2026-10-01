@@ -133,7 +133,7 @@ static void DriveQuery(QuackConnection &connection, shared_ptr<QuackResultStream
 		}
 	};
 	try {
-		unique_lock<mutex> guard(connection.statement_lock);
+		unique_lock<mutex> guard(connection.execution_lock);
 		auto &context = *connection.duckdb_connection->context;
 
 		// MakeQuackFetchCollector sends the FIRST statement that returns a result into the stream.
@@ -676,7 +676,6 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			connection.sql_query = prepare_request_message.Query();
 			connection.query_state = QuackQueryState::ACTIVE;
 			connection.query_started_at = Timestamp::GetCurrentTimestamp();
-			connection.query_uuid = prepare_request_message.QueryUUID();
 		}
 
 		auto stream = make_shared_ptr<QuackResultStream>();
@@ -704,7 +703,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			superseded.stream = std::move(connection.statement.stream);
 			superseded.thread = std::move(connection.statement.thread);
 			connection.statement.stream = stream;
-			connection.statement.uuid = prepare_request_message.QueryUUID();
+			connection.statement.query_uuid = prepare_request_message.QueryUUID();
 			connection.statement.abort_error = ErrorData();
 			// A statement that reads a client stream cannot bind its result before the client sends.
 			// The scan finds the stream here and raises it, so PREPARE stops waiting.
@@ -806,7 +805,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		{
 			lock_guard<mutex> guard(connection.statement.lock);
 			stream = connection.statement.stream;
-			stream_uuid = connection.statement.uuid;
+			stream_uuid = connection.statement.query_uuid;
 			abort_error = connection.statement.abort_error;
 		}
 		if (!stream && stream_uuid == fetch_request_message.QueryUUID() && abort_error.HasError()) {
@@ -939,9 +938,14 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		auto &connection = *connection_p;
 		// {0,0} is a wildcard — cancel whatever query is running on this connection
 		bool is_wildcard = cancel_request_message.query_uuid == hugeint_t {0, 0};
-		if (!is_wildcard && connection.query_uuid != cancel_request_message.query_uuid) {
+		hugeint_t active_query_uuid;
+		{
+			lock_guard<mutex> guard(connection.statement.lock);
+			active_query_uuid = connection.statement.query_uuid;
+		}
+		if (!is_wildcard && active_query_uuid != cancel_request_message.query_uuid) {
 			return make_uniq<ErrorResponse>("Attempted to cancel a different query with id '%s' instead of '%s'",
-			                                cancel_request_message.query_uuid, connection.query_uuid);
+			                                cancel_request_message.query_uuid, active_query_uuid);
 		}
 		// Interrupt() cannot wake a producer parked on the buffer's capacity. The abort's SetError
 		// releases it. A client finds a cancel by the "Interrupt" text.
