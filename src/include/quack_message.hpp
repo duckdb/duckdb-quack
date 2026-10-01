@@ -325,8 +325,9 @@ class FetchRequestMessage : public QuackMessage {
 public:
 	static constexpr MessageType TYPE = MessageType::FETCH_REQUEST;
 
-	FetchRequestMessage(string connection_id_p, hugeint_t uuid, idx_t batch_index, idx_t ack_index)
-	    : QuackMessage(TYPE, std::move(connection_id_p)), uuid(uuid), batch_index(batch_index), ack_index(ack_index) {
+	FetchRequestMessage(string connection_id_p, hugeint_t query_uuid, idx_t batch_index, idx_t ack_index)
+	    : QuackMessage(TYPE, std::move(connection_id_p)), query_uuid(query_uuid), batch_index(batch_index),
+	      ack_index(ack_index) {
 	}
 
 protected:
@@ -337,7 +338,11 @@ public:
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<FetchRequestMessage> Deserialize(Deserializer &deserializer);
 
-	hugeint_t uuid;
+	hugeint_t QueryUUID() const {
+		return query_uuid;
+	}
+
+	hugeint_t query_uuid;
 	//! The dense batch index this request claims, from 1. Every request names its batch, so a
 	//! transport retry asks for the SAME batch.
 	idx_t batch_index = 0;

@@ -37,13 +37,13 @@ struct QuackStatementState {
 	mutex lock;
 	shared_ptr<QuackResultStream> stream;
 	std::thread thread;
-	hugeint_t uuid = 0;
-	//! A late FETCH for this uuid gets this error. The stream and its payloads can then go away.
+	hugeint_t query_uuid = 0;
+	//! A late FETCH for this query_uuid gets this error. The stream and its payloads can then go away.
 	ErrorData abort_error;
 };
 
 struct QuackConnection {
-	QuackConnection(string session_id_p, idx_t heartbeat_timeout_seconds_p);
+	QuackConnection(string connection_id_p, idx_t heartbeat_timeout_seconds_p);
 	~QuackConnection();
 
 	//! Renew unless the timeout has already elapsed. Once expired, a lease cannot be revived.
@@ -55,7 +55,7 @@ struct QuackConnection {
 	mutex lock;
 	//! Held for a whole statement, because `duckdb_connection` runs one at a time. Only the query
 	//! driver takes it. Request handlers must not.
-	mutex statement_lock;
+	mutex execution_lock;
 	unique_ptr<Connection> duckdb_connection;
 	//! Replay cache of the last client query's result stream, null unless quack_enable_reconnects.
 	unique_ptr<QuackResultCache> result_cache;
@@ -63,9 +63,7 @@ struct QuackConnection {
 	shared_ptr<atomic<idx_t>> live_caches;
 	//! Rows held by result_cache
 	atomic<idx_t> cached_rows {DConstants::INVALID_INDEX};
-	//! Current query UUID
-	hugeint_t query_uuid;
-	string session_id;
+	string connection_id;
 
 	void SyncCachedRows() {
 		cached_rows = result_cache ? result_cache->retained_rows : DConstants::INVALID_INDEX;
@@ -82,7 +80,7 @@ struct QuackConnection {
 	bool cache_in_expiry_queue = false;
 
 	//! Stable per-client reconnect key: HMAC-SHA256(server_hmac_key, client_id). Intentionally excludes
-	//! session_id so it stays identical across (re)connections for the same client_id. Empty if no client_id.
+	//! connection_id so it stays identical across (re)connections for the same client_id. Empty if no client_id.
 	string client_id_hash;
 
 	//! Heartbeat and lease variables
@@ -101,7 +99,7 @@ struct QuackConnection {
 
 struct QuackConnectionSnapshot {
 	string server_id;
-	string session_id;
+	string connection_id;
 	string client_id_hash;
 	string sql_query;
 	QuackQueryState query_state = QuackQueryState::IDLE;
@@ -114,7 +112,7 @@ enum class QuackServerState { UNINITIALIZED, WAITING_TO_START, RUNNING, CLOSED }
 
 struct CacheExpiryEntry {
 	timestamp_t served_at;
-	string session_id;
+	string connection_id;
 };
 
 struct CacheExpiresLater {
@@ -140,11 +138,12 @@ public:
 	virtual void Close() {};
 
 	shared_ptr<QuackConnection> GetConnection(const string &connection_id);
-	string CreateNewConnection(const string &session_id, const string &client_id_hash, idx_t heartbeat_timeout_seconds);
-	bool DisconnectConnection(const string &session_id);
+	string CreateNewConnection(const string &connection_id, const string &client_id_hash,
+	                           idx_t heartbeat_timeout_seconds);
+	bool DisconnectConnection(const string &connection_id);
 	// TODO need something to destroy connections
 
-	string GenerateSessionId();
+	string GenerateConnectionId();
 
 	//! Throw InvalidInputException if `token` doesn't meet requirements(currently, length >= 4)
 	static void ValidateToken(const string &token);

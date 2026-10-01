@@ -36,8 +36,8 @@ static bool LeaseTimeoutElapsed(time_point<steady_clock> last_renewed_at, time_p
 	return static_cast<idx_t>(elapsed_seconds) >= timeout_seconds;
 }
 
-QuackConnection::QuackConnection(string session_id_p, idx_t heartbeat_timeout_seconds_p)
-    : session_id(std::move(session_id_p)), heartbeat_timeout_seconds(heartbeat_timeout_seconds_p),
+QuackConnection::QuackConnection(string connection_id_p, idx_t heartbeat_timeout_seconds_p)
+    : connection_id(std::move(connection_id_p)), heartbeat_timeout_seconds(heartbeat_timeout_seconds_p),
       lease_last_renewed_at(steady_clock::now()) {
 }
 
@@ -133,7 +133,7 @@ static void DriveQuery(QuackConnection &connection, shared_ptr<QuackResultStream
 		}
 	};
 	try {
-		unique_lock<mutex> guard(connection.statement_lock);
+		unique_lock<mutex> guard(connection.execution_lock);
 		auto &context = *connection.duckdb_connection->context;
 
 		// MakeQuackFetchCollector sends the FIRST statement that returns a result into the stream.
@@ -282,9 +282,9 @@ vector<QuackConnectionSnapshot> QuackServer::GetActiveConnectionSnap() {
 	result.reserve(connections.size());
 	for (auto &conn : connections) {
 		QuackConnectionSnapshot snapshot;
-		// session_id and client_id_hash are set once when the connection is created, before it is
+		// connection_id and client_id_hash are set once when the connection is created, before it is
 		// published to active_connections, and never rewritten — so they need no lock here.
-		snapshot.session_id = conn->session_id;
+		snapshot.connection_id = conn->connection_id;
 		snapshot.client_id_hash = conn->client_id_hash;
 		{
 			std::lock_guard<std::mutex> lock(conn->lock);
@@ -308,7 +308,7 @@ void QuackServer::RegisterCacheForExpiry(QuackConnection &connection) {
 	}
 	connection.cache_in_expiry_queue = true;
 	std::lock_guard<std::mutex> lock(cache_expiry_mutex);
-	cache_expiry_queue.push({connection.result_cache->last_served_at, connection.session_id});
+	cache_expiry_queue.push({connection.result_cache->last_served_at, connection.connection_id});
 }
 
 void QuackServer::SweepExpiredCaches(DatabaseInstance &db) {
@@ -334,7 +334,7 @@ void QuackServer::SweepExpiredCaches(DatabaseInstance &db) {
 	// Their producer must be aborted, which joins a thread. Do that after the lock is released.
 	vector<shared_ptr<QuackConnection>> abandoned;
 	for (auto &entry : candidates) {
-		auto connection = GetConnection(entry.session_id);
+		auto connection = GetConnection(entry.connection_id);
 		if (!connection) {
 			// disconnected, the cache died with the connection and the slot dies here
 			continue;
@@ -385,33 +385,34 @@ shared_ptr<QuackConnection> QuackServer::GetConnection(const string &connection_
 	return nullptr;
 }
 
-string QuackServer::CreateNewConnection(const string &session_id, const string &client_id_hash,
+string QuackServer::CreateNewConnection(const string &connection_id, const string &client_id_hash,
                                         idx_t heartbeat_timeout_seconds) {
 	std::lock_guard<std::mutex> lock(active_connections_mutex);
 
-	D_ASSERT(active_connections.find(session_id) == active_connections.end());
+	D_ASSERT(active_connections.find(connection_id) == active_connections.end());
 
 	auto db = db_ptr.lock();
 	if (!db) {
 		throw InternalException("Database was closed");
 	}
-	auto new_connection = make_shared_ptr<QuackConnection>(session_id, heartbeat_timeout_seconds);
+	auto new_connection = make_shared_ptr<QuackConnection>(connection_id, heartbeat_timeout_seconds);
 	new_connection->client_id_hash = client_id_hash;
 	new_connection->live_caches = live_caches;
 	new_connection->duckdb_connection = make_uniq<Connection>(*db);
 	auto &connection_context = *new_connection->duckdb_connection->context;
 	// scan_data_from_quack_client registers its streams here, and SEND_DATA finds them by connection.
-	connection_context.registered_state->Insert(QuackSessionState::KEY, make_shared_ptr<QuackSessionState>(session_id));
+	connection_context.registered_state->Insert(QuackSessionState::KEY,
+	                                            make_shared_ptr<QuackSessionState>(connection_id));
 	connection_context.config.enable_progress_bar = false;
 	// new_connection->duckdb_connection->context->config.streaming_buffer_size = 10 * 1000000; // 10 MB
-	active_connections[session_id] = std::move(new_connection);
-	return session_id;
+	active_connections[connection_id] = std::move(new_connection);
+	return connection_id;
 }
 
-bool QuackServer::DisconnectConnection(const string &session_id) {
+bool QuackServer::DisconnectConnection(const string &connection_id) {
 	std::lock_guard<std::mutex> lock(active_connections_mutex);
 
-	auto entry = active_connections.find(session_id);
+	auto entry = active_connections.find(connection_id);
 	if (entry == active_connections.end()) {
 		// unknown client
 		return false;
@@ -473,7 +474,7 @@ static string ComputeClientHash(const string &server_hmac_key, const string &cli
 	return QuackHexEncode(digest, duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES);
 }
 
-string QuackServer::GenerateSessionId() {
+string QuackServer::GenerateConnectionId() {
 	auto db = db_ptr.lock();
 	if (!db) {
 		throw InternalException("Database was closed");
@@ -629,10 +630,10 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			return make_uniq<ErrorResponse>(StringUtil::Format(
 			    "heartbeat_timeout out of range - must be between 1 and %llu seconds", MAX_HEARTBEAT_TIMEOUT_SECONDS));
 		}
-		string session_id = GenerateSessionId();
+		string connection_id = GenerateConnectionId();
 		auto auth = EvaluateAuthQuery(
 		    db, StringUtil::Format("SELECT %s(?, ?, ?)", GetSettingString(db, "quack_authentication_function")),
-		    Value(session_id), Value(connection_request_message.AuthString()), Value(Token()));
+		    Value(connection_id), Value(connection_request_message.AuthString()), Value(Token()));
 		if (auth.Denied()) {
 			return auth.Failure("Authentication");
 		}
@@ -641,11 +642,11 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			client_id_hash = ComputeClientHash(server_hmac_key, connection_request_message.ClientId());
 		}
 		return make_uniq<ConnectionResponseMessage>(
-		    CreateNewConnection(session_id, client_id_hash, heartbeat_timeout_seconds), heartbeat_timeout_seconds);
+		    CreateNewConnection(connection_id, client_id_hash, heartbeat_timeout_seconds), heartbeat_timeout_seconds);
 	}
 	case MessageType::DISCONNECT_MESSAGE: {
 		auto &connection = *connection_p;
-		if (!DisconnectConnection(connection.session_id)) {
+		if (!DisconnectConnection(connection.connection_id)) {
 			return make_uniq<ErrorResponse>("Connection does not exist / already disconnected");
 		}
 		return make_uniq<SuccessResponse>();
@@ -675,7 +676,6 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			connection.sql_query = prepare_request_message.Query();
 			connection.query_state = QuackQueryState::ACTIVE;
 			connection.query_started_at = Timestamp::GetCurrentTimestamp();
-			connection.query_uuid = prepare_request_message.QueryUUID();
 		}
 
 		auto stream = make_shared_ptr<QuackResultStream>();
@@ -703,7 +703,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			superseded.stream = std::move(connection.statement.stream);
 			superseded.thread = std::move(connection.statement.thread);
 			connection.statement.stream = stream;
-			connection.statement.uuid = prepare_request_message.QueryUUID();
+			connection.statement.query_uuid = prepare_request_message.QueryUUID();
 			connection.statement.abort_error = ErrorData();
 			// A statement that reads a client stream cannot bind its result before the client sends.
 			// The scan finds the stream here and raises it, so PREPARE stops waiting.
@@ -805,13 +805,13 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		{
 			lock_guard<mutex> guard(connection.statement.lock);
 			stream = connection.statement.stream;
-			stream_uuid = connection.statement.uuid;
+			stream_uuid = connection.statement.query_uuid;
 			abort_error = connection.statement.abort_error;
 		}
-		if (!stream && stream_uuid == fetch_request_message.uuid && abort_error.HasError()) {
+		if (!stream && stream_uuid == fetch_request_message.QueryUUID() && abort_error.HasError()) {
 			return make_uniq<ErrorResponse>(abort_error);
 		}
-		if (!stream || stream_uuid != fetch_request_message.uuid) {
+		if (!stream || stream_uuid != fetch_request_message.QueryUUID()) {
 			return make_uniq<ErrorResponse>("Result has been closed");
 		}
 		if (fetch_request_message.batch_index == 0) {
@@ -938,9 +938,14 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		auto &connection = *connection_p;
 		// {0,0} is a wildcard — cancel whatever query is running on this connection
 		bool is_wildcard = cancel_request_message.query_uuid == hugeint_t {0, 0};
-		if (!is_wildcard && connection.query_uuid != cancel_request_message.query_uuid) {
+		hugeint_t active_query_uuid;
+		{
+			lock_guard<mutex> guard(connection.statement.lock);
+			active_query_uuid = connection.statement.query_uuid;
+		}
+		if (!is_wildcard && active_query_uuid != cancel_request_message.query_uuid) {
 			return make_uniq<ErrorResponse>("Attempted to cancel a different query with id '%s' instead of '%s'",
-			                                cancel_request_message.query_uuid, connection.query_uuid);
+			                                cancel_request_message.query_uuid, active_query_uuid);
 		}
 		// Interrupt() cannot wake a producer parked on the buffer's capacity. The abort's SetError
 		// releases it. A client finds a cancel by the "Interrupt" text.
