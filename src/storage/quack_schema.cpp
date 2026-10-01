@@ -36,7 +36,7 @@ void QuackSchemaSet::RegisterSchema(ClientContext &context, QuackCatalog &catalo
 		if (!entry) {
 			// a level of the path the server has no schema for: the stand-in entry for a remote catalog
 			auto info = MakeSchemaInfo(local_path[i]);
-			auto stand_in = make_uniq<QuackSchemaCatalogEntry>(catalog, info, parent.get());
+			auto stand_in = make_uniq<QuackSchemaCatalogEntry>(catalog, info, parent.get(), true);
 			entry = target_set.get().CreateEntry(std::move(stand_in), OnCreateConflict::REPLACE_ON_CONFLICT);
 		}
 		parent = &entry->Cast<QuackSchemaCatalogEntry>();
@@ -75,14 +75,19 @@ void QuackSchemaSet::Reload(ClientContext &context, QuackCatalog &catalog, const
 	}
 }
 
-string QuackSchemaSet::GetLoadQuery() {
+string QuackSchemaSet::GetLoadQuery(const string &schema_filter) {
 	// walk the (possibly nested) schema tree of every catalog the server has attached, so that each schema is
 	// reported with its full path - e.g. a schema "child" nested in "s1" comes back as ['s1', 'child']
-	return R"(
+	string query = R"(
 WITH RECURSIVE schema_tree AS (
 	SELECT oid, database_name, [schema_name] AS schema_path
 	FROM duckdb_schemas()
 	WHERE parent_schema_oid IS NULL
+)";
+	if (!schema_filter.empty()) {
+		query += StringUtil::Format("AND schema_name = %s\n", SQLString(schema_filter));
+	}
+	query += R"(
 	UNION ALL
 	SELECT nested.oid, nested.database_name, list_append(parent.schema_path, nested.schema_name)
 	FROM duckdb_schemas() nested
@@ -93,11 +98,14 @@ FROM schema_tree
 WHERE database_name NOT IN ('system', 'temp')
 ORDER BY (database_name = current_database()) DESC, database_name, length(schema_path), schema_path
 	)";
+	return query;
 }
 
 QuackSchemaCatalogEntry::QuackSchemaCatalogEntry(Catalog &catalog_p, CreateSchemaInfo &info_p,
-                                                 optional_ptr<SchemaCatalogEntry> parent_schema_p, int64_t remote_oid_p)
-    : SchemaCatalogEntry(catalog_p, info_p), parent_schema(parent_schema_p), remote_oid(remote_oid_p) {
+                                                 optional_ptr<SchemaCatalogEntry> parent_schema_p,
+                                                 bool is_catalog_wrapper_p)
+    : SchemaCatalogEntry(catalog_p, info_p), parent_schema(parent_schema_p), remote_oid(QUACK_INVALID_SCHEMA_OID),
+      is_catalog_wrapper(is_catalog_wrapper_p) {
 	schemas = make_uniq<QuackCatalogSet>(catalog_p.Cast<QuackCatalog>());
 	tables = make_uniq<QuackTableSet>(*this);
 }
@@ -185,6 +193,7 @@ optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateFunction(CatalogTransa
 
 optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateTable(CatalogTransaction transaction,
                                                                 BoundCreateTableInfo &info) {
+	CheckSchemaScope();
 	auto create_table_info = info.Base().Copy();
 	create_table_info->SetQualifiedName(GetRemoteName(create_table_info->GetQualifiedName().Name()));
 
@@ -195,6 +204,7 @@ optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateTable(CatalogTransacti
 }
 
 optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateView(CatalogTransaction transaction, CreateViewInfo &info) {
+	CheckSchemaScope();
 	auto create_view_info = info.Copy();
 	auto remote_name = GetRemoteName(create_view_info->GetQualifiedName().Name());
 	create_view_info->SetQualifiedName(remote_name);
@@ -251,6 +261,13 @@ void QuackSchemaCatalogEntry::DropEntry(ClientContext &context, DropInfo &info_p
 }
 void QuackSchemaCatalogEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 	throw NotImplementedException("Alter not implemented yet, Alter!");
+}
+
+void QuackSchemaCatalogEntry::CheckSchemaScope() const {
+	if (is_catalog_wrapper && !catalog.Cast<QuackCatalog>().GetSchemaFilter().empty()) {
+		throw CatalogException("Specify the selected schema when creating objects in remote catalog \"%s\"",
+		                       name.GetIdentifierName());
+	}
 }
 
 // clang-format off

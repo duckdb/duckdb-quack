@@ -80,16 +80,22 @@ QuackTableSet::QuackTableSet(QuackSchemaCatalogEntry &parent)
     : QuackCatalogSet(parent.ParentCatalog().Cast<QuackCatalog>()), schema(parent) {
 }
 
-string QuackTableSet::GetLoadQuery() {
-	// the schema is identified by its oid - the name alone is ambiguous once schemas can be nested or live in
-	// different catalogs on the server
-	return R"(
+string QuackTableSet::GetLoadQuery(const string &schema_filter) {
+	string prefix;
+	string schema_predicate;
+	if (!schema_filter.empty()) {
+		prefix = "WITH selected_schemas AS (" + QuackSchemaSet::GetLoadQuery(schema_filter) + ")\n";
+		schema_predicate = "WHERE schema_oid IN (SELECT oid FROM selected_schemas)\n";
+	}
+	return prefix + R"(
 SELECT schema_oid, sql, 'table'
 FROM duckdb_tables()
+)" + schema_predicate +
+	       R"(
 UNION ALL
 SELECT schema_oid, view_name, 'view'
 FROM duckdb_views()
-	)";
+)" + schema_predicate;
 }
 
 TableFunction QuackTableCatalogEntry::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data_p) {

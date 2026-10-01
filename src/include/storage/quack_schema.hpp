@@ -30,7 +30,7 @@ class QuackSchemaSet : public QuackCatalogSet {
 public:
 	QuackSchemaSet(ClientContext &context, QuackCatalog &catalog, const QuackLoadCatalogData &load_data);
 
-	static string GetLoadQuery();
+	static string GetLoadQuery(const string &schema_filter = string());
 
 	void Reload(ClientContext &context, QuackCatalog &catalog, const QuackLoadCatalogData &load_data);
 
@@ -46,7 +46,7 @@ public:
 	//! remote catalog
 	QuackSchemaCatalogEntry(Catalog &catalog_p, CreateSchemaInfo &info_p,
 	                        optional_ptr<SchemaCatalogEntry> parent_schema_p = nullptr,
-	                        int64_t remote_oid_p = QUACK_INVALID_SCHEMA_OID);
+	                        bool is_catalog_wrapper_p = false);
 	//! A schema loaded from the server, together with the tables/views it holds
 	QuackSchemaCatalogEntry(ClientContext &context, Catalog &catalog_p, CreateSchemaInfo &info_p,
 	                        optional_ptr<SchemaCatalogEntry> parent_schema_p, int64_t remote_oid_p,
@@ -66,6 +66,9 @@ public:
 	//! The oid of this schema on the server, or QUACK_INVALID_SCHEMA_OID if it has none
 	int64_t RemoteOid() const {
 		return remote_oid;
+	}
+	bool IsCatalogWrapper() const {
+		return is_catalog_wrapper;
 	}
 	//! The fully qualified name of an entry in this schema as the server sees it. The local schema path is
 	//! exactly the remote qualification - the catalog name is only the local ATTACH alias, so it is dropped
@@ -95,12 +98,14 @@ public:
 	void Alter(CatalogTransaction transaction, AlterInfo &info) override;
 
 private:
+	void CheckSchemaScope() const;
 	optional_ptr<CatalogEntry> TryLoadBuiltInFunction(const string &entry_name);
 	optional_ptr<CatalogEntry> LoadBuiltInFunction(DefaultTableMacro macro);
 
 private:
 	optional_ptr<SchemaCatalogEntry> parent_schema;
 	int64_t remote_oid;
+	bool is_catalog_wrapper = false;
 	unique_ptr<QuackCatalogSet> schemas;
 	unique_ptr<QuackTableSet> tables;
 
