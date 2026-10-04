@@ -238,8 +238,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
 
 	config.AddExtensionOption("quack_fetch_producer_buffer_bytes",
-	                          "Server-side cap on bytes buffered ahead by the fetch collector; the query "
-	                          "executor blocks when the client falls this far behind",
+	                          "Server-side cap on bytes buffered for one stream: query results ahead of the "
+	                          "client, or client INSERT batches ahead of the query; the faster side waits at the cap",
 	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_FETCH_PRODUCER_BUFFER_BYTES_DEFAULT));
 
 	config.AddExtensionOption("quack_server_max_connections",
