@@ -2,6 +2,7 @@
 #include "storage/quack_schema.hpp"
 #include "storage/quack_table.hpp"
 #include "quack_client.hpp"
+#include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
@@ -205,7 +206,8 @@ optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateView(CatalogTransactio
 
 	// locally, override the query with a remote procedure call to ensure the view is evaluated remotely
 	info.sql = QuackViewCatalogEntry::CreateViewSQL(ParentCatalog().GetName().GetIdentifierName(), remote_name);
-	info.query = CreateViewInfo::ParseSelect(info.sql);
+	auto parser = Parser::GetBuiltinParser();
+	info.query = CreateViewInfo::ParseSelect(parser, info.sql);
 
 	auto quack_entry = make_uniq<QuackViewCatalogEntry>(catalog, *this, info);
 	return tables->CreateEntry(std::move(quack_entry), info.on_conflict);

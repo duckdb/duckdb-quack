@@ -13,7 +13,7 @@
 namespace duckdb {
 
 unique_ptr<CreateInfo> ParseCreateTable(const string &sql) {
-	Parser parser;
+	auto parser = Parser::GetBuiltinParser();
 	parser.ParseQuery(sql);
 	if (parser.statements.size() != 1 || parser.statements[0]->type != StatementType::CREATE_STATEMENT) {
 		throw BinderException(
@@ -66,7 +66,8 @@ QuackTableSet::QuackTableSet(ClientContext &context, QuackSchemaCatalogEntry &pa
 			CreateViewInfo info(schema, view_name);
 			info.sql = QuackViewCatalogEntry::CreateViewSQL(catalog.GetName().GetIdentifierName(),
 			                                                parent.GetRemoteName(view_name));
-			info.query = CreateViewInfo::ParseSelect(info.sql);
+			auto parser = Parser::GetBuiltinParser();
+			info.query = CreateViewInfo::ParseSelect(parser, info.sql);
 
 			// bind to resolve the types
 			auto view = make_uniq<QuackViewCatalogEntry>(catalog, parent, info);
