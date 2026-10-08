@@ -6,6 +6,7 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/valid_checker.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
+#include "duckdb/parser/parsed_data/transaction_info.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
 #include "duckdb/storage/temporary_file_manager.hpp"
 #include "duckdb/common/serializer/binary_deserializer.hpp"
@@ -157,6 +158,34 @@ static void SendRetainedResult(QuackResultStream &stream, QueryResult &result) {
 	stream.announced_total = dense_index;
 }
 
+//! Mirrors ClientContext::ErrorResult for failures the engine never saw: a parse or preprocess
+//! error from the statement iterator must still honor the transaction invalidation policy, and the
+//! message must still get its location context.
+static ErrorData HandleRawError(ClientContext &context, ErrorData error, const string &sql) {
+	bool invalidates_transaction = true;
+	bool policy_invalidates;
+	switch (context.transaction.GetInvalidationPolicy()) {
+	case TransactionInvalidationPolicy::STANDARD_POLICY:
+	case TransactionInvalidationPolicy::ALL_ERRORS_INVALIDATE_TRANSACTION:
+		policy_invalidates = true;
+		break;
+	default:
+		policy_invalidates = Exception::InvalidatesTransaction(error.Type());
+		break;
+	}
+	if (!policy_invalidates) {
+		invalidates_transaction = false;
+	} else if (Exception::InvalidatesDatabase(error.Type())) {
+		auto &db_instance = DatabaseInstance::GetDatabase(context);
+		ValidChecker::Invalidate(db_instance, error.RawMessage());
+	}
+	if (invalidates_transaction && context.HasActiveTransaction()) {
+		ValidChecker::Invalidate(context.ActiveTransaction(), error.RawMessage());
+	}
+	context.ProcessError(error, sql);
+	return error;
+}
+
 //! Runs one client query. It holds the statement lock for the full duration. The first statement
 //! that returns rows claims the stream, through the engine's result buffer in the quack format or,
 //! when the planner settled it eagerly, from its retained payloads; every other statement runs
@@ -169,27 +198,31 @@ static void DriveQuery(QuackConnection &connection, shared_ptr<QuackResultStream
 			session_state->Streams().Fail(error);
 		}
 	};
+	// Held through the catch: the error handler touches transaction state, and a superseding PREPARE
+	// starts the replacement driver before joining this one.
+	unique_lock<mutex> guard(connection.statement_lock);
 	try {
-		unique_lock<mutex> guard(connection.statement_lock);
 		auto &duckdb_connection = *connection.duckdb_connection;
 		auto &context = *duckdb_connection.context;
-		auto format = QuackFormat::FromSettings(context);
 
 		unique_ptr<QueryResult> last_result;
 		ErrorData error;
 		auto statements = context.IterateStatements(sql);
-		// An abort errors the buffer before it interrupts, and Submit resets the interrupt for the
-		// next statement, so the buffer is what stops the loop between statements.
-		while (statements.Peek() && !error.HasError() && !stream->buffer.HasError()) {
+		// The error checks come before Peek: Peek parses ahead, and a failed statement must not let
+		// a later parse error replace its message. An abort errors the buffer before it interrupts,
+		// and Submit resets the interrupt for the next statement, so the buffer is what stops the
+		// loop between statements.
+		while (!error.HasError() && !stream->buffer.HasError() && statements.Peek()) {
 			auto statement = statements.GetStatement();
 			if (!statement) {
 				continue;
 			}
 			// Once a statement claimed the stream, SendRetainedResult never reads a later result, so those
-			// skip the wire format and the serialization pass it would pay on Complete.
+			// skip the wire format and the serialization pass it would pay on Complete. The format is
+			// built per statement: a preceding SET in the same text must reach it.
 			auto bound = stream->Bound();
 			auto result = bound ? duckdb_connection.Submit(std::move(statement))
-			                    : duckdb_connection.Submit(std::move(statement), format);
+			                    : duckdb_connection.Submit(std::move(statement), QuackFormat::FromSettings(context));
 			auto &properties = result->GetStatementProperties();
 			// The planner still settles some statements eagerly, so they are materialized at submission and
 			// cannot stream. That planner limitation is going away, and this guard goes with it.
@@ -220,8 +253,9 @@ static void DriveQuery(QuackConnection &connection, shared_ptr<QuackResultStream
 			}
 		}
 	} catch (std::exception &ex) {
-		fail(ErrorData(ex));
+		fail(HandleRawError(*connection.duckdb_connection->context, ErrorData(ex), sql));
 	}
+	guard.unlock();
 	// Close against the announced total, so a short stream errors instead of truncating.
 	stream->buffer.Finish(stream->announced_total);
 }

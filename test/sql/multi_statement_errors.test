@@ -8,7 +8,7 @@ include test/template/quack_setup.test_template
 statement error
 from quack_query({server}, 'create table e(i int); insert into e values (1); select error(''mid''); insert into e values (2)', token='asdf')
 ----
-mid
+Invalid Input Error: mid
 
 query I
 from quack_query({server}, 'select count(*) from e', token='asdf')
@@ -19,12 +19,79 @@ from quack_query({server}, 'select count(*) from e', token='asdf')
 statement error
 from quack_query({server}, 'select 42; select error(''late'')', token='asdf')
 ----
-late
+Invalid Input Error: late
 
 # an error before any result statement
 statement error
 from quack_query({server}, 'select error(''early''); select 42', token='asdf')
 ----
-early
+Invalid Input Error: early
+
+# a failing statement followed by malformed SQL reports the FIRST failure, not the later parse error
+statement error
+from quack_query({server}, 'select error(''first failure''); selexxxct 42', token='asdf')
+----
+Invalid Input Error: first failure
+
+statement error
+from quack_query({server}, 'select * from missing_table; selexxxct 42', token='asdf')
+----
+Catalog Error: Table with name missing_table
+
+statement error
+from quack_query({server}, 'select 42; select error(''after claim''); selexxxct 1', token='asdf')
+----
+Invalid Input Error: after claim
+
+# --- a parser error must invalidate an active transaction, like the engine's own error path does
+
+statement ok
+ATTACH {server} AS remote (TOKEN 'asdf');
+
+statement ok
+FROM quack_query_by_name('remote', 'CREATE TABLE t(i INTEGER)');
+
+statement error
+FROM quack_query_by_name('remote', 'BEGIN; INSERT INTO t VALUES (7); selexxxct 42');
+----
+syntax error
+
+# the transaction is aborted until it ends
+statement error
+FROM quack_query_by_name('remote', 'SELECT 1');
+----
+<REGEX>:.*(aborted|invalidated).*
+
+# COMMIT on the failed transaction rolls back without an error, as it does natively
+statement ok
+FROM quack_query_by_name('remote', 'COMMIT');
+
+query I
+FROM quack_query_by_name('remote', 'SELECT count(*) FROM t');
+----
+0
+
+# the lenient policy keeps the transaction usable through a syntax error
+statement ok quack_db:quack_server_con
+SET GLOBAL default_transaction_invalidation_policy='SYNTACTIC_ERRORS_DO_NOT_INVALIDATE';
+
+statement error
+FROM quack_query_by_name('remote', 'BEGIN; INSERT INTO t VALUES (8); selexxxct 42');
+----
+syntax error
+
+statement ok
+FROM quack_query_by_name('remote', 'COMMIT');
+
+query I
+FROM quack_query_by_name('remote', 'SELECT count(*) FROM t');
+----
+1
+
+statement ok quack_db:quack_server_con
+RESET GLOBAL default_transaction_invalidation_policy;
+
+statement ok
+DETACH remote;
 
 include test/template/quack_teardown.test_template
