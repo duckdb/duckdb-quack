@@ -1,0 +1,30 @@
+# name: test/sql/multi_statement_errors.test
+# description: An error in a multi-statement text is the query's error and stops the text, also after a result was already claimed
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+# the failing statement's error surfaces, and later statements do not run
+statement error
+from quack_query({server}, 'create table e(i int); insert into e values (1); select error(''mid''); insert into e values (2)', token='asdf')
+----
+mid
+
+query I
+from quack_query({server}, 'select count(*) from e', token='asdf')
+----
+1
+
+# an error after the stream is claimed fails the query instead of returning the first result
+statement error
+from quack_query({server}, 'select 42; select error(''late'')', token='asdf')
+----
+late
+
+# an error before any result statement
+statement error
+from quack_query({server}, 'select error(''early''); select 42', token='asdf')
+----
+early
+
+include test/template/quack_teardown.test_template

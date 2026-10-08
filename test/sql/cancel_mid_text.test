@@ -1,0 +1,53 @@
+# name: test/sql/cancel_mid_text.test
+# description: a cancel during one statement of a multi-statement text stops the text: the following write never runs
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+concurrentloop threadid 0 2
+
+onlyif threadid=0
+statement ok
+ATTACH {server} AS remote (TOKEN 'asdf');
+
+onlyif threadid=0
+statement error
+FROM quack_query_by_name('remote', 'SELECT sleep_ms(5000); CREATE TABLE after_cancel(i int)');
+----
+Interrupt
+
+onlyif threadid=1
+statement ok
+ATTACH {server} AS remote2 (TOKEN 'asdf');
+
+onlyif threadid=1
+statement ok
+SELECT sleep_ms(100);
+
+onlyif threadid=1
+statement ok
+SET VARIABLE conn_id = (
+  SELECT connection_id
+  FROM quack_query_by_name('remote2',
+    'SELECT connection_id FROM quack_active_connections()
+     WHERE state = ''active'' AND query = ''SELECT sleep_ms(5000); CREATE TABLE after_cancel(i int)''
+     LIMIT 1')
+);
+
+onlyif threadid=1
+statement ok
+SELECT sleep_ms(100);
+
+onlyif threadid=1
+statement ok
+FROM quack_cancel('remote2', getvariable('conn_id'));
+
+endloop
+
+# the statement after the cancelled one must not have run
+query I quack_db:quack_server_con
+SELECT count(*) FROM duckdb_tables() WHERE table_name = 'after_cancel';
+----
+0
+
+include test/template/quack_teardown.test_template

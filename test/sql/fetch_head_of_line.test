@@ -1,12 +1,11 @@
 # name: test/sql/fetch_head_of_line.test
-# description: a full producer buffer of later batches must not starve the head batch (single-threaded client)
+# description: staggered producers under a small buffer: the fetch stream arrives whole and in order (single-threaded client)
 # group: [sql]
 
 include test/template/quack_setup.test_template
 
-# The emitters run at different speeds. The slow ones fill the small buffer with LATER batches, and
-# the head batch then finds no capacity while the client waits for it. Head-of-stream admission must
-# let the head in. Without it, this test waits for ever.
+# The producers hand payloads over at different speeds (the emit delay staggers them) while the
+# small buffer applies backpressure and the single-threaded client drains one index at a time.
 statement ok quack_db:quack_server_con
 SET GLOBAL quack_fetch_producer_buffer_bytes = 524288;
 
@@ -29,10 +28,11 @@ SET threads = 1;
 statement ok
 SET quack_fetch_read_ahead = 1;
 
-query II
-SELECT count(*), sum(i) FROM quack_query({server}, 'SELECT i, pad FROM big', token='asdf')
+query III
+SELECT count(*), sum(i), count(*) filter (where i != rn)
+FROM (SELECT i, row_number() over () - 1 rn FROM quack_query({server}, 'SELECT i, pad FROM big', token='asdf'))
 ----
-200000	19999900000
+200000	19999900000	0
 
 statement ok
 RESET threads;
