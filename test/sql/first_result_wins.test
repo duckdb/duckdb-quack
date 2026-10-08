@@ -1,0 +1,74 @@
+# name: test/sql/first_result_wins.test
+# description: The first statement that returns rows is the client's result, including statements the planner settles eagerly (CALL, INSERT ... RETURNING)
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+# a CALL followed by another statement: the CALL's rows are the result
+query I
+from quack_query({server}, 'call range(3); select 99', token='asdf')
+----
+0
+1
+2
+
+# INSERT ... RETURNING followed by another statement: the RETURNING rows are the result,
+# not the trailing insert's count (values chosen so the two cannot coincide)
+query I
+from quack_query({server}, 'create table frw(i int); insert into frw values (7) returning i; insert into frw values (8), (9)', token='asdf')
+----
+7
+
+# the statement after the claimed result still ran
+query I
+from quack_query({server}, 'select count(*) from frw', token='asdf')
+----
+3
+
+# an empty first result still wins, eagerly settled or streamed
+query I
+from quack_query({server}, 'call range(0); select 99', token='asdf')
+----
+
+query I
+from quack_query({server}, 'select 1 where false; select 2', token='asdf')
+----
+
+# a write after a streamed claim persists
+query I
+from quack_query({server}, 'select 42; insert into frw values (10)', token='asdf')
+----
+42
+
+# an eagerly settled statement after a streamed claim is discarded but still runs
+query I
+from quack_query({server}, 'select 42; insert into frw values (11) returning i', token='asdf')
+----
+42
+
+query I
+from quack_query({server}, 'select count(*) from frw', token='asdf')
+----
+5
+
+# when no statement returns rows the LAST count is sent (the first insert's count, 3, cannot match)
+query I
+from quack_query({server}, 'create table frw2(i int); insert into frw2 values (1), (2), (3); insert into frw2 values (4)', token='asdf')
+----
+1
+
+# an eagerly settled result larger than one payload arrives whole and in order
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_target_batch_bytes = 1;
+
+query III
+select count(*), sum(range), count(*) filter (where range != rn)
+from (select range, row_number() over () - 1 rn
+      from quack_query({server}, 'call range(100000); select 1', token='asdf'))
+----
+100000	4999950000	0
+
+statement ok quack_db:quack_server_con
+RESET GLOBAL quack_target_batch_bytes;
+
+include test/template/quack_teardown.test_template

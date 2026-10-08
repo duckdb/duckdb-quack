@@ -6,12 +6,13 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/valid_checker.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
+#include "duckdb/parser/parsed_data/transaction_info.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
 #include "duckdb/storage/temporary_file_manager.hpp"
 #include "duckdb/common/serializer/binary_deserializer.hpp"
 
-#include "duckdb/main/client_config.hpp"
-#include "duckdb/main/prepared_statement_data.hpp"
+#include "duckdb/main/query_result_stream.hpp"
+#include "duckdb/main/statement_iterator.hpp"
 
 #include "quack_server.hpp"
 #include "quack_message.hpp"
@@ -21,6 +22,7 @@
 #include "quack_storage.hpp"
 #include "quack_session_state.hpp"
 #include "quack_fetch_collector.hpp"
+#include "quack_format.hpp"
 #include "quack_rebalancer_sink.hpp"
 
 #include "mbedtls_wrapper.hpp"
@@ -122,83 +124,138 @@ static void SyncResultCache(QuackConnection &connection, QuackResultStream &stre
 	connection.SyncCachedRows();
 }
 
-//! Runs one client statement with the result collector installed. It holds the statement lock for the
-//! full duration. A statement that returns rows fills the claim buffer in parallel. A statement that
-//! returns a count leaves the count in batch 1, through the fallback below.
+//! Drains a statement's payloads, in order, into the claim buffer under dense indices from 1. The
+//! engine converts the rows on its worker threads; this thread only moves the sealed payloads.
+static ErrorData StreamStatement(QuackResultStream &stream, unique_ptr<QueryResult> result) {
+	stream.SignalBound(result->GetTypes(), IdentifiersToStrings(result->GetNames()));
+	QueryResultStream<QuackFormat> units(std::move(result));
+	idx_t dense_index = 0;
+	while (auto entry = units.Fetch()) {
+		auto bytes = entry->payload_size;
+		stream.buffer.PushBatch(++dense_index, std::move(*entry), bytes);
+	}
+	// Do NOT finish the buffer here. The statement can sit in the middle of a multi-statement query,
+	// and the client must not see the stream end while more statements run.
+	stream.announced_total = dense_index;
+	return units.HasError() ? units.GetErrorObject() : ErrorData();
+}
+
+//! Sends a completed result's retained payloads: the first result-returning statement when it could
+//! not stream, or the last statement's Success/Count result when none returned rows, as the protocol
+//! always has. No columns is an error.
+static void SendRetainedResult(QuackResultStream &stream, QueryResult &result) {
+	if (result.GetNames().empty()) {
+		stream.buffer.SetError(ErrorData(ExceptionType::INVALID_INPUT, "Query did not return any columns"));
+		return;
+	}
+	stream.SignalBound(result.GetTypes(), IdentifiersToStrings(result.GetNames()));
+	auto payloads = result.TakeCollection<QuackFormat>();
+	idx_t dense_index = 0;
+	for (auto &entry : *payloads) {
+		auto bytes = entry->payload_size;
+		stream.buffer.PushBatch(++dense_index, std::move(*entry), bytes);
+	}
+	stream.announced_total = dense_index;
+}
+
+//! Mirrors ClientContext::ErrorResult for failures the engine never saw: a parse or preprocess
+//! error from the statement iterator must still honor the transaction invalidation policy, and the
+//! message must still get its location context.
+static ErrorData HandleRawError(ClientContext &context, ErrorData error, const string &sql) {
+	bool invalidates_transaction = true;
+	bool policy_invalidates;
+	switch (context.transaction.GetInvalidationPolicy()) {
+	case TransactionInvalidationPolicy::STANDARD_POLICY:
+	case TransactionInvalidationPolicy::ALL_ERRORS_INVALIDATE_TRANSACTION:
+		policy_invalidates = true;
+		break;
+	default:
+		policy_invalidates = Exception::InvalidatesTransaction(error.Type());
+		break;
+	}
+	if (!policy_invalidates) {
+		invalidates_transaction = false;
+	} else if (Exception::InvalidatesDatabase(error.Type())) {
+		auto &db_instance = DatabaseInstance::GetDatabase(context);
+		ValidChecker::Invalidate(db_instance, error.RawMessage());
+	}
+	if (invalidates_transaction && context.HasActiveTransaction()) {
+		ValidChecker::Invalidate(context.ActiveTransaction(), error.RawMessage());
+	}
+	context.ProcessError(error, sql);
+	return error;
+}
+
+//! Runs one client query. It holds the statement lock for the full duration. The first statement
+//! that returns rows claims the stream, through the engine's result buffer in the quack format or,
+//! when the planner settled it eagerly, from its retained payloads; every other statement runs
+//! retained, and the last one's Success/Count result is sent if none returned rows.
 static void DriveQuery(QuackConnection &connection, shared_ptr<QuackResultStream> stream, string sql) {
 	// A failed statement must stop the client's sends, so its scan's streams get the error too.
-	auto fail_streams = [&](const ErrorData &error) {
+	auto fail = [&](const ErrorData &error) {
+		stream->buffer.SetError(error);
 		if (auto session_state = QuackSessionState::Get(*connection.duckdb_connection->context)) {
 			session_state->Streams().Fail(error);
 		}
 	};
+	// Held through the catch: the error handler touches transaction state, and a superseding PREPARE
+	// starts the replacement driver before joining this one.
+	unique_lock<mutex> guard(connection.statement_lock);
 	try {
-		unique_lock<mutex> guard(connection.statement_lock);
-		auto &context = *connection.duckdb_connection->context;
+		auto &duckdb_connection = *connection.duckdb_connection;
+		auto &context = *duckdb_connection.context;
 
-		// MakeQuackFetchCollector sends the FIRST statement that returns a result into the stream.
-		// Every other statement keeps the default collector.
-		auto &config = ClientConfig::GetConfig(context);
-		config.get_result_collector = [stream](ClientContext &ctx, PreparedStatementData &data) {
-			return MakeQuackFetchCollector(ctx, data, stream);
-		};
-		unique_ptr<QueryResult> result;
-		try {
-			result = connection.duckdb_connection->Query(sql);
-		} catch (...) {
-			// leave no collector hook on the connection's config
-			config.get_result_collector = nullptr;
-			throw;
+		unique_ptr<QueryResult> last_result;
+		ErrorData error;
+		auto statements = context.IterateStatements(sql);
+		// The error checks come before Peek: Peek parses ahead, and a failed statement must not let
+		// a later parse error replace its message. An abort errors the buffer before it interrupts,
+		// and Submit resets the interrupt for the next statement, so the buffer is what stops the
+		// loop between statements.
+		while (!error.HasError() && !stream->buffer.HasError() && statements.Peek()) {
+			auto statement = statements.GetStatement();
+			if (!statement) {
+				continue;
+			}
+			// Once a statement claimed the stream, SendRetainedResult never reads a later result, so those
+			// skip the wire format and the serialization pass it would pay on Complete. The format is
+			// built per statement: a preceding SET in the same text must reach it.
+			auto bound = stream->Bound();
+			auto result = bound ? duckdb_connection.Submit(std::move(statement))
+			                    : duckdb_connection.Submit(std::move(statement), QuackFormat::FromSettings(context));
+			auto &properties = result->GetStatementProperties();
+			// The planner still settles some statements eagerly, so they are materialized at submission and
+			// cannot stream. That planner limitation is going away, and this guard goes with it.
+			auto streams = properties.return_type == StatementReturnType::QUERY_RESULT &&
+			               properties.result_eagerness != ResultEagerness::FORCED;
+			if (!result->HasError() && streams && !bound) {
+				error = StreamStatement(*stream, std::move(result));
+				continue;
+			}
+			result->Complete();
+			if (result->HasError()) {
+				error = result->GetErrorObject();
+			} else if (!bound && properties.return_type == StatementReturnType::QUERY_RESULT) {
+				// An eagerly settled statement cannot stream, but its rows still claim the stream,
+				// like any first result-returning statement.
+				SendRetainedResult(*stream, *result);
+				continue;
+			}
+			last_result = std::move(result);
 		}
-		config.get_result_collector = nullptr;
-		if (result->HasError()) {
-			stream->buffer.SetError(result->GetErrorObject());
-			fail_streams(result->GetErrorObject());
+		if (error.HasError()) {
+			fail(error);
 		} else if (!stream->Bound()) {
-			// No collector claimed the stream, because no statement returned a result. Send the last
-			// statement's Success/Count result, as the protocol always has. No columns is an error.
-			if (result->GetNames().empty()) {
+			if (!last_result) {
 				stream->buffer.SetError(ErrorData(ExceptionType::INVALID_INPUT, "Query did not return any columns"));
-				stream->buffer.Finish();
-				return;
-			}
-			// BaseQueryResult::names is a vector<Identifier>. The stream carries plain strings.
-			vector<string> result_names;
-			result_names.reserve(result->GetNames().size());
-			for (auto &col_name : result->GetNames()) {
-				result_names.push_back(col_name.GetIdentifierName());
-			}
-			stream->SignalBound(result->GetTypes(), std::move(result_names));
-			unique_ptr<QuackChunkPayloadWriter> writer;
-			idx_t rows = 0;
-			while (auto chunk = result->Fetch()) {
-				if (chunk->size() == 0) {
-					continue;
-				}
-				if (!writer) {
-					writer = make_uniq<QuackChunkPayloadWriter>(0);
-				}
-				writer->AppendChunk(*chunk);
-				rows += chunk->size();
-			}
-			if (writer) {
-				auto sealed = writer->Seal();
-				QuackFetchPayload entry;
-				entry.payload = std::move(sealed.payload);
-				entry.payload_size = sealed.payload_size;
-				entry.chunk_count = sealed.chunk_count;
-				entry.rows = rows;
-				auto bytes = entry.payload_size;
-				stream->buffer.PushBatch(1, std::move(entry), bytes);
-				stream->announced_total = 1;
 			} else {
-				stream->announced_total = 0;
+				SendRetainedResult(*stream, *last_result);
 			}
 		}
 	} catch (std::exception &ex) {
-		stream->buffer.SetError(ErrorData(ex));
-		fail_streams(ErrorData(ex));
+		fail(HandleRawError(*connection.duckdb_connection->context, ErrorData(ex), sql));
 	}
+	guard.unlock();
 	// Close against the announced total, so a short stream errors instead of truncating.
 	stream->buffer.Finish(stream->announced_total);
 }

@@ -34,7 +34,8 @@ set global quack_prepare_inline_rows=1;
 statement ok quack_db:quack_server_con
 set global quack_target_batch_bytes=65536;
 
-# make sure this shape really produces more than one FETCH
+# make sure the size cut really produces many payloads: 100k hashed rows are about 1.6 MB,
+# so a 64 KiB target must yield well over ten FETCHes, not just the multi-batch minimum
 statement ok
 CALL enable_logging('Quack');
 
@@ -44,7 +45,7 @@ select count(*), sum(i) from quack_query({server}, 'from big', token='asdf')
 100000	4999950000
 
 query I
-select count(*) > 1 from duckdb_logs_parsed('Quack') where message_type = 'FETCH_REQUEST'
+select count(*) >= 10 from duckdb_logs_parsed('Quack') where message_type = 'FETCH_REQUEST'
 ----
 true
 
