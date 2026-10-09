@@ -1,0 +1,98 @@
+# name: test/sql/attach_insert_backpressure.test
+# description: the server caps the client batches it buffers ahead of an INSERT; a full buffer delays the SEND_DATA reply, every order mode still lands every row, and a failing INSERT does not leave a send waiting
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_fetch_producer_buffer_bytes = 1;
+
+statement ok
+ATTACH {server} AS rpc (TOKEN 'asdf');
+
+statement ok
+SET threads=4;
+
+statement ok
+SET quack_target_batch_bytes=65536;
+
+statement ok
+SET quack_debug_send_delay_ms=10;
+
+statement ok
+CREATE TABLE src AS SELECT * FROM range(300000) t(i);
+
+statement ok
+CREATE TABLE rpc.t_scan(i BIGINT);
+
+statement ok
+INSERT INTO rpc.t_scan SELECT i FROM src;
+
+query II
+SELECT count(*), count(*) FILTER (WHERE i != rn) FROM (SELECT i, row_number() OVER () - 1 AS rn FROM rpc.t_scan);
+----
+300000	0
+
+statement ok
+CREATE TABLE rpc.t_range(i BIGINT);
+
+statement ok
+INSERT INTO rpc.t_range SELECT * FROM range(300000) t(i);
+
+query II
+SELECT count(*), count(*) FILTER (WHERE i != rn) FROM (SELECT i, row_number() OVER () - 1 AS rn FROM rpc.t_range);
+----
+300000	0
+
+statement ok
+SET preserve_insertion_order=false;
+
+statement ok
+CREATE TABLE rpc.t_unordered(i BIGINT);
+
+statement ok
+INSERT INTO rpc.t_unordered SELECT i FROM src;
+
+query III
+SELECT count(*), count(DISTINCT i), sum(i) FROM rpc.t_unordered;
+----
+300000	300000	44999850000
+
+statement ok
+RESET preserve_insertion_order;
+
+statement ok
+CREATE TABLE rpc.t_ctas AS SELECT i FROM src;
+
+query II
+SELECT count(*), count(*) FILTER (WHERE i != rn) FROM (SELECT i, row_number() OVER () - 1 AS rn FROM rpc.t_ctas);
+----
+300000	0
+
+statement ok
+CREATE TABLE rpc.keyed(i BIGINT PRIMARY KEY);
+
+statement ok
+INSERT INTO rpc.keyed VALUES (5);
+
+statement error
+INSERT INTO rpc.keyed SELECT i FROM src;
+----
+Duplicate key
+
+statement ok
+INSERT INTO rpc.keyed VALUES (6);
+
+query I
+SELECT count(*) FROM rpc.keyed;
+----
+2
+
+statement ok
+RESET quack_debug_send_delay_ms;
+
+statement ok
+RESET quack_target_batch_bytes;
+
+statement ok quack_db:quack_server_con
+RESET GLOBAL quack_fetch_producer_buffer_bytes;
