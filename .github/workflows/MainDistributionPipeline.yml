@@ -58,10 +58,11 @@ jobs:
       - name: Compare schema and QUACK_VERSION against main
         run: |
           git fetch origin main
-          schema_changed=$(git diff origin/main -- src/include/quack_message.json)
+          schema_changed=$(git diff origin/main -- src/include/quack_message.json \
+            | grep -E '^[+-]' | grep -v '^[+-][+-]' | grep -v '"name"' || true)
           version_changed=$(git diff origin/main -- src/include/quack_message.hpp | grep -c "QUACK_VERSION" || true)
 
           if [[ -n "$schema_changed" && "$version_changed" -eq 0 ]]; then
-            echo "::error::quack_messages.json changed vs main, but QUACK_VERSION was not bumped in quack_message.hpp."
+            echo "::error::The wire schema in quack_message.json changed vs main (field id, type or default), but QUACK_VERSION was not bumped in quack_message.hpp. Field names are not serialized, so a pure rename does not need a bump."
             exit 1
           fi

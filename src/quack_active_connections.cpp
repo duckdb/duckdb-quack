@@ -57,7 +57,7 @@ static void QuackActiveConnectionsScan(ClientContext &context, TableFunctionInpu
 	idx_t row = 0;
 	for (auto &snap : snapshots) {
 		output.data[0].SetValue(row, snap.server_id);
-		output.data[1].SetValue(row, snap.session_id);
+		output.data[1].SetValue(row, snap.connection_id);
 		output.data[2].SetValue(row, snap.sql_query);
 		output.data[3].SetValue(row, Value(QueryStateToString(snap.query_state)));
 		output.data[4].SetValue(row,

@@ -92,7 +92,7 @@ static bool TimingSafeEqual(const string &a, const string &b) {
 	return result == 0;
 }
 
-// pass session id
+// pass connection id
 static void QuackAuthToken(const DataChunk &args, ExpressionState &state, Vector &result) {
 	auto client_token = args.GetValue(1, 0).GetValue<string>();
 	auto server_token = args.GetValue(2, 0).GetValue<string>();
@@ -158,15 +158,15 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// the default authentication function
 	ScalarFunction quack_check_token("quack_check_token",
-	                                 {/* session id */ LogicalType::VARCHAR, /* auth string */ LogicalType::VARCHAR,
+	                                 {/* connection id */ LogicalType::VARCHAR, /* auth string */ LogicalType::VARCHAR,
 	                                  /* token */ LogicalType::VARCHAR},
 	                                 LogicalType::BOOLEAN, QuackAuthToken);
 	quack_check_token.SetVolatile();
 	loader.RegisterFunction(quack_check_token);
 
-	ScalarFunction rpc_authorization("quack_nop_authorization",
-	                                 {/* session id */ LogicalType::VARCHAR, /* query string */ LogicalType::VARCHAR},
-	                                 LogicalType::VARCHAR, QuackDummyAuthorization);
+	ScalarFunction rpc_authorization(
+	    "quack_nop_authorization", {/* connection id */ LogicalType::VARCHAR, /* query string */ LogicalType::VARCHAR},
+	    LogicalType::VARCHAR, QuackDummyAuthorization);
 	rpc_authorization.SetVolatile();
 	loader.RegisterFunction(rpc_authorization);
 
