@@ -8,6 +8,7 @@
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 #include "duckdb/catalog/catalog_entry/table_macro_catalog_entry.hpp"
+#include "duckdb/common/sql_identifier.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "storage/quack_transaction.hpp"
 #include "storage/quack_view.hpp"
@@ -265,9 +266,8 @@ static const DefaultTableMacro quack_table_macros[] = {
 // 'borrowed' from ducklake
 optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::LoadBuiltInFunction(DefaultTableMacro macro) {
 	string macro_def = macro.macro;
-	macro_def = StringUtil::Replace(macro_def, "{CATALOG}",
-	                                KeywordHelper::WriteQuoted(catalog.GetName().GetIdentifierName(), '\''));
-	macro_def = StringUtil::Replace(macro_def, "{SCHEMA}", KeywordHelper::WriteQuoted(name.GetIdentifierName(), '\''));
+	macro_def = StringUtil::Replace(macro_def, "{CATALOG}", SQLString::ToString(catalog.GetName().GetIdentifierName()));
+	macro_def = StringUtil::Replace(macro_def, "{SCHEMA}", SQLString::ToString(name.GetIdentifierName()));
 	macro.macro = macro_def.c_str();
 	auto info = DefaultTableFunctionGenerator::CreateTableMacroInfo(macro);
 	auto table_macro =
