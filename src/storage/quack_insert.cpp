@@ -114,7 +114,7 @@ SourceResultType QuackInsert::GetDataInternal(ExecutionContext &context, DataChu
                                               OperatorSourceInput &input) const {
 	auto &gstate = sink_state->Cast<QuackRebalancerGlobalState>();
 	chunk.data[0].Append(Value::BIGINT(NumericCast<int64_t>(gstate.row_count.load())));
-	chunk.SetCardinality(1);
+	chunk.CheckCardinality(1);
 	return SourceResultType::FINISHED;
 }
 

@@ -306,7 +306,7 @@ static void QuackGenerateKeysFun(ClientContext &context, TableFunctionInput &dat
 	if (bind_data.finished) {
 		return;
 	}
-	output.SetCardinality(1);
+	output.SetChildCardinality(1);
 	bind_data.finished = true;
 
 	auto &fs = FileSystem::GetFileSystem(context);
