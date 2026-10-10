@@ -15,6 +15,7 @@
 
 namespace duckdb {
 class QuackClientConnection;
+class QuackConnectionAffinity;
 struct QuackClientWrapper;
 
 //! The active query's id, for log correlation. Invalid when no query runs (e.g. transaction start).
@@ -47,6 +48,12 @@ public:
 	//! and for a one-shot quack_query.
 	void SetOwnerConnection(optional_ptr<const QuackClientConnection> owner_connection_p) {
 		owner_connection = owner_connection_p;
+	}
+
+	//! The affinity (cookie jar, connection id) of the logical connection this client belongs to, shared by all
+	//! its clients. Set when the client is created - by ConnectToServer and TakeClient - before any request.
+	void SetAffinity(shared_ptr<QuackConnectionAffinity> affinity_p) {
+		affinity = std::move(affinity_p);
 	}
 
 	//! POST already-serialized request bytes and return the raw response body, throwing on transport failure.
@@ -106,6 +113,8 @@ protected:
 	shared_ptr<Logger> request_logger;
 	//! See SetOwnerConnection
 	optional_ptr<const QuackClientConnection> owner_connection;
+	//! See SetAffinity. Null for a client nobody attached one to - requests then carry no affinity headers.
+	shared_ptr<QuackConnectionAffinity> affinity;
 
 private:
 	virtual unique_ptr<QuackMessage> RequestInternal(optional_ptr<ClientContext> context,
@@ -114,7 +123,8 @@ private:
 
 class QuackClientConnection : public enable_shared_from_this<QuackClientConnection> {
 public:
-	explicit QuackClientConnection(DatabaseInstance &db_p, unique_ptr<QuackClient> client_p, QuackUri uri_p,
+	explicit QuackClientConnection(DatabaseInstance &db_p, unique_ptr<QuackClient> client_p,
+	                               shared_ptr<QuackConnectionAffinity> affinity_p, QuackUri uri_p,
 	                               string connection_id_p, idx_t heartbeat_timeout_seconds_p,
 	                               idx_t max_connections_cached = 1);
 	~QuackClientConnection();
@@ -155,6 +165,8 @@ private:
 	DatabaseInstance &db;
 	QuackUri uri;
 	string connection_id;
+	//! Shared with every client of this connection; TakeClient hands it to each new one.
+	shared_ptr<QuackConnectionAffinity> affinity;
 	//! Lease timeout accepted by the server during the connection handshake.
 	idx_t heartbeat_timeout_seconds;
 	mutable mutex lock;
