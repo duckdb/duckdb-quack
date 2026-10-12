@@ -27,6 +27,17 @@
 
 namespace duckdb {
 
+// Query() clears an earlier Interrupt() during its initial cleanup. The stream error
+// survives that reset, so check it again when each SQL statement begins. In particular,
+// cancelling before the producer starts must not allow it to execute writes afterwards.
+void QuackSessionState::QueryBegin(ClientContext &context) {
+	if (auto stream = Statement()) {
+		if (stream->buffer.HasError()) {
+			stream->buffer.GetError().Throw();
+		}
+	}
+}
+
 static bool LeaseTimeoutElapsed(time_point<steady_clock> last_renewed_at, time_point<steady_clock> now,
                                 idx_t timeout_seconds) {
 	if (now <= last_renewed_at) {
@@ -135,6 +146,11 @@ static void DriveQuery(QuackConnection &connection, shared_ptr<QuackResultStream
 	try {
 		unique_lock<mutex> guard(connection.statement_lock);
 		auto &context = *connection.duckdb_connection->context;
+		// Keep the context associated with the producer that owns the execution lock.
+		// Another PREPARE may install a stream while this producer is still unwinding.
+		if (auto session_state = QuackSessionState::Get(context)) {
+			session_state->SetStatement(stream);
+		}
 
 		// MakeQuackFetchCollector sends the FIRST statement that returns a result into the stream.
 		// Every other statement keeps the default collector.
@@ -705,11 +721,6 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			connection.statement.stream = stream;
 			connection.statement.uuid = prepare_request_message.QueryUUID();
 			connection.statement.abort_error = ErrorData();
-			// A statement that reads a client stream cannot bind its result before the client sends.
-			// The scan finds the stream here and raises it, so PREPARE stops waiting.
-			if (auto session_state = QuackSessionState::Get(*connection.duckdb_connection->context)) {
-				session_state->SetStatement(stream);
-			}
 			connection.statement.thread = std::thread(DriveQuery, std::ref(connection), stream, effective_sql);
 		}
 		AbortDetachedStatement(connection, std::move(superseded), "superseded by a new query");

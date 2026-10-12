@@ -9,3 +9,19 @@ or
 ```bash
 make test_debug
 ```
+
+## Cancellation before query startup
+
+After a Release build with the usual `httpfs` test dependency, run the native
+regression test:
+
+```bash
+cmake --build build/release --target quack_cancel_tests httpfs_loadable_extension
+./build/release/extension/quack/quack_cancel_tests
+```
+
+This test calls the server's PREPARE and CANCEL handlers directly. It holds the
+existing execution lock until cancellation has set the stream error and the
+DuckDB interrupt flag. It then checks that the cancelled SQL did not execute any
+INSERTs and that the same connection accepts a new query. No network timing or
+production test hooks are needed. Each wait has a five-second deadline.

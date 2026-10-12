@@ -53,3 +53,19 @@ install(
   EXPORT "${DUCKDB_EXPORT_SET}"
   LIBRARY DESTINATION "${INSTALL_LIB_DIR}"
   ARCHIVE DESTINATION "${INSTALL_LIB_DIR}")
+
+if(BUILD_UNITTESTS)
+  add_executable(quack_cancel_tests EXCLUDE_FROM_ALL test/cpp/early_cancel.cpp)
+  # httpfs may be configured after quack; name the test dependencies explicitly.
+  target_link_libraries(quack_cancel_tests core_functions_extension
+                        httpfs_extension quack_extension duckdb_static)
+  duckdb_write_static_extension_loader(
+    "${CMAKE_CURRENT_BINARY_DIR}/quack_cancel_test_loader.c" core_functions
+    httpfs quack)
+  target_sources(
+    quack_cancel_tests
+    PRIVATE
+      "${CMAKE_CURRENT_BINARY_DIR}/quack_cancel_test_loader.c"
+      "${DUCKDB_MODULE_BASE_DIR}/extension/loader/static_extension_autoregister.cpp"
+  )
+endif()
