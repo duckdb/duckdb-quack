@@ -1,3 +1,4 @@
+#include "catch.hpp"
 #include "duckdb.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/extension_helper.hpp"
@@ -9,22 +10,17 @@
 #include <cstdlib>
 #include <future>
 #include <iostream>
-#include <stdexcept>
 #include <thread>
 
 using namespace duckdb;
+
+namespace {
 
 class TestServer : public QuackServer {
 public:
 	using QuackServer::HandleMessageInternal;
 	using QuackServer::QuackServer;
 };
-
-static void Require(bool condition, const char *message) {
-	if (!condition) {
-		throw std::runtime_error(message);
-	}
-}
 
 template <class Predicate>
 static void WaitFor(Predicate predicate) {
@@ -59,7 +55,7 @@ static void TestCancellation(bool cancel_between_statements) {
 	ExtensionHelper::LoadExtension(db, "httpfs");
 	ExtensionHelper::LoadExtension(db, "quack");
 	Connection observer(db);
-	Require(!observer.Query("CREATE TABLE sink(i INTEGER)")->HasError(), "create table failed");
+	REQUIRE(!observer.Query("CREATE TABLE sink(i INTEGER)")->HasError());
 	TestServer server(*observer.context, QuackUri("quack:localhost:0", false), "test-token");
 	auto id = server.CreateNewConnection("cancel-test", "", 60);
 	auto connection = server.GetConnection(id);
@@ -102,36 +98,32 @@ static void TestCancellation(bool cancel_between_statements) {
 		return query.wait_for(std::chrono::seconds(0)) == std::future_status::ready &&
 		       cancellation.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
 	});
-	Require(cancellation.get()->Type() == MessageType::SUCCESS_RESPONSE, "CANCEL failed");
+	REQUIRE(cancellation.get()->Type() == MessageType::SUCCESS_RESPONSE);
 	auto response = query.get();
-	Require(response->Type() == MessageType::ERROR_RESPONSE, "PREPARE did not report cancellation");
-	Require(response->Cast<ErrorResponse>().Error().Type() == ExceptionType::INTERRUPT,
-	        "PREPARE returned an unrelated error");
+	REQUIRE(response->Type() == MessageType::ERROR_RESPONSE);
+	REQUIRE(response->Cast<ErrorResponse>().Error().Type() == ExceptionType::INTERRUPT);
 	auto result = observer.Query("SELECT count(*) FROM sink");
-	Require(!result->HasError(), "read failed");
+	REQUIRE(!result->HasError());
 	auto expected_rows = cancel_between_statements ? 1 : 0;
-	Require(result->Fetch()->GetValue(0, 0).GetValue<int64_t>() == expected_rows,
-	        "cancelled query executed an unexpected number of INSERTs");
+	REQUIRE(result->Fetch()->GetValue(0, 0).GetValue<int64_t>() == expected_rows);
 
 	// A cancelled stream must not poison the next request on the same connection.
 	PrepareRequestMessage next(id, "INSERT INTO sink VALUES (42)", UUID::GenerateRandomUUID());
 	auto next_query = std::async(std::launch::async,
 	                             [&] { return server.HandleMessageInternal(*db.instance, next, connection.get()); });
 	WaitFor([&] { return next_query.wait_for(std::chrono::seconds(0)) == std::future_status::ready; });
-	Require(next_query.get()->Type() == MessageType::PREPARE_RESPONSE, "connection could not execute the next query");
+	REQUIRE(next_query.get()->Type() == MessageType::PREPARE_RESPONSE);
 	result = observer.Query("SELECT count(*) FROM sink");
-	Require(!result->HasError(), "read after connection reuse failed");
-	Require(result->Fetch()->GetValue(0, 0).GetValue<int64_t>() == expected_rows + 1, "next query did not execute");
+	REQUIRE(!result->HasError());
+	REQUIRE(result->Fetch()->GetValue(0, 0).GetValue<int64_t>() == expected_rows + 1);
 }
 
-int main() {
-	try {
-		TestCancellation(false);
-		TestCancellation(true);
-		std::cout << "Cancellation before startup, between statements, and connection reuse passed" << std::endl;
-		return 0;
-	} catch (std::exception &ex) {
-		std::cerr << ex.what() << std::endl;
-		return 1;
-	}
+} // namespace
+
+TEST_CASE("Cancellation before query startup preserves connection reuse", "[quack][cancel]") {
+	TestCancellation(false);
+}
+
+TEST_CASE("Cancellation between statements preserves committed rows and connection reuse", "[quack][cancel]") {
+	TestCancellation(true);
 }

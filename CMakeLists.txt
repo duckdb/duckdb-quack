@@ -54,26 +54,7 @@ install(
   LIBRARY DESTINATION "${INSTALL_LIB_DIR}"
   ARCHIVE DESTINATION "${INSTALL_LIB_DIR}")
 
-# Build in the normal compiler environment, including Windows CI's vcvars shell.
-# Builds without the httpfs test dependency must not acquire a new dependency.
+# C++ tests need httpfs for the crypto provider, just like the SQL tests.
 if(BUILD_UNITTESTS AND "httpfs" IN_LIST DUCKDB_EXTENSION_NAMES)
-  add_executable(quack_cancel_tests test/cpp/early_cancel.cpp)
-  # httpfs may be configured after quack; name the test dependencies explicitly.
-  target_link_libraries(quack_cancel_tests core_functions_extension
-                        httpfs_extension quack_extension duckdb_static)
-  duckdb_write_static_extension_loader(
-    "${CMAKE_CURRENT_BINARY_DIR}/quack_cancel_test_loader.c" core_functions
-    httpfs quack)
-  target_sources(
-    quack_cancel_tests
-    PRIVATE
-      "${CMAKE_CURRENT_BINARY_DIR}/quack_cancel_test_loader.c"
-      "${DUCKDB_MODULE_BASE_DIR}/extension/loader/static_extension_autoregister.cpp"
-  )
-  # TARGET_FILE handles executable suffixes and multi-configuration generators.
-  add_custom_target(
-    quack_cancel_check
-    COMMAND $<TARGET_FILE:quack_cancel_tests>
-    DEPENDS quack_cancel_tests
-    VERBATIM)
+  add_subdirectory(test/cpp)
 endif()

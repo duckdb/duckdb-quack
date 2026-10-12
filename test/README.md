@@ -10,10 +10,10 @@ or
 make test_debug
 ```
 
-## Cancellation regression tests
+## C++ tests
 
 `make test` / `make test_release`, `make test_debug`, and `make test_reldebug`
-automatically build and run the native cancellation tests before the SQL tests.
+automatically build and run the C++ tests before the SQL tests.
 The distribution CI calls these same targets. A native build or test failure
 fails the test target. The usual `SKIP_TESTS=1` setting skips both kinds of tests.
 
@@ -24,7 +24,22 @@ native tests with:
 make test_quack_release
 ```
 
-The tests call the server's PREPARE and CANCEL handlers directly. One holds the
+C++ tests use DuckDB's bundled Catch framework and a shared `quack_cpp_tests`
+executable. To add a test, create a source file containing `TEST_CASE` and
+`REQUIRE` assertions, then add it to `QUACK_CPP_TEST_SOURCES` in
+`test/cpp/CMakeLists.txt`. Do not add another `main()`. The root CMakeLists and
+Makefile need no changes.
+
+The `quack_cpp_check` target builds and runs the shared executable. Catch reports
+each case and returns nonzero if any test fails. To select cancellation tests:
+
+```bash
+build/release/extension/quack/test/cpp/quack_cpp_tests '[cancel]'
+```
+
+### Cancellation regression
+
+`early_cancel.cpp` calls the server's PREPARE and CANCEL handlers directly. One holds the
 existing execution lock until cancellation has set the stream error and the
 DuckDB interrupt flag. The other uses a test-only `QueryEnd` callback to pause
 after the first INSERT commits and cancel before the second INSERT starts.
