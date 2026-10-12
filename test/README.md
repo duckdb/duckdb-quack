@@ -15,7 +15,10 @@ make test_debug
 `make test` / `make test_release`, `make test_debug`, and `make test_reldebug`
 automatically build and run the C++ tests before the SQL tests.
 The distribution CI calls these same targets. A native build or test failure
-fails the test target. The usual `SKIP_TESTS=1` setting skips both kinds of tests.
+fails the test target. If `BUILD_UNITTESTS` is disabled or `httpfs` is not
+configured, the C++ check target reports that it is skipped. SQL tests retain
+their existing dependency checks. The usual `SKIP_TESTS=1` setting skips both
+kinds of tests.
 
 After configuring a build with the usual `httpfs` test dependency, run just the
 native tests with:
