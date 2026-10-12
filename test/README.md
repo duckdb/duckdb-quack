@@ -10,18 +10,24 @@ or
 make test_debug
 ```
 
-## Cancellation before query startup
+## Cancellation regression tests
 
-After a Release build with the usual `httpfs` test dependency, run the native
-regression test:
+`make test` / `make test_release`, `make test_debug`, and `make test_reldebug`
+automatically build and run the native cancellation tests before the SQL tests.
+The distribution CI calls these same targets. A native build or test failure
+fails the test target. The usual `SKIP_TESTS=1` setting skips both kinds of tests.
+
+After configuring a build with the usual `httpfs` test dependency, run just the
+native tests with:
 
 ```bash
-cmake --build build/release --target quack_cancel_tests httpfs_loadable_extension
-./build/release/extension/quack/quack_cancel_tests
+make test_quack_release
 ```
 
-This test calls the server's PREPARE and CANCEL handlers directly. It holds the
+The tests call the server's PREPARE and CANCEL handlers directly. One holds the
 existing execution lock until cancellation has set the stream error and the
-DuckDB interrupt flag. It then checks that the cancelled SQL did not execute any
-INSERTs and that the same connection accepts a new query. No network timing or
-production test hooks are needed. Each wait has a five-second deadline.
+DuckDB interrupt flag. The other uses a test-only `QueryEnd` callback to pause
+after the first INSERT commits and cancel before the second INSERT starts.
+They check the number of committed INSERTs, the INTERRUPT response, and reuse
+of the same connection. No network timing or production test hooks are needed.
+Each wait has a five-second deadline.

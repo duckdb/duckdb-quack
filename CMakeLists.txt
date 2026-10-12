@@ -68,4 +68,10 @@ if(BUILD_UNITTESTS)
       "${CMAKE_CURRENT_BINARY_DIR}/quack_cancel_test_loader.c"
       "${DUCKDB_MODULE_BASE_DIR}/extension/loader/static_extension_autoregister.cpp"
   )
+  # TARGET_FILE handles executable suffixes and multi-configuration generators.
+  add_custom_target(
+    quack_cancel_check
+    COMMAND $<TARGET_FILE:quack_cancel_tests>
+    DEPENDS quack_cancel_tests
+    VERBATIM)
 endif()
