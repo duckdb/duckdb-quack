@@ -54,8 +54,10 @@ install(
   LIBRARY DESTINATION "${INSTALL_LIB_DIR}"
   ARCHIVE DESTINATION "${INSTALL_LIB_DIR}")
 
-if(BUILD_UNITTESTS)
-  add_executable(quack_cancel_tests EXCLUDE_FROM_ALL test/cpp/early_cancel.cpp)
+# Build in the normal compiler environment, including Windows CI's vcvars shell.
+# Builds without the httpfs test dependency must not acquire a new dependency.
+if(BUILD_UNITTESTS AND "httpfs" IN_LIST DUCKDB_EXTENSION_NAMES)
+  add_executable(quack_cancel_tests test/cpp/early_cancel.cpp)
   # httpfs may be configured after quack; name the test dependencies explicitly.
   target_link_libraries(quack_cancel_tests core_functions_extension
                         httpfs_extension quack_extension duckdb_static)
