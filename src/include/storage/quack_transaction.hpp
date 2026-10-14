@@ -29,6 +29,8 @@ public:
 	void ForceStart();
 	void Commit();
 	void Rollback();
+	//! This transaction changed the cached remote catalog; unless it commits, the cache is reloaded on next use
+	void MarkCatalogChanged();
 
 	static QuackTransaction &Get(ClientContext &context, Catalog &catalog);
 	static QuackTransaction &Get(CatalogTransaction transaction);
@@ -36,8 +38,11 @@ public:
 	unique_ptr<ColumnDataCollection> Query(const string &query);
 
 private:
+	void MarkCatalogStaleIfChanged();
+
 	QuackCatalog &quack_catalog;
 	QuackTransactionState transaction_state;
+	bool catalog_changed = false;
 };
 
 } // namespace duckdb

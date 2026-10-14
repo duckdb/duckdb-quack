@@ -21,6 +21,7 @@
 #include "quack_message.hpp"
 #include "quack_client.hpp"
 #include "storage/quack_transaction.hpp"
+#include "quack_session_state.hpp"
 
 // FIXME bunch of stuff copied from postgres scanner, can probably be simplified!
 
@@ -72,6 +73,9 @@ static vector<Identifier> GetSchemaPath(const EntryLookupInfo &schema_lookup) {
 optional_ptr<SchemaCatalogEntry> QuackCatalog::LookupSchema(CatalogTransaction transaction,
                                                             const EntryLookupInfo &schema_lookup,
                                                             OnEntryNotFound if_not_found) {
+	if (transaction.context) {
+		ReloadIfStale(*transaction.context);
+	}
 	auto schema_path = GetSchemaPath(schema_lookup);
 	// navigate the schema chain: the outermost schema lives in the catalog, each nested one in its parent
 	reference<QuackCatalogSet> current_set = *schemas;
@@ -141,6 +145,39 @@ void QuackCatalog::Refresh(ClientContext &context) {
 	schemas->Reload(context, *this, load_info);
 }
 
+void QuackCatalog::MarkStale() {
+	++stale_generation;
+}
+
+void QuackCatalog::ReloadIfStale(ClientContext &context) {
+	if (loaded_generation == stale_generation) {
+		return;
+	}
+	// never wait here: the reload's own lookups land here on its thread, and our server session serves its requests
+	if (reloading_thread == std::this_thread::get_id()) {
+		return;
+	}
+	auto session_state = QuackSessionState::Get(context);
+	if (session_state && session_state->ConnectionId() == GetConnectionId()) {
+		return;
+	}
+	lock_guard<mutex> guard(reload_lock);
+	auto target_generation = stale_generation.load();
+	if (loaded_generation == target_generation) {
+		return;
+	}
+	reloading_thread = std::this_thread::get_id();
+	try {
+		Refresh(context);
+	} catch (...) {
+		// still stale, so the next lookup retries
+		reloading_thread = std::thread::id();
+		throw;
+	}
+	loaded_generation = target_generation;
+	reloading_thread = std::thread::id();
+}
+
 const string &QuackCatalog::GetConnectionId() {
 	return client_connection->ConnectionId();
 }
@@ -164,6 +201,9 @@ QuackCatalog &QuackCatalog::GetQuackCatalog(ClientContext &context, Value &catal
 }
 
 optional_ptr<CatalogEntry> QuackCatalog::CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) {
+	if (transaction.context) {
+		ReloadIfStale(*transaction.context);
+	}
 	// find the set the schema goes in - the catalog itself for a top-level schema, the deepest parent for a
 	// nested one. This runs before the schema is created on the server so a bad path does not leave the
 	// server and the local catalog out of sync
@@ -185,6 +225,7 @@ optional_ptr<CatalogEntry> QuackCatalog::CreateSchema(CatalogTransaction transac
 	remote_info->StripCatalogQualification();
 	auto &quack_transaction = QuackTransaction::Get(transaction);
 	quack_transaction.Query(remote_info->ToString());
+	quack_transaction.MarkCatalogChanged();
 
 	auto schema_entry = make_uniq<QuackSchemaCatalogEntry>(*this, info, parent.get());
 	return target_set.get().CreateEntry(std::move(schema_entry), info.on_conflict);
@@ -200,6 +241,7 @@ static void ScanNestedSchemas(QuackSchemaCatalogEntry &schema,
 }
 
 void QuackCatalog::ScanSchemas(ClientContext &context, std::function<void(SchemaCatalogEntry &)> callback) {
+	ReloadIfStale(context);
 	for (auto &schema : schemas->GetAllCatalogEntries()) {
 		ScanNestedSchemas(schema.get().Cast<QuackSchemaCatalogEntry>(), callback);
 	}
@@ -267,6 +309,7 @@ string QuackCatalog::GetDBPath() {
 }
 
 void QuackCatalog::DropSchema(ClientContext &context, DropInfo &info) {
+	ReloadIfStale(context);
 	// the resolved path is [catalog, parent schemas..., schema]; drop it remotely under the name the server
 	// knows it by - the local schema path is exactly the remote qualification, only the ATTACH alias is local
 	auto remote_name = info.GetQualifiedName();
@@ -279,6 +322,7 @@ void QuackCatalog::DropSchema(ClientContext &context, DropInfo &info) {
 	drop_info->SetQualifiedName(remote_name);
 	auto &transaction = QuackTransaction::Get(context, *this);
 	transaction.Query(drop_info->ToString());
+	transaction.MarkCatalogChanged();
 
 	// remove the schema from the local set it lives in
 	reference<QuackCatalogSet> target_set = *schemas;

@@ -192,6 +192,7 @@ optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateTable(CatalogTransacti
 
 	auto &quack_transaction = QuackTransaction::Get(transaction);
 	quack_transaction.Query(create_table_info->ToString());
+	quack_transaction.MarkCatalogChanged();
 	auto quack_entry = make_uniq<QuackTableCatalogEntry>(catalog, *this, create_table_info->Cast<CreateTableInfo>());
 	return tables->CreateEntry(std::move(quack_entry), info.Base().on_conflict);
 }
@@ -204,6 +205,7 @@ optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateView(CatalogTransactio
 	// create the view verbatim in the serer
 	auto &quack_transaction = QuackTransaction::Get(transaction);
 	quack_transaction.Query(create_view_info->ToString());
+	quack_transaction.MarkCatalogChanged();
 
 	// locally, override the query with a remote procedure call to ensure the view is evaluated remotely
 	info.sql = QuackViewCatalogEntry::CreateViewSQL(ParentCatalog().GetName().GetIdentifierName(), remote_name);
@@ -250,6 +252,7 @@ void QuackSchemaCatalogEntry::DropEntry(ClientContext &context, DropInfo &info_p
 	}
 	auto &transaction = QuackTransaction::Get(context, ParentCatalog());
 	transaction.Query(drop_info->ToString());
+	transaction.MarkCatalogChanged();
 	tables->DropEntry(info_p.GetQualifiedName().Name().GetIdentifierName());
 }
 void QuackSchemaCatalogEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {

@@ -12,6 +12,8 @@
 #include "storage/quack_schema.hpp"
 #include "quack_uri.hpp"
 
+#include <thread>
+
 namespace duckdb {
 
 class QuackCatalog;
@@ -81,6 +83,8 @@ public:
 	shared_ptr<QuackClientConnection> GetClientConnection();
 
 	void Refresh(ClientContext &context);
+	//! The cache may no longer match the server; the next lookup or scan reloads it
+	void MarkStale();
 
 private:
 	void DropSchema(ClientContext &context, DropInfo &info) override;
@@ -90,10 +94,16 @@ private:
 	unique_ptr<TableRef> CreateRemoteQueryRef(const string &sql, bool refresh_catalog, bool use_transaction = true);
 
 	QuackLoadCatalogData LoadCatalog(ClientContext &context);
+	void ReloadIfStale(ClientContext &context);
 
 private:
 	shared_ptr<QuackClientConnection> client_connection;
 	unique_ptr<QuackSchemaSet> schemas;
+	//! The cache is stale while these differ: MarkStale bumps the first, a finished reload catches the second up
+	atomic<idx_t> stale_generation {0};
+	atomic<idx_t> loaded_generation {0};
+	mutex reload_lock;
+	atomic<std::thread::id> reloading_thread;
 };
 
 } // namespace duckdb

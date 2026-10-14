@@ -29,14 +29,37 @@ void QuackTransaction::ForceStart() {
 void QuackTransaction::Commit() {
 	if (transaction_state == QuackTransactionState::TRANSACTION_STARTED) {
 		transaction_state = QuackTransactionState::TRANSACTION_FINISHED;
-		Query("COMMIT");
+		try {
+			Query("COMMIT");
+		} catch (...) {
+			// the server rolled the transaction back
+			MarkCatalogStaleIfChanged();
+			throw;
+		}
 	}
 }
 
 void QuackTransaction::Rollback() {
 	if (transaction_state == QuackTransactionState::TRANSACTION_STARTED) {
 		transaction_state = QuackTransactionState::TRANSACTION_FINISHED;
-		Query("ROLLBACK");
+		try {
+			Query("ROLLBACK");
+		} catch (...) {
+			MarkCatalogStaleIfChanged();
+			throw;
+		}
+		// only after the ROLLBACK: a reload before it would load this transaction's DDL again
+		MarkCatalogStaleIfChanged();
+	}
+}
+
+void QuackTransaction::MarkCatalogChanged() {
+	catalog_changed = true;
+}
+
+void QuackTransaction::MarkCatalogStaleIfChanged() {
+	if (catalog_changed) {
+		quack_catalog.MarkStale();
 	}
 }
 

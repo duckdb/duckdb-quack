@@ -1,0 +1,206 @@
+# name: test/sql/attach_rollback_catalog.test
+# description: a rolled-back transaction leaves the attached catalog as the server has it (#174)
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+statement ok
+create table local_src as select range i from range(10)
+
+# with the optimizer, DDL is pushed down as a whole; without it, it goes through the attached catalog
+foreach optimizer enable_optimizer disable_optimizer
+
+statement ok
+PRAGMA ${optimizer}
+
+statement ok
+create table rpc.t(i INT)
+
+statement ok
+insert into rpc.t values (42)
+
+# a rolled-back DROP TABLE: the table is still there
+statement ok
+BEGIN
+
+statement ok
+drop table rpc.t
+
+statement error
+from rpc.t
+----
+Table with name t does not exist
+
+statement ok
+ROLLBACK
+
+query I
+from rpc.t
+----
+42
+
+# a rolled-back CREATE TABLE, CREATE VIEW and CREATE SCHEMA: all gone
+statement ok
+BEGIN
+
+statement ok
+create table rpc.ghost(i INT)
+
+statement ok
+create view rpc.v_ghost as select 42 x
+
+statement ok
+create schema rpc.s_ghost
+
+statement ok
+ROLLBACK
+
+query III
+select (select count(*) from duckdb_tables() where database_name = 'rpc' and table_name = 'ghost'),
+       (select count(*) from duckdb_views() where database_name = 'rpc' and view_name = 'v_ghost'),
+       (select count(*) from duckdb_schemas() where database_name = 'rpc' and schema_name = 's_ghost')
+----
+0	0	0
+
+# an autocommit CTAS that fails after creating the table rolls back too (the local source keeps it on the client)
+statement error
+create table rpc.ctas_ghost as select case when i < 5 then i else error('boom') end i from local_src
+----
+boom
+
+query I
+select count(*) from duckdb_tables() where database_name = 'rpc' and table_name = 'ctas_ghost'
+----
+0
+
+statement ok
+drop table rpc.t
+
+endloop
+
+statement ok
+PRAGMA enable_optimizer
+
+# a rolled-back DROP SCHEMA
+statement ok
+create schema rpc.s
+
+statement ok
+BEGIN
+
+statement ok
+drop schema rpc.s
+
+statement ok
+ROLLBACK
+
+query I
+select count(*) from duckdb_schemas() where database_name = 'rpc' and schema_name = 's'
+----
+1
+
+# another connection on the same attachment sees the corrected catalog too
+statement ok
+create table rpc.shared as select 42 i
+
+statement ok con1
+BEGIN
+
+statement ok con1
+drop table rpc.shared
+
+statement ok con1
+ROLLBACK
+
+query I con2
+from rpc.shared
+----
+42
+
+# a COMMIT the server rejects rolls the DDL back as well
+statement ok
+create table rpc.pk(i INT PRIMARY KEY)
+
+statement ok
+BEGIN
+
+statement ok
+create table rpc.commit_ghost(i INT)
+
+statement ok
+insert into rpc.pk values (1)
+
+statement ok quack_db:quack_server_con
+insert into pk values (1)
+
+statement error
+COMMIT
+----
+PRIMARY KEY or UNIQUE constraint violation
+
+query I
+select count(*) from duckdb_tables() where database_name = 'rpc' and table_name = 'commit_ghost'
+----
+0
+
+# a rollback without DDL does not reload the catalog, one with DDL does on the next use
+statement ok
+CALL enable_logging('Quack')
+
+statement ok
+BEGIN
+
+statement ok
+insert into rpc.pk values (2)
+
+statement ok
+ROLLBACK
+
+query I
+select count(*) from rpc.pk
+----
+1
+
+query I
+select count(*) from duckdb_logs_parsed('Quack') where query like '%duckdb_tables()%'
+----
+0
+
+statement ok
+BEGIN
+
+statement ok
+create table rpc.ghost(i INT)
+
+statement ok
+ROLLBACK
+
+statement ok
+CALL truncate_duckdb_logs()
+
+query I
+select count(*) from rpc.pk
+----
+1
+
+query I
+select count(*) > 0 from duckdb_logs_parsed('Quack') where query like '%duckdb_tables()%'
+----
+true
+
+statement ok
+CALL disable_logging()
+
+# the server agrees
+query I quack_db:quack_server_con
+select count(*) from duckdb_tables() where table_name like '%ghost%'
+----
+0
+
+statement ok
+detach rpc
+
+include test/template/quack_teardown.test_template

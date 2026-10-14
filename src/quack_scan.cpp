@@ -147,6 +147,7 @@ static unique_ptr<FunctionData> QuackScanBindCatalogName(ClientContext &context,
 		// executed it (PREPARE runs the query), so reload our snapshot of the remote catalog. Such a
 		// statement is always bound on its own, so no catalog entry is in use here
 		catalog.Refresh(context);
+		QuackTransaction::Get(context, catalog).MarkCatalogChanged();
 	}
 	return bind_data;
 }
