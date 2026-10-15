@@ -115,6 +115,8 @@ ATTACH 'quack:localhost' AS rpc (ssl_fingerprint '2B:31:F0:...:EA');
 ATTACH 'quack:localhost' AS rpc (
     token 'super_secret', client_id 'my_client', heartbeat_timeout 30
 );
+-- expose one remote schema and its descendants:
+ATTACH 'quack:localhost' AS rpc (schema 'main');
 ```
 
 Once attached, remote tables look local:
@@ -182,6 +184,7 @@ SET rpc_default_token = '<token-from-rpc_start>';
 | `rpc_uri_parser(uri, ssl)`   | Parse an RPC URI into `{host, port, ipv6, ssl, url}`.               |
 | `rpc_auth_token(sid, token)` | Default authentication callback; compares against `rpc_default_token`. |
 | `rpc_dummy_authorization(sid, query)` | Default authorization callback; always allows.              |
+| `quack_clear_cache([catalog])` | Refresh every attached Quack catalog, or only `catalog` when provided. |
 
 ### `ATTACH` options
 
@@ -191,6 +194,7 @@ SET rpc_default_token = '<token-from-rpc_start>';
 | `ssl_fingerprint`   | VARCHAR | *(from the quack secret, if any)*     | SHA-256 fingerprint of the server certificate to trust, and nothing else. Implies HTTPS. Falls back to the `ssl_fingerprint` of the quack secret.                                                                                                                                                                                                                                                             |
 | `secret`            | VARCHAR | *(the default quack secret)*          | Name of the `quack` secret to use. Its token authenticates the connection, and its scope supplies the endpoint when the attached path is a bare `quack:`. Cannot be combined with `token`.                                                                                                                                                                                                                     |
 | `token`             | VARCHAR | quack secret / `rpc_default_token`    | Auth token sent to the server; overrides any matching quack secret.                                                                                                                                                                                                                                                                                                                                          |
+| `schema`            | VARCHAR | all schemas                           | Load the named top-level schema and its descendants from each remote catalog. This limits catalog visibility, not server authorization.                                                                                                                                                                                                                                                                       |
 | `client_id`         | VARCHAR | `quack_default_client_id`             | Opaque client identifier; must be empty or at least 4 characters. Defaults to the `quack_default_client_id` setting when omitted — pass `''` to opt a single connection out. The server derives a stable per-client hash `HMAC-SHA256(server_hmac_key, client_id)` (keyed with a private per-server key, so it is not reproducible by clients), exposed as `client_id_hash` in `quack_active_connections()`. |
 | `heartbeat_timeout` | UBIGINT | `quack_default_heartbeat_timeout`     | Logical-client lease timeout in seconds.                                                                                                                                                                                                                                                                                                                                                                     |
 

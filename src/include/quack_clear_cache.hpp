@@ -3,10 +3,11 @@
 namespace duckdb {
 
 class TableFunction;
+class TableFunctionSet;
 
 class QuackClearCacheFunction {
 public:
-	static TableFunction GetFunction();
+	static TableFunctionSet GetFunction();
 };
 
 } // namespace duckdb

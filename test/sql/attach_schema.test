@@ -1,0 +1,192 @@
+# name: test/sql/attach_schema.test
+# description: test schema-scoped quack attach
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok quack_db:quack_server_con
+create table t as values (7);
+
+statement ok quack_db:quack_server_con
+create schema wanted;
+
+statement ok quack_db:quack_server_con
+create table wanted.t as values (42);
+
+statement ok quack_db:quack_server_con
+create schema other;
+
+statement ok quack_db:quack_server_con
+create table other.t as values (99);
+
+statement ok quack_db:quack_server_con
+create schema wanted.child;
+
+statement ok quack_db:quack_server_con
+create table wanted.child.t as values (43);
+
+statement ok quack_db:quack_server_con
+create view wanted.child.v as select col0 from wanted.child.t;
+
+statement ok quack_db:quack_server_con
+create schema other.child;
+
+statement ok quack_db:quack_server_con
+create table other.child.t as values (100);
+
+statement ok quack_db:quack_server_con
+attach ':memory:' as remote_catalog;
+
+statement ok quack_db:quack_server_con
+create schema remote_catalog.wanted;
+
+statement ok quack_db:quack_server_con
+create table remote_catalog.wanted.t as values (44);
+
+statement ok
+attach {server} as rpc (token 'asdf', schema 'wanted')
+
+query I
+select col0 from rpc.wanted.t;
+----
+42
+
+statement error
+select * from rpc.other.t;
+----
+schema "other" does not exist
+
+statement error
+create schema rpc.other;
+----
+Cannot create schema "other" through schema-scoped Quack catalog "wanted"
+
+statement error
+drop table rpc.other.t;
+----
+schema "other" does not exist
+
+statement error
+drop schema rpc.other cascade;
+----
+Schema with name "other" not found
+
+statement ok
+drop schema if exists rpc.other cascade;
+
+query I quack_db:quack_server_con
+select col0 from other.t;
+----
+99
+
+statement ok
+create table rpc.wanted.created as values (8);
+
+query I
+select col0 from rpc.wanted.created;
+----
+8
+
+statement ok
+use rpc.wanted
+
+query I
+select col0 from wanted.child.t;
+----
+43
+
+query I
+select col0 from wanted.child.v;
+----
+43
+
+statement error
+select * from other.child.t;
+----
+<REGEX>:.*other.*
+
+query I
+select col0 from remote_catalog.wanted.t;
+----
+44
+
+statement ok
+create schema wanted.created_child;
+
+statement ok
+create schema wanted.created_child.grandchild;
+
+statement ok
+create table wanted.created_child.t as values (45);
+
+query I
+select col0 from wanted.created_child.t;
+----
+45
+
+statement error
+create schema remote_catalog.other;
+----
+Cannot create schema "other" through schema-scoped Quack catalog "wanted"
+
+statement error
+create table remote_catalog.leak(i int);
+----
+Specify the selected schema when creating objects in remote catalog "remote_catalog"
+
+statement error
+create view remote_catalog.leak as select 1;
+----
+Specify the selected schema when creating objects in remote catalog "remote_catalog"
+
+statement error
+drop schema remote_catalog cascade;
+----
+Cannot drop a remote catalog through a schema-scoped Quack attachment
+
+statement ok
+call quack_clear_cache('rpc');
+
+query I
+select col0 from wanted.created_child.t;
+----
+45
+
+query I
+select col0 from remote_catalog.wanted.t;
+----
+44
+
+query I
+select count(*) from duckdb_schemas() where database_name='rpc' and schema_name in ('main', 'other');
+----
+0
+
+query I quack_db:quack_server_con
+select count(*) from duckdb_tables() where database_name='remote_catalog' and table_name='leak';
+----
+0
+
+statement ok
+drop schema wanted.created_child cascade;
+
+query I quack_db:quack_server_con
+select count(*) from duckdb_schemas() where schema_name='created_child';
+----
+0
+
+statement ok
+use memory
+
+statement ok
+detach rpc;
+
+statement error
+attach {server} as rpc (token 'asdf', schema '')
+----
+schema cannot be NULL or empty
+
+include test/template/quack_teardown.test_template
+
+statement ok quack_db:quack_server_con
+detach remote_catalog;
