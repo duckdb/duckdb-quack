@@ -1,0 +1,288 @@
+# name: test/sql/attach_catalog_snapshot.test
+# description: the client catalog cache is replaced as a whole and follows rollbacks (#174, #279)
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+statement ok
+create table rpc.t as select 42 i
+
+# a rolled back DROP leaves the table visible again, even after the transaction loaded the catalog without it
+statement ok
+BEGIN
+
+statement ok
+drop table rpc.t
+
+query I
+select count(*) from duckdb_tables() where database_name = 'rpc' and table_name = 't'
+----
+0
+
+statement ok
+ROLLBACK
+
+query I
+from rpc.t
+----
+42
+
+# a rolled back CREATE leaves nothing behind
+statement ok
+BEGIN
+
+statement ok
+create table rpc.ghost(i INT)
+
+statement ok
+create view rpc.ghost_view as select 1 i
+
+statement ok
+create schema rpc.ghost_schema
+
+query I
+select count(*) from duckdb_tables() where database_name = 'rpc' and table_name = 'ghost'
+----
+1
+
+query I
+select count(*) from duckdb_views() where database_name = 'rpc' and view_name = 'ghost_view'
+----
+1
+
+query I
+select count(*) from duckdb_schemas() where database_name = 'rpc' and schema_name = 'ghost_schema'
+----
+1
+
+statement ok
+ROLLBACK
+
+query I
+select count(*) from duckdb_tables() where database_name = 'rpc' and table_name = 'ghost'
+----
+0
+
+query I
+select count(*) from duckdb_views() where database_name = 'rpc' and view_name = 'ghost_view'
+----
+0
+
+query I
+select count(*) from duckdb_schemas() where database_name = 'rpc' and schema_name = 'ghost_schema'
+----
+0
+
+# the same through the catalog methods instead of the remote pushdown
+statement ok
+SET disabled_optimizers = 'remote_pushdown'
+
+statement ok
+BEGIN
+
+statement ok
+drop table rpc.t
+
+statement ok
+create table rpc.ghost(i INT)
+
+query I
+select count(*) from duckdb_tables() where database_name = 'rpc' and table_name = 't'
+----
+0
+
+query I
+select count(*) from duckdb_tables() where database_name = 'rpc' and table_name = 'ghost'
+----
+1
+
+statement ok
+ROLLBACK
+
+query I
+from rpc.t
+----
+42
+
+query I
+select count(*) from duckdb_tables() where database_name = 'rpc' and table_name = 'ghost'
+----
+0
+
+statement ok
+RESET disabled_optimizers
+
+# DDL in a transaction is visible to the statements that follow it
+statement ok
+BEGIN
+
+statement ok
+create schema rpc.s1
+
+statement ok
+create schema rpc.s1.s2
+
+statement ok
+create table rpc.s1.s2.n(i INT)
+
+statement ok
+insert into rpc.s1.s2.n values (1), (2)
+
+query I
+select sum(i) from rpc.s1.s2.n
+----
+3
+
+statement ok
+COMMIT
+
+query I
+select sum(i) from rpc.s1.s2.n
+----
+3
+
+# a prepared statement survives a catalog refresh
+statement ok
+PREPARE count_t AS select count(*) from rpc.t
+
+query I
+EXECUTE count_t
+----
+1
+
+statement ok
+CALL quack_clear_cache()
+
+query I
+EXECUTE count_t
+----
+1
+
+# a prepared scan of a catalog entry rebinds instead of using an entry of a replaced snapshot
+statement ok
+SET disabled_optimizers = 'remote_pushdown'
+
+statement ok
+PREPARE scan_t AS select i from rpc.t
+
+query I
+EXECUTE scan_t
+----
+42
+
+statement ok
+CALL quack_clear_cache()
+
+query I
+EXECUTE scan_t
+----
+42
+
+statement ok quack_db:quack_server_con
+drop table t
+
+statement ok quack_db:quack_server_con
+create table t as select 'x' s
+
+statement ok
+CALL quack_clear_cache()
+
+statement error
+EXECUTE scan_t
+----
+Referenced column "i" not found
+
+statement ok quack_db:quack_server_con
+drop table t
+
+statement ok quack_db:quack_server_con
+create table t as select 42 i
+
+statement ok
+RESET disabled_optimizers
+
+# a reload that fails reports the error and stays retryable
+statement ok quack_db:quack_server_con
+create schema bad_schema
+
+statement ok quack_db:quack_server_con
+create macro bad_schema.pos(x) as x > 0
+
+statement ok quack_db:quack_server_con
+set search_path = 'bad_schema'
+
+statement ok quack_db:quack_server_con
+create table bad_schema.bad (i INT CHECK (pos(i)))
+
+statement ok quack_db:quack_server_con
+reset search_path
+
+statement error
+CALL quack_clear_cache()
+----
+Failed to bind remote table
+
+statement error
+from rpc.t
+----
+Failed to bind remote table
+
+# Failed loads also release concurrent callers, which can retry the same generation.
+concurrentloop worker 0 2
+
+loop n 0 3
+
+statement error
+CALL quack_clear_cache()
+----
+Failed to bind remote table
+
+endloop
+
+endloop
+
+statement ok quack_db:quack_server_con
+drop schema bad_schema cascade
+
+query I
+from rpc.t
+----
+42
+
+# a lookup never sees a half-built catalog while another connection refreshes it
+loop extra 0 200
+
+statement ok quack_db:quack_server_con
+create table extra_{extra}(i INT CHECK (i > 0))
+
+endloop
+
+statement ok
+CALL quack_clear_cache()
+
+concurrentloop worker 0 2
+
+statement ok
+SET disabled_optimizers = 'remote_pushdown'
+
+loop n 0 100
+
+onlyif worker=0
+statement ok
+CALL quack_clear_cache()
+
+onlyif worker=1
+statement ok
+PREPARE p AS select i from rpc.t
+
+endloop
+
+endloop
+
+statement ok
+detach rpc
+
+include test/template/quack_teardown.test_template

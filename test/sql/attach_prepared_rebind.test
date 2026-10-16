@@ -1,0 +1,127 @@
+# name: test/sql/attach_prepared_rebind.test
+# description: prepared writes execute once and catalog-dependent statements survive snapshot replacement
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok quack_db:quack_server_con
+create table t as select i from (values (1), (2), (3)) rows(i)
+
+statement ok quack_db:quack_server_con
+create table pushed_writes(i INTEGER)
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+# Preparing and executing a pushed-down write must insert exactly once.
+statement ok
+PREPARE insert_pushed AS insert into rpc.pushed_writes values (7)
+
+statement ok
+EXECUTE insert_pushed
+
+query I quack_db:quack_server_con
+select i from pushed_writes
+----
+7
+
+statement ok
+DEALLOCATE insert_pushed
+
+# Bind real catalog entries, then replace their snapshots between executions.
+statement ok
+SET disabled_optimizers = 'remote_pushdown'
+
+statement ok
+PREPARE scan_t AS select i from rpc.t order by i
+
+statement ok
+PREPARE insert_t AS insert into rpc.t(i) values (4)
+
+statement ok
+EXECUTE insert_t
+
+query I
+EXECUTE scan_t
+----
+1
+2
+3
+4
+
+statement ok
+CALL quack_clear_cache()
+
+statement ok
+EXECUTE insert_t
+
+query I
+EXECUTE scan_t
+----
+1
+2
+3
+4
+4
+
+statement ok
+BEGIN
+
+statement ok
+drop table rpc.t
+
+statement ok
+create table rpc.t(i INT)
+
+statement ok
+insert into rpc.t values (9)
+
+query I
+EXECUTE scan_t
+----
+9
+
+statement ok
+ROLLBACK
+
+query I
+EXECUTE scan_t
+----
+1
+2
+3
+4
+4
+
+statement ok quack_db:quack_server_con
+drop table t
+
+statement ok quack_db:quack_server_con
+create table t as select 'x' s
+
+statement ok
+CALL quack_clear_cache()
+
+statement error
+EXECUTE scan_t
+----
+Referenced column "i" not found
+
+statement error
+EXECUTE insert_t
+----
+does not have a column with name "i"
+
+statement ok
+DEALLOCATE scan_t
+
+statement ok
+DEALLOCATE insert_t
+
+statement ok
+RESET disabled_optimizers
+
+statement ok
+detach rpc
+
+include test/template/quack_teardown.test_template

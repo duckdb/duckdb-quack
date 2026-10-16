@@ -143,9 +143,8 @@ static unique_ptr<FunctionData> QuackScanBindCatalogName(ClientContext &context,
 	bind_data->query_uuid = bind_response->QueryUUID();
 	if (refresh_catalog) {
 		// the query was a statement pushed down by the RemotePushdownOptimizer - the server has already
-		// executed it (PREPARE runs the query), so reload our snapshot of the remote catalog. Such a
-		// statement is always bound on its own, so no catalog entry is in use here
-		catalog.Refresh(context);
+		// executed it (PREPARE runs the query), so our snapshot of the remote catalog is out of date
+		catalog.Invalidate();
 	}
 	return bind_data;
 }

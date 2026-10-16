@@ -1,0 +1,79 @@
+# name: test/sql/attach_transaction_finalize_error.test
+# description: failed COMMIT and ROLLBACK invalidate the catalog and leave the attachment usable
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+statement ok
+SET disabled_optimizers = 'remote_pushdown'
+
+statement ok
+create table rpc.t as select 42 i
+
+foreach command commit rollback
+
+statement ok
+BEGIN
+
+statement ok
+drop table rpc.t
+
+statement ok
+create table rpc.ghost(i INT)
+
+# Publish the uncommitted catalog before forcing finalization to fail.
+query II
+select count(*) filter (where table_name = 't'), count(*) filter (where table_name = 'ghost')
+from duckdb_tables() where database_name = 'rpc'
+----
+0	1
+
+# End only the remote transaction so the client's final COMMIT/ROLLBACK receives a server error.
+statement ok
+from quack_query_by_name('rpc', 'ROLLBACK', use_transaction = false)
+
+statement error
+{command}
+----
+<REGEX>:TransactionContext Error: .*cannot (commit|rollback) - no transaction is active.*
+
+query I
+from rpc.t
+----
+42
+
+query I
+select count(*) from duckdb_tables() where database_name = 'rpc' and table_name = 'ghost'
+----
+0
+
+# A new transaction can still use the attachment after the failed finalization.
+statement ok
+BEGIN
+
+statement ok
+create table rpc.recovered as select 43 i
+
+statement ok
+COMMIT
+
+query I
+from rpc.recovered
+----
+43
+
+statement ok
+drop table rpc.recovered
+
+endloop
+
+statement ok
+RESET disabled_optimizers
+
+statement ok
+detach rpc
+
+include test/template/quack_teardown.test_template

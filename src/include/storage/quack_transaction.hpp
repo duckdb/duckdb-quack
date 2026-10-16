@@ -35,9 +35,19 @@ public:
 
 	unique_ptr<ColumnDataCollection> Query(const string &query);
 
+	idx_t StartVersion() const {
+		return start_version;
+	}
+	void Retain(shared_ptr<QuackSchemaSet> snapshot);
+	optional_ptr<CatalogEntry> Retain(unique_ptr<CatalogEntry> entry);
+
 private:
 	QuackCatalog &quack_catalog;
 	QuackTransactionState transaction_state;
+	idx_t start_version;
+	mutex retained_lock;
+	vector<shared_ptr<QuackSchemaSet>> retained_snapshots;
+	vector<unique_ptr<CatalogEntry>> retained_entries;
 };
 
 } // namespace duckdb

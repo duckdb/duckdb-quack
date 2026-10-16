@@ -21,6 +21,9 @@
 #include "quack_message.hpp"
 #include "quack_client.hpp"
 #include "storage/quack_transaction.hpp"
+#include "quack_session_state.hpp"
+
+#include <exception>
 
 // FIXME bunch of stuff copied from postgres scanner, can probably be simplified!
 
@@ -35,7 +38,7 @@ QuackCatalog::QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri, C
 
 	// load the entire catalog up-front
 	auto load_info = LoadCatalog(context);
-	schemas = make_uniq<QuackSchemaSet>(context, *this, load_info);
+	snapshot = make_shared_ptr<QuackSchemaSet>(context, *this, load_info);
 }
 
 QuackLoadCatalogData QuackCatalog::LoadCatalog(ClientContext &context) {
@@ -72,9 +75,12 @@ static vector<Identifier> GetSchemaPath(const EntryLookupInfo &schema_lookup) {
 optional_ptr<SchemaCatalogEntry> QuackCatalog::LookupSchema(CatalogTransaction transaction,
                                                             const EntryLookupInfo &schema_lookup,
                                                             OnEntryNotFound if_not_found) {
+	if (!transaction.HasContext()) {
+		throw InternalException("Quack catalog lookups require a client context");
+	}
 	auto schema_path = GetSchemaPath(schema_lookup);
 	// navigate the schema chain: the outermost schema lives in the catalog, each nested one in its parent
-	reference<QuackCatalogSet> current_set = *schemas;
+	reference<QuackCatalogSet> current_set = GetSchemas(transaction.GetContext());
 	optional_ptr<CatalogEntry> entry;
 	for (idx_t i = 0; i < schema_path.size(); i++) {
 		entry = current_set.get().GetEntry(schema_path[i].GetIdentifierName());
@@ -137,8 +143,68 @@ shared_ptr<QuackClientConnection> QuackCatalog::GetClientConnection() {
 }
 
 void QuackCatalog::Refresh(ClientContext &context) {
-	auto load_info = LoadCatalog(context);
-	schemas->Reload(context, *this, load_info);
+	Invalidate();
+	GetSchemas(context);
+}
+
+void QuackCatalog::Invalidate() {
+	lock_guard<mutex> guard(snapshot_lock);
+	invalidated_version++;
+}
+
+void QuackCatalog::InvalidateIfChangedSince(idx_t version) {
+	lock_guard<mutex> guard(snapshot_lock);
+	if (invalidated_version != version) {
+		invalidated_version++;
+	}
+}
+
+idx_t QuackCatalog::InvalidatedVersion() {
+	lock_guard<mutex> guard(snapshot_lock);
+	return invalidated_version;
+}
+
+bool QuackCatalog::ServesOwnConnection(ClientContext &context) {
+	auto session = QuackSessionState::Get(context);
+	return session && session->ConnectionId() == GetConnectionId();
+}
+
+QuackSchemaSet &QuackCatalog::GetSchemas(ClientContext &context) {
+	auto current = AcquireSnapshot(context);
+	auto &result = *current;
+	QuackTransaction::Get(context, *this).Retain(std::move(current));
+	return result;
+}
+
+shared_ptr<QuackSchemaSet> QuackCatalog::AcquireSnapshot(ClientContext &context) {
+	auto uses_published = ServesOwnConnection(context);
+	unique_lock<mutex> guard(snapshot_lock);
+	while (loaded_version != invalidated_version && !uses_published && loading_context.get() != &context) {
+		if (loading_context) {
+			snapshot_loaded.wait(guard);
+			continue;
+		}
+		auto target_version = invalidated_version;
+		loading_context = &context;
+		guard.unlock();
+		shared_ptr<QuackSchemaSet> fresh;
+		std::exception_ptr failure;
+		try {
+			auto load_data = LoadCatalog(context);
+			fresh = make_shared_ptr<QuackSchemaSet>(context, *this, load_data);
+		} catch (...) {
+			failure = std::current_exception();
+		}
+		guard.lock();
+		loading_context = nullptr;
+		snapshot_loaded.notify_all();
+		if (failure) {
+			std::rethrow_exception(failure);
+		}
+		snapshot = std::move(fresh);
+		loaded_version = target_version;
+	}
+	return snapshot;
 }
 
 const string &QuackCatalog::GetConnectionId() {
@@ -167,7 +233,7 @@ optional_ptr<CatalogEntry> QuackCatalog::CreateSchema(CatalogTransaction transac
 	// find the set the schema goes in - the catalog itself for a top-level schema, the deepest parent for a
 	// nested one. This runs before the schema is created on the server so a bad path does not leave the
 	// server and the local catalog out of sync
-	reference<QuackCatalogSet> target_set = *schemas;
+	reference<QuackCatalogSet> target_set = GetSchemas(transaction.GetContext());
 	optional_ptr<QuackSchemaCatalogEntry> parent;
 	for (auto &parent_name : info.ParentSchemas()) {
 		auto parent_entry = target_set.get().GetEntry(parent_name.GetIdentifierName());
@@ -185,9 +251,13 @@ optional_ptr<CatalogEntry> QuackCatalog::CreateSchema(CatalogTransaction transac
 	remote_info->StripCatalogQualification();
 	auto &quack_transaction = QuackTransaction::Get(transaction);
 	quack_transaction.Query(remote_info->ToString());
+	Invalidate();
 
-	auto schema_entry = make_uniq<QuackSchemaCatalogEntry>(*this, info, parent.get());
-	return target_set.get().CreateEntry(std::move(schema_entry), info.on_conflict);
+	auto existing = target_set.get().GetEntry(info.SchemaName().GetIdentifierName());
+	if (existing && info.on_conflict != OnCreateConflict::REPLACE_ON_CONFLICT) {
+		return existing;
+	}
+	return quack_transaction.Retain(make_uniq<QuackSchemaCatalogEntry>(*this, info, parent.get()));
 }
 
 //! Report a schema and every schema nested inside it
@@ -200,7 +270,7 @@ static void ScanNestedSchemas(QuackSchemaCatalogEntry &schema,
 }
 
 void QuackCatalog::ScanSchemas(ClientContext &context, std::function<void(SchemaCatalogEntry &)> callback) {
-	for (auto &schema : schemas->GetAllCatalogEntries()) {
+	for (auto &schema : GetSchemas(context).GetAllCatalogEntries()) {
 		ScanNestedSchemas(schema.get().Cast<QuackSchemaCatalogEntry>(), callback);
 	}
 }
@@ -279,17 +349,7 @@ void QuackCatalog::DropSchema(ClientContext &context, DropInfo &info) {
 	drop_info->SetQualifiedName(remote_name);
 	auto &transaction = QuackTransaction::Get(context, *this);
 	transaction.Query(drop_info->ToString());
-
-	// remove the schema from the local set it lives in
-	reference<QuackCatalogSet> target_set = *schemas;
-	for (idx_t i = 0; i + 1 < schema_path.size(); i++) {
-		auto parent_entry = target_set.get().GetEntry(schema_path[i].GetIdentifierName());
-		if (!parent_entry) {
-			return;
-		}
-		target_set = parent_entry->Cast<QuackSchemaCatalogEntry>().Schemas();
-	}
-	target_set.get().DropEntry(schema_path.back().GetIdentifierName());
+	Invalidate();
 }
 
 bool QuackCatalog::SupportsPushdown(const TableRef &ref) {

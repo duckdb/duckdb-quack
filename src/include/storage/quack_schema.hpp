@@ -32,8 +32,6 @@ public:
 
 	static string GetLoadQuery();
 
-	void Reload(ClientContext &context, QuackCatalog &catalog, const QuackLoadCatalogData &load_data);
-
 private:
 	//! Register a schema at the given (possibly nested) local path, creating any missing parent level
 	void RegisterSchema(ClientContext &context, QuackCatalog &catalog, const vector<Identifier> &local_path,
