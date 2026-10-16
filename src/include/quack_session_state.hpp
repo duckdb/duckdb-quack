@@ -36,7 +36,7 @@ public:
 		return connection_id;
 	}
 
-	//! PREPARE sets this before the statement runs.
+	//! The producer sets this while it owns the execution lock, before Query().
 	void SetStatement(shared_ptr<QuackResultStream> stream) {
 		lock_guard<mutex> guard(lock);
 		statement = std::move(stream);
@@ -45,6 +45,8 @@ public:
 		lock_guard<mutex> guard(lock);
 		return statement.lock();
 	}
+
+	void QueryBegin(ClientContext &context) override;
 
 	QuackInsertStreamRegistry &Streams() {
 		return streams;
