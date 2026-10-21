@@ -1,0 +1,38 @@
+# name: test/sql/quack_query_by_name_rollback_repro.test
+# description: quack_query_by_name should participate in the outer transaction rollback
+# group: [sql]
+
+require quack
+
+require httpfs
+
+statement ok con1
+CALL quack_serve('quack:localhost', token='asdf');
+
+statement ok con2
+CREATE SECRET (TYPE quack, TOKEN 'asdf');
+
+statement ok con2
+ATTACH 'quack:localhost' AS rpc;
+
+statement ok con2
+BEGIN;
+
+statement ok con2
+CALL system.main.quack_query_by_name('rpc', 'CREATE TABLE rollback_bug(i INTEGER); INSERT INTO rollback_bug VALUES (42);');
+
+statement ok con2
+ROLLBACK;
+
+# Refresh the attached catalog snapshot so we observe the remote server state.
+statement ok con2
+CALL quack_clear_cache();
+
+# Correct behavior: table creation/insert should have rolled back remotely too.
+statement error con2
+SELECT * FROM rpc.rollback_bug;
+----
+Table with name rollback_bug does not exist
+
+statement ok con1
+CALL quack_stop('quack:localhost');
