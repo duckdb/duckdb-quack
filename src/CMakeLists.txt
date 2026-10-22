@@ -3,6 +3,7 @@ add_subdirectory(storage)
 add_library(
   quack_library OBJECT
   quack_active_connections.cpp
+  quack_affinity.cpp
   quack_rebalancer_core.cpp
   quack_rebalancer_sink.cpp
   quack_fetch_collector.cpp
