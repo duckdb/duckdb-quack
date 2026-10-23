@@ -53,3 +53,16 @@ install(
   EXPORT "${DUCKDB_EXPORT_SET}"
   LIBRARY DESTINATION "${INSTALL_LIB_DIR}"
   ARCHIVE DESTINATION "${INSTALL_LIB_DIR}")
+
+# C++ tests need httpfs for the crypto provider, just like the SQL tests.
+if(BUILD_UNITTESTS AND "httpfs" IN_LIST DUCKDB_EXTENSION_NAMES)
+  add_subdirectory(test/cpp)
+else()
+  # Keep the Makefile entry point available when this build omits C++ tests.
+  add_custom_target(
+    quack_cpp_check
+    COMMAND
+      ${CMAKE_COMMAND} -E echo
+      "Skipping Quack C++ tests: BUILD_UNITTESTS and the httpfs test dependency are required."
+    VERBATIM)
+endif()
