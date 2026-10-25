@@ -57,4 +57,27 @@ private:
 	QuackInsertStreamRegistry streams;
 };
 
+//! The principal the authentication callback returned for a quack session. The server sets it, on the session's
+//! own context and on the context that runs the authorization callback; quack_principal() reads it.
+class QuackPrincipalState : public ClientContextState {
+public:
+	static constexpr const char *KEY = "quack_principal";
+
+	explicit QuackPrincipalState(string principal_p) : principal(std::move(principal_p)) {
+	}
+
+	//! NULL for a context that no authenticated principal owns.
+	static Value Get(ClientContext &context) {
+		auto state = context.registered_state->Get<QuackPrincipalState>(KEY);
+		return state ? Value(state->principal) : Value(LogicalType::VARCHAR);
+	}
+
+	static void Set(ClientContext &context, const string &principal) {
+		context.registered_state->Insert(KEY, make_shared_ptr<QuackPrincipalState>(principal));
+	}
+
+private:
+	const string principal;
+};
+
 } // namespace duckdb

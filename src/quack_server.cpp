@@ -380,7 +380,7 @@ shared_ptr<QuackConnection> QuackServer::GetConnection(const string &connection_
 }
 
 string QuackServer::CreateNewConnection(const string &connection_id, const string &client_id_hash,
-                                        idx_t heartbeat_timeout_seconds) {
+                                        const string &principal, idx_t heartbeat_timeout_seconds) {
 	std::lock_guard<std::mutex> lock(active_connections_mutex);
 
 	D_ASSERT(active_connections.find(connection_id) == active_connections.end());
@@ -391,12 +391,16 @@ string QuackServer::CreateNewConnection(const string &connection_id, const strin
 	}
 	auto new_connection = make_shared_ptr<QuackConnection>(connection_id, heartbeat_timeout_seconds);
 	new_connection->client_id_hash = client_id_hash;
+	new_connection->principal = principal;
 	new_connection->live_caches = live_caches;
 	new_connection->duckdb_connection = make_uniq<Connection>(*db);
 	auto &connection_context = *new_connection->duckdb_connection->context;
 	// scan_data_from_quack_client registers its streams here, and SEND_DATA finds them by connection.
 	connection_context.registered_state->Insert(QuackSessionState::KEY,
 	                                            make_shared_ptr<QuackSessionState>(connection_id));
+	if (!principal.empty()) {
+		QuackPrincipalState::Set(connection_context, principal);
+	}
 	connection_context.config.enable_progress_bar = false;
 	// new_connection->duckdb_connection->context->config.streaming_buffer_size = 10 * 1000000; // 10 MB
 	active_connections[connection_id] = std::move(new_connection);
@@ -436,6 +440,10 @@ struct AuthCallbackResult {
 		return !error.empty() || value.IsNull() ||
 		       (value.type().id() == LogicalTypeId::BOOLEAN && !value.GetValue<bool>());
 	}
+	//! An authentication callback that returns a VARCHAR names the principal it authenticated
+	bool IsPrincipal() const {
+		return error.empty() && !value.IsNull() && value.type().id() == LogicalTypeId::VARCHAR;
+	}
 	unique_ptr<ErrorResponse> Failure(const string &check) const {
 		if (error.empty()) {
 			return make_uniq<ErrorResponse>(check + " failed");
@@ -445,9 +453,14 @@ struct AuthCallbackResult {
 };
 
 template <typename... ARGS>
-static AuthCallbackResult EvaluateAuthQuery(DatabaseInstance &db, const string &sql, ARGS... values) {
+static AuthCallbackResult EvaluateAuthQuery(DatabaseInstance &db, const string &principal, const string &sql,
+                                            ARGS... values) {
 	AuthCallbackResult result;
 	Connection dummy_connection(db);
+	if (!principal.empty()) {
+		// quack_principal() in the callback names the principal of the session it decides for
+		QuackPrincipalState::Set(*dummy_connection.context, principal);
+	}
 	auto query_result = dummy_connection.Query(sql, values...);
 	if (!query_result || query_result->HasError()) {
 		result.error = query_result ? query_result->GetError() : "auth callback produced no result";
@@ -626,9 +639,12 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		}
 		string connection_id = GenerateConnectionId();
 		auto auth = EvaluateAuthQuery(
-		    db, StringUtil::Format("SELECT %s(?, ?, ?)", GetSettingString(db, "quack_authentication_function")),
+		    db, string(),
+		    StringUtil::Format("SELECT %s(?, ?, ?)", GetSettingString(db, "quack_authentication_function")),
 		    Value(connection_id), Value(connection_request_message.AuthString()), Value(Token()));
-		if (auth.Denied()) {
+		string principal = auth.IsPrincipal() ? auth.value.GetValue<string>() : string();
+		// an empty principal names nobody, so it fails closed like NULL
+		if (auth.Denied() || (auth.IsPrincipal() && principal.empty())) {
 			return auth.Failure("Authentication");
 		}
 		string client_id_hash;
@@ -636,7 +652,8 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			client_id_hash = ComputeClientHash(server_hmac_key, connection_request_message.ClientId());
 		}
 		return make_uniq<ConnectionResponseMessage>(
-		    CreateNewConnection(connection_id, client_id_hash, heartbeat_timeout_seconds), heartbeat_timeout_seconds);
+		    CreateNewConnection(connection_id, client_id_hash, principal, heartbeat_timeout_seconds),
+		    heartbeat_timeout_seconds);
 	}
 	case MessageType::DISCONNECT_MESSAGE: {
 		auto &connection = *connection_p;
@@ -651,7 +668,8 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 
 		// TODO do not do this if there is no fun set
 		auto authz = EvaluateAuthQuery(
-		    db, StringUtil::Format("SELECT %s(?, ?)", GetSettingString(db, "quack_authorization_function")),
+		    db, connection.principal,
+		    StringUtil::Format("SELECT %s(?, ?)", GetSettingString(db, "quack_authorization_function")),
 		    Value(prepare_request_message.ConnectionId()), Value(prepare_request_message.Query()));
 		if (authz.Denied()) {
 			return authz.Failure("Authorization");

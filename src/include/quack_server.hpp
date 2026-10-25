@@ -80,6 +80,10 @@ struct QuackConnection {
 	//! connection_id so it stays identical across (re)connections for the same client_id. Empty if no client_id.
 	string client_id_hash;
 
+	//! The principal the authentication callback returned as a VARCHAR, empty when it returned BOOLEAN true. Set
+	//! when the connection is created and never rewritten, like client_id_hash.
+	string principal;
+
 	//! Heartbeat and lease variables
 	const idx_t heartbeat_timeout_seconds;
 	annotated_mutex lease_lock;
@@ -141,7 +145,7 @@ public:
 	virtual void Close() {};
 
 	shared_ptr<QuackConnection> GetConnection(const string &connection_id);
-	string CreateNewConnection(const string &connection_id, const string &client_id_hash,
+	string CreateNewConnection(const string &connection_id, const string &client_id_hash, const string &principal,
 	                           idx_t heartbeat_timeout_seconds);
 	bool DisconnectConnection(const string &connection_id);
 
