@@ -92,6 +92,30 @@ the path names no host - the only `quack` secret there is. A path given explicit
 the scope of the secret, and a secret scoped to nothing more specific than `quack:` leaves the
 default host in place.
 
+### Attaching one catalog of the server
+
+By default the attached catalog holds the schemas of the server session's default catalog, and every
+other catalog attached on the server shows up as a nested schema: `remote.lake.silver.accounts`.
+`REMOTE_CATALOG` roots the attached catalog at one catalog of the server instead, so its tables have
+plain three-part names (also for tools that only know `catalog.schema.table`, such as JDBC clients):
+
+```sql
+-- on server
+ATTACH 'ducklake:metadata.ducklake' AS lake;
+CALL quack_serve('quack:localhost', token = 'super_secret');
+```
+
+```sql
+-- on client
+ATTACH 'quack:localhost' AS lake (TOKEN 'super_secret', REMOTE_CATALOG 'lake');
+FROM lake.silver.accounts;
+USE lake;   -- the default schema is the server catalog's own (e.g. "public" for Postgres)
+```
+
+The server session of that attachment switches to the catalog (`USE lake`), so SQL sent with
+`query()` / `quack_query_by_name` resolves there as well. Attach the server once per catalog you need;
+an unknown catalog name fails the `ATTACH`.
+
 We can also copy data from client to server:
 
 ```sql

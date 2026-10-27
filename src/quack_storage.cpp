@@ -169,11 +169,22 @@ static unique_ptr<Catalog> QuackAttach(optional_ptr<StorageExtensionInfo> storag
 	auto heartbeat_timeout_entry = attach_options.options.find("heartbeat_timeout");
 	auto heartbeat_timeout = QuackClient::ResolveHeartbeatTimeout(
 	    context, heartbeat_timeout_entry != attach_options.options.end() ? &heartbeat_timeout_entry->second : nullptr);
+	// remote_catalog: root the attached catalog at one catalog of the server, instead of at the server session's
+	// default catalog with every other server catalog nested in it as a schema
+	string remote_catalog;
+	auto remote_catalog_entry = attach_options.options.find("remote_catalog");
+	if (remote_catalog_entry != attach_options.options.end()) {
+		if (remote_catalog_entry->second.IsNull() || remote_catalog_entry->second.ToString().empty()) {
+			throw InvalidInputException("remote_catalog cannot be NULL or empty");
+		}
+		remote_catalog = remote_catalog_entry->second.ToString();
+	}
 	QuackUri server_uri(uri, enable_ssl);
 	if (!ssl_fingerprint.empty()) {
 		server_uri.SetSslFingerprint(ssl_fingerprint);
 	}
-	return make_uniq<QuackCatalog>(db, server_uri, context, token, std::move(client_id), heartbeat_timeout);
+	return make_uniq<QuackCatalog>(db, server_uri, context, token, std::move(client_id), heartbeat_timeout,
+	                               std::move(remote_catalog));
 }
 
 static unique_ptr<TransactionManager> QuackCreateTransactionManager(optional_ptr<StorageExtensionInfo> storage_info,

@@ -23,7 +23,8 @@ class QuackClientConnection;
 class QuackCatalog : public Catalog {
 public:
 	explicit QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri_p, ClientContext &context,
-	                      const string &token, string client_id, idx_t heartbeat_timeout_seconds);
+	                      const string &token, string client_id, idx_t heartbeat_timeout_seconds,
+	                      string remote_catalog = string());
 	~QuackCatalog() override;
 
 public:
@@ -78,6 +79,13 @@ public:
 
 	unique_ptr<ColumnDataCollection> ExecuteCommandInternal(ClientContext &context, const string &query);
 	const QuackUri &GetServerUri();
+	//! The server catalog this catalog is rooted at (the remote_catalog ATTACH option), or empty when it is rooted
+	//! at the server session's default catalog, with the other server catalogs nested in it as schemas
+	const string &RemoteCatalog() const {
+		return remote_catalog;
+	}
+	//! With remote_catalog: the server session's schema after USE (e.g. "public" for a Postgres catalog)
+	optional<Identifier> GetDefaultSchema() const override;
 	const string &GetConnectionId();
 
 	shared_ptr<QuackClientConnection> GetClientConnection();
@@ -100,7 +108,12 @@ private:
 	bool ServesOwnConnection(ClientContext &context);
 
 private:
+	//! Point the server session at remote_catalog, so that every name this catalog sends resolves there
+	void UseRemoteCatalog(ClientContext &context);
+
 	shared_ptr<QuackClientConnection> client_connection;
+	string remote_catalog;
+	string remote_default_schema;
 	mutex snapshot_lock;
 	std::condition_variable snapshot_loaded;
 	shared_ptr<QuackSchemaSet> snapshot;
