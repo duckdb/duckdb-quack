@@ -116,10 +116,27 @@ static void SyncResultCache(QuackConnection &connection, QuackResultStream &stre
 	connection.SyncCachedRows();
 }
 
+//! The statement's quack_query_tag as a setting local to `context`: the client's label, or none.
+static void SetQueryTag(ClientContext &context, const string &query_tag) {
+	auto &db_config = DBConfig::GetConfig(context);
+	optional_ptr<const ConfigurationOption> option;
+	auto setting_index = db_config.TryGetSettingIndex("quack_query_tag", option);
+	if (!setting_index.IsValid()) {
+		return;
+	}
+	auto &user_settings = ClientConfig::GetConfig(context).user_settings;
+	if (query_tag.empty()) {
+		user_settings.ClearSetting(setting_index.GetIndex());
+	} else {
+		user_settings.SetUserSetting(setting_index.GetIndex(), Value(query_tag));
+	}
+}
+
 //! Runs one client statement with the result collector installed. It holds the execution lock for the
 //! full duration. A statement that returns rows fills the claim buffer in parallel. A statement that
 //! returns a count leaves the count in batch 1, through the fallback below.
-static void DriveQuery(QuackConnection &connection, shared_ptr<QuackResultStream> stream, string sql) {
+static void DriveQuery(QuackConnection &connection, shared_ptr<QuackResultStream> stream, string sql,
+                       string query_tag) {
 	// A failed statement must stop the client's sends, so its scan's streams get the error too.
 	auto fail_streams = [&](const ErrorData &error) {
 		if (auto session_state = QuackSessionState::Get(*connection.duckdb_connection->context)) {
@@ -136,6 +153,8 @@ static void DriveQuery(QuackConnection &connection, shared_ptr<QuackResultStream
 		config.get_result_collector = [stream](ClientContext &ctx, PreparedStatementData &data) {
 			return MakeQuackFetchCollector(ctx, data, stream);
 		};
+		// Under the execution lock, as the collector: the statement reads the client's label.
+		SetQueryTag(context, query_tag);
 		unique_ptr<QueryResult> result;
 		try {
 			result = connection.duckdb_connection->Query(sql);
@@ -444,10 +463,13 @@ struct AuthCallbackResult {
 	}
 };
 
+//! `query_tag` is set as quack_query_tag on the callback's connection, so it can read the label.
 template <typename... ARGS>
-static AuthCallbackResult EvaluateAuthQuery(DatabaseInstance &db, const string &sql, ARGS... values) {
+static AuthCallbackResult EvaluateAuthQuery(DatabaseInstance &db, const string &query_tag, const string &sql,
+                                            ARGS... values) {
 	AuthCallbackResult result;
 	Connection dummy_connection(db);
+	SetQueryTag(*dummy_connection.context, query_tag);
 	auto query_result = dummy_connection.Query(sql, values...);
 	if (!query_result || query_result->HasError()) {
 		result.error = query_result ? query_result->GetError() : "auth callback produced no result";
@@ -626,7 +648,8 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		}
 		string connection_id = GenerateConnectionId();
 		auto auth = EvaluateAuthQuery(
-		    db, StringUtil::Format("SELECT %s(?, ?, ?)", GetSettingString(db, "quack_authentication_function")),
+		    db, string(),
+		    StringUtil::Format("SELECT %s(?, ?, ?)", GetSettingString(db, "quack_authentication_function")),
 		    Value(connection_id), Value(connection_request_message.AuthString()), Value(Token()));
 		if (auth.Denied()) {
 			return auth.Failure("Authentication");
@@ -651,7 +674,8 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 
 		// TODO do not do this if there is no fun set
 		auto authz = EvaluateAuthQuery(
-		    db, StringUtil::Format("SELECT %s(?, ?)", GetSettingString(db, "quack_authorization_function")),
+		    db, prepare_request_message.QueryTag(),
+		    StringUtil::Format("SELECT %s(?, ?)", GetSettingString(db, "quack_authorization_function")),
 		    Value(prepare_request_message.ConnectionId()), Value(prepare_request_message.Query()));
 		if (authz.Denied()) {
 			return authz.Failure("Authorization");
@@ -695,7 +719,8 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			if (auto session_state = QuackSessionState::Get(*connection.duckdb_connection->context)) {
 				session_state->SetStatement(stream);
 			}
-			connection.statement.thread = std::thread(DriveQuery, std::ref(connection), stream, effective_sql);
+			connection.statement.thread = std::thread(DriveQuery, std::ref(connection), stream, effective_sql,
+			                                          prepare_request_message.QueryTag());
 		}
 		AbortDetachedStatement(connection, std::move(superseded), "superseded by a new query");
 

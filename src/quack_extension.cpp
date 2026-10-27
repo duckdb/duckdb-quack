@@ -217,6 +217,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "client_id used when ATTACH / quack_query omit one; precomputed at load from "
 	                          "$QUACK_CLIENT_ID (empty opts out) or a random per-instance id. Set to '' to opt out.",
 	                          LogicalType::VARCHAR, Value(default_client_id), nullptr, SetScope::GLOBAL);
+	config.AddExtensionOption("quack_query_tag",
+	                          "Client: a label sent with every statement to a Quack server, such as a JSON of who "
+	                          "asked and why. Server: the label of the statement being authorized or run",
+	                          LogicalType::VARCHAR, Value(""));
 	config.AddExtensionOption("quack_default_heartbeat_timeout",
 	                          "Heartbeat lease timeout in seconds requested by clients when ATTACH / quack_query "
 	                          "omit heartbeat_timeout",

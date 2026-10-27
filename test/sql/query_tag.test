@@ -1,0 +1,75 @@
+# name: test/sql/query_tag.test
+# description: the client's quack_query_tag reaches the server's authorization function and statement
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+# The statement reads the tag of the client that sent it
+statement ok
+SET quack_query_tag = '{"app":"test","type":"chart"}';
+
+query I
+FROM quack_query({server}, 'SELECT current_setting(''quack_query_tag'')', token='asdf');
+----
+{"app":"test","type":"chart"}
+
+# A statement without a tag does not see the previous one's
+statement ok
+RESET quack_query_tag;
+
+query I
+FROM quack_query({server}, 'SELECT current_setting(''quack_query_tag'')', token='asdf');
+----
+(empty)
+
+# The server's own setting is untouched
+query I quack_db:quack_server_con
+SELECT current_setting('quack_query_tag');
+----
+(empty)
+
+# The authorization function reads it too
+statement ok quack_db:quack_server_con
+CREATE MACRO authz_tagged(sid, query) AS current_setting('quack_query_tag') = 'allowed';
+
+statement ok quack_db:quack_server_con
+SET quack_authorization_function = 'authz_tagged';
+
+statement error
+FROM quack_query({server}, 'select 42', token='asdf');
+----
+Authorization failed
+
+statement ok
+SET quack_query_tag = 'allowed';
+
+query I
+FROM quack_query({server}, 'select 42', token='asdf');
+----
+42
+
+# An attached catalog's statements are the client's own SQL, and they carry the tag as well
+statement ok quack_db:quack_server_con
+CREATE TABLE tagged AS SELECT 42 AS i;
+
+statement ok con2
+SET quack_query_tag = 'allowed';
+
+statement ok con2
+ATTACH {server} AS rpc (TOKEN 'asdf');
+
+query I con2
+SELECT i FROM rpc.tagged;
+----
+42
+
+statement ok con2
+RESET quack_query_tag;
+
+statement error con2
+SELECT i FROM rpc.tagged;
+----
+Authorization failed
+
+statement ok quack_db:quack_server_con
+RESET GLOBAL quack_authorization_function;

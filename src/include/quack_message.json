@@ -72,6 +72,11 @@
         "name": "inline_rows",
         "type": "optional_idx",
         "default": "optional_idx()"
+      },
+      {
+        "id": 4,
+        "name": "query_tag",
+        "type": "string"
       }
     ]
   },
