@@ -1,0 +1,85 @@
+# name: test/sql/lost_session.test
+# description: a client whose session is gone is told why: its lease expired, or the server does not know it
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+# Without heartbeats the server expires the session one lease period after its last message.
+statement ok
+SET GLOBAL quack_debug_skip_heartbeats=true;
+
+statement ok
+ATTACH {server} AS expiring (token 'asdf', heartbeat_timeout 1);
+
+query I
+FROM quack_query_by_name('expiring', 'SELECT 42');
+----
+42
+
+sleep 2 seconds
+
+statement error
+FROM quack_query_by_name('expiring', 'SELECT 42');
+----
+Quack session expired: the server heard nothing from this client for longer than its heartbeat_timeout (1 seconds)
+
+# The server remembers the expiry, so the next message gets the same answer.
+statement error
+FROM quack_query_by_name('expiring', 'SELECT 42');
+----
+Quack session expired: the server heard nothing from this client for longer than its heartbeat_timeout (1 seconds)
+
+statement ok
+DETACH expiring;
+
+statement ok
+SET GLOBAL quack_debug_skip_heartbeats=false;
+
+# A restarted server knows nothing about the sessions of the old one. A stopped server keeps answering on
+# the keep-alive sockets it already has until they idle out, so restart it with a short keep-alive first.
+statement ok quack_db:quack_server_con
+CALL quack_stop({server});
+
+statement ok quack_db:quack_server_con
+SET quack_server_keep_alive_timeout=1;
+
+statement ok quack_db:quack_server_con
+FROM quack_serve({server}, token='asdf');
+
+statement ok
+ATTACH {server} AS restarted (token 'asdf');
+
+query I
+FROM quack_query_by_name('restarted', 'SELECT 42');
+----
+42
+
+statement ok quack_db:quack_server_con
+CALL quack_stop({server});
+
+sleep 2 seconds
+
+statement ok quack_db:quack_server_con
+FROM quack_serve({server}, token='asdf');
+
+statement error
+FROM quack_query_by_name('restarted', 'SELECT 42');
+----
+Unknown Quack session: this server has no session with this id, most likely because it restarted
+
+# A new session on the restarted server works.
+statement ok
+DETACH restarted;
+
+statement ok
+ATTACH {server} AS restarted (token 'asdf');
+
+query I
+FROM quack_query_by_name('restarted', 'SELECT 42');
+----
+42
+
+statement ok
+DETACH restarted;
+
+include test/template/quack_teardown.test_template
