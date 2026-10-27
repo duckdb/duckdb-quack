@@ -1,3 +1,4 @@
+#include "duckdb/common/sql_identifier.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/query_result.hpp"
@@ -248,7 +249,11 @@ static string BuildPushdownQuery(const QuackScanBindData &bind_data, const Table
 					throw InternalException("Unsupported virtual column index");
 				}
 			} else {
-				query += "#" + to_string(col_id.GetPrimaryIndex() + 1);
+				// By name, not by position (#n): the columns were bound against our cached copy of the table,
+				// and after a DROP COLUMN on the server the same position holds another column. A name that is
+				// gone fails to bind on the server instead of silently returning the wrong values.
+				D_ASSERT(col_id.GetPrimaryIndex() < bind_data.column_names.size());
+				query += SQLIdentifier(bind_data.column_names[col_id.GetPrimaryIndex()]);
 			}
 		}
 		query = "SELECT " + query + " ";

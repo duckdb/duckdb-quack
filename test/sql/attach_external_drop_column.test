@@ -1,0 +1,47 @@
+# name: test/sql/attach_external_drop_column.test
+# description: a column dropped on the server is not read from another column through a stale catalog (#319)
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok quack_db:quack_server_con
+create table t(a INTEGER, b INTEGER, c INTEGER)
+
+statement ok quack_db:quack_server_con
+insert into t values (10, 20, 30)
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+statement ok
+SET disabled_optimizers = 'remote_pushdown'
+
+query I
+select a from rpc.t
+----
+10
+
+statement ok quack_db:quack_server_con
+alter table t drop column a
+
+# The client still has (a, b, c) cached: the scan must ask the server for "a", which is gone, rather than
+# for the first column, which is now b
+statement error
+select a from rpc.t
+----
+<REGEX>:.*Binder Error.*"a".*
+
+# The remaining columns are still read by name
+query II
+select c, b from rpc.t
+----
+30	20
+
+# Once the cache is refreshed the table has the server's columns
+statement ok
+CALL quack_clear_cache()
+
+query II
+select * from rpc.t
+----
+20	30
