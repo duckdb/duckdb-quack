@@ -1,0 +1,286 @@
+# name: test/sql/authn_principal.test
+# description: an authentication callback that returns a VARCHAR names a principal, which quack_principal() hands to authorization
+# group: [sql]
+
+require json
+
+include test/template/quack_setup.test_template
+
+# Outside a quack session there is no principal
+query I
+SELECT quack_principal() IS NULL;
+----
+true
+
+####################
+# BOOLEAN authentication (the default) authenticates nobody in particular
+####################
+
+statement ok quack_db:quack_server_con
+CREATE MACRO authz_requires_principal(sid, query) AS quack_principal() IS NOT NULL;
+
+query I
+FROM quack_query({server}, 'SELECT quack_principal() IS NULL', token='asdf');
+----
+true
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_authorization_function = 'authz_requires_principal';
+
+statement error
+FROM quack_query({server}, 'SELECT 42', token='asdf');
+----
+Authorization failed
+
+statement ok quack_db:quack_server_con
+RESET GLOBAL quack_authorization_function;
+
+####################
+# A users table: one read-only and one read-write user, stored as token hashes
+####################
+
+statement ok quack_db:quack_server_con
+CREATE TABLE quack_users(name VARCHAR PRIMARY KEY, token_sha256 VARCHAR UNIQUE, can_write BOOLEAN NOT NULL);
+
+statement ok quack_db:quack_server_con
+INSERT INTO quack_users VALUES ('reader', sha256('reader-token'), false), ('writer', sha256('writer-token'), true);
+
+statement ok quack_db:quack_server_con
+CREATE TABLE t AS SELECT range AS i FROM range(3);
+
+# Authentication returns the user's name, or NULL (rejected) for an unknown token
+statement ok quack_db:quack_server_con
+CREATE MACRO users_authn(sid, client_token, server_token) AS
+    (SELECT name FROM quack_users WHERE token_sha256 = sha256(client_token));
+
+# A read-only classifier. json_serialize_sql parses the whole request and reports error=false only when
+# every statement serializes as a plain query, so it denies DDL, DML, a write wrapped in a CTE, and each
+# statement of a multi-statement request. It also reports error=true for the transaction-control
+# statements (BEGIN/COMMIT/ROLLBACK) that a catalog table scan issues as its own authorized requests, so a
+# read-only policy has to allow those explicitly - they write nothing, and the exact-match keeps anything
+# with extra statements appended (e.g. 'COMMIT; DROP TABLE t') out. It is not a complete read-only
+# boundary: a plain SELECT can still call a side-effecting function (nextval, a file reader), so a hardened
+# server also sets enable_external_access = false and the like. Authorization looks the principal up on
+# every statement, so deleting the row revokes a live session.
+statement ok quack_db:quack_server_con
+CREATE MACRO users_authz(sid, query) AS COALESCE(
+    (SELECT can_write
+            OR upper(trim(query)) IN ('BEGIN', 'BEGIN TRANSACTION', 'START TRANSACTION',
+                                      'COMMIT', 'COMMIT TRANSACTION', 'END', 'END TRANSACTION',
+                                      'ROLLBACK', 'ROLLBACK TRANSACTION', 'ABORT')
+            OR (json_serialize_sql(query) ->> '$.error') = 'false'
+     FROM quack_users WHERE name = quack_principal()), false);
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_authentication_function = 'users_authn';
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_authorization_function = 'users_authz';
+
+# Each token authenticates as its own principal, and the session sees it
+query I
+FROM quack_query({server}, 'SELECT quack_principal()', token='reader-token');
+----
+reader
+
+query I
+FROM quack_query({server}, 'SELECT quack_principal()', token='writer-token');
+----
+writer
+
+# NULL rejects: an unknown token, and the server's own token, which this callback does not accept
+statement error
+FROM quack_query({server}, 'SELECT 42', token='nobody-token');
+----
+Authentication failed
+
+statement error
+FROM quack_query({server}, 'SELECT 42', token='asdf');
+----
+Authentication failed
+
+# The reader may read
+query I
+FROM quack_query({server}, 'SELECT count(*) FROM t', token='reader-token');
+----
+3
+
+# ... and may not write, also not inside a CTE, nor after a SELECT in the same request
+statement error
+FROM quack_query({server}, 'INSERT INTO t VALUES (100)', token='reader-token');
+----
+Authorization failed
+
+statement error
+FROM quack_query({server}, 'WITH x AS (SELECT 100 AS i) INSERT INTO t SELECT i FROM x', token='reader-token');
+----
+Authorization failed
+
+statement error
+FROM quack_query({server}, 'SELECT 1; DROP TABLE t', token='reader-token');
+----
+Authorization failed
+
+# ... nor change the callbacks or the users table (duckdb-quack#325)
+statement error
+FROM quack_query({server}, 'CREATE OR REPLACE MACRO users_authz(sid, query) AS true', token='reader-token');
+----
+Authorization failed
+
+statement error
+FROM quack_query({server}, 'INSERT INTO quack_users VALUES (''me'', sha256(''mine''), true)', token='reader-token');
+----
+Authorization failed
+
+statement error
+FROM quack_query({server}, 'UPDATE quack_users SET can_write = true WHERE name = ''reader''', token='reader-token');
+----
+Authorization failed
+
+statement error
+FROM quack_query({server}, 'DETACH quack_db', token='reader-token');
+----
+Authorization failed
+
+# The writer may write
+query I
+FROM quack_query({server}, 'INSERT INTO t VALUES (3)', token='writer-token');
+----
+1
+
+query I
+FROM quack_query({server}, 'SELECT 1; INSERT INTO t VALUES (4)', token='writer-token');
+----
+1
+
+####################
+# The same principals through ATTACH: catalog lookups, pushed-down writes and appends all authorize as the session
+####################
+
+statement ok
+ATTACH {server} AS as_reader (TOKEN 'reader-token');
+
+statement ok
+ATTACH {server} AS as_writer (TOKEN 'writer-token');
+
+query I
+FROM as_reader.query('SELECT quack_principal()');
+----
+reader
+
+query I
+FROM as_writer.query('SELECT quack_principal()');
+----
+writer
+
+query I
+SELECT count(*) FROM as_reader.t;
+----
+5
+
+statement error
+INSERT INTO as_reader.t VALUES (5);
+----
+Authorization failed
+
+statement error
+CREATE TABLE as_reader.t2(i INTEGER);
+----
+Authorization failed
+
+# an append from a local source streams its rows to the server
+statement ok
+CREATE TABLE local_rows AS SELECT range + 10 AS i FROM range(3);
+
+statement error
+INSERT INTO as_reader.t SELECT i FROM local_rows;
+----
+Authorization failed
+
+statement ok
+INSERT INTO as_writer.t SELECT i FROM local_rows;
+
+query I
+SELECT count(*) FROM as_reader.t;
+----
+8
+
+# Sessions of different principals at the same time each keep their own
+concurrentloop worker 0 8
+
+query I
+FROM quack_query({server}, 'SELECT quack_principal()', token='reader-token');
+----
+reader
+
+query I
+FROM quack_query({server}, 'SELECT quack_principal()', token='writer-token');
+----
+writer
+
+endloop
+
+####################
+# Lifecycle
+####################
+
+# The principal is fixed when the session connects: changing the authentication callback leaves live
+# sessions as they are, and only decides new connections
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_authentication_function = 'quack_check_token';
+
+query I
+FROM as_writer.query('SELECT quack_principal()');
+----
+writer
+
+statement error
+FROM quack_query({server}, 'SELECT 42', token='writer-token');
+----
+Authentication failed
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_authentication_function = 'users_authn';
+
+# Deleting the user revokes the live session at its next statement, and its next connection
+statement ok quack_db:quack_server_con
+DELETE FROM quack_users WHERE name = 'writer';
+
+statement error
+FROM as_writer.query('SELECT 42');
+----
+Authorization failed
+
+statement error
+FROM quack_query({server}, 'SELECT 42', token='writer-token');
+----
+Authentication failed
+
+statement ok
+DETACH as_reader;
+
+statement ok
+DETACH as_writer;
+
+####################
+# An empty principal names nobody and is rejected like NULL
+####################
+
+statement ok quack_db:quack_server_con
+CREATE MACRO authn_empty(sid, client_token, server_token) AS '';
+
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_authentication_function = 'authn_empty';
+
+statement error
+FROM quack_query({server}, 'SELECT 42', token='asdf');
+----
+Authentication failed
+
+statement ok quack_db:quack_server_con
+RESET GLOBAL quack_authentication_function;
+
+statement ok quack_db:quack_server_con
+RESET GLOBAL quack_authorization_function;
+
+include test/template/quack_teardown.test_template
