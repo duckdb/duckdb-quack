@@ -23,11 +23,23 @@ FROM quack_query_by_name('expiring', 'SELECT 42');
 ----
 Quack session expired: the server heard nothing from this client for longer than its heartbeat_timeout (1 seconds)
 
-# The server remembers the expiry, so the next message gets the same answer.
+# The client retains the expiry, so the next query gets the same answer locally.
 statement error
 FROM quack_query_by_name('expiring', 'SELECT 42');
 ----
 Quack session expired: the server heard nothing from this client for longer than its heartbeat_timeout (1 seconds)
+
+statement ok
+SET errors_as_json=true;
+
+# Structured session identity also reaches SQL clients that request JSON errors.
+statement error
+FROM quack_query_by_name('expiring', 'SELECT 42');
+----
+"quack_lost_session_id_hash":
+
+statement ok
+SET errors_as_json=false;
 
 statement ok
 DETACH expiring;

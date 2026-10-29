@@ -266,11 +266,12 @@ unique_ptr<QuackMessage> QuackServer::UnknownConnectionError(const string &conne
 		std::lock_guard<std::mutex> lock(active_connections_mutex);
 		auto entry = expired_connections.find(connection_id);
 		if (entry != expired_connections.end()) {
-			return make_uniq<ErrorResponse>(ExpiredConnectionMessage(entry->second));
+			return ErrorResponse::LostSession(connection_id, ExpiredConnectionMessage(entry->second));
 		}
 	}
-	return make_uniq<ErrorResponse>("Unknown Quack session: this server has no session with this id, most likely "
-	                                "because it restarted. DETACH and ATTACH again to reconnect.");
+	return ErrorResponse::LostSession(connection_id,
+	                                  "Unknown Quack session: this server has no session with this id, most likely "
+	                                  "because it restarted. DETACH and ATTACH again to reconnect.");
 }
 
 void QuackServer::DestroyCachesDetached(vector<unique_ptr<QuackResultCache>> doomed) {
