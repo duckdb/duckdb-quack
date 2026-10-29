@@ -40,11 +40,10 @@ public:
 		return unique_ptr_cast<QuackMessage, TARGET>(std::move(response_message));
 	}
 
-	//! Invalidate the owning connection if the error says the server's database died. Call before rethrowing.
+	//! Record terminal errors for the owning connection. Call before rethrowing.
 	void NoteError(const ErrorResponse &error_response);
 
-	//! The connection this client is checked out from - set by QuackClientWrapper. Null for the initial connect
-	//! and for a one-shot quack_query.
+	//! The connection this client is checked out from. Null while cached or during the initial connect.
 	void SetOwnerConnection(optional_ptr<const QuackClientConnection> owner_connection_p) {
 		owner_connection = owner_connection_p;
 	}
@@ -132,7 +131,7 @@ public:
 	}
 
 	//! Get a client (either a cached one, or open a new one if required).
-	//! Throws once the server has told us its database is gone - see MarkServerInvalidated.
+	//! Throws once the server has told us its database or this session is gone.
 	unique_ptr<QuackClientWrapper> GetClient(ClientContext &context) const;
 	//! Return a client back to the cache
 	void StoreClient(unique_ptr<QuackClient> client_p) const;
@@ -150,6 +149,7 @@ private:
 
 	void StartHeartbeat();
 	void SendHeartbeat();
+	void MarkSessionLost(const ErrorData &error) const;
 	unique_ptr<QuackClient> TakeClient(optional_ptr<ClientContext> context) const;
 
 	DatabaseInstance &db;
@@ -159,12 +159,14 @@ private:
 	idx_t heartbeat_timeout_seconds;
 	mutable mutex lock;
 	mutable atomic<bool> server_invalidated {false};
+	//! The first confirmed loss of this session. Guarded by lock, and preserved for later callers.
+	mutable ErrorData session_error;
 	//! Bounds cached_clients: each cached client holds a persistent socket that pins a server
 	//! connection slot, so an unbounded cache would let one attach starve the server's budget.
 	idx_t max_connections_cached;
 	mutable vector<unique_ptr<QuackClient>> cached_clients;
 
-	QuackPeriodicWorker heartbeat;
+	mutable QuackPeriodicWorker heartbeat;
 };
 
 struct QuackClientWrapper {

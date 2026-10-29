@@ -6,6 +6,8 @@
 #include "duckdb/common/string_util.hpp"
 
 #include "quack_message.hpp"
+#include "quack_random.hpp"
+#include "mbedtls_wrapper.hpp"
 
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
@@ -226,6 +228,25 @@ string ErrorResponse::ExceptionTypeName() const {
 
 unordered_map<string, string> ErrorResponse::TransferableExtraInfo() const {
 	return TransferableErrorInfo(error.ExtraInfo());
+}
+
+static string SessionIdHash(const string &connection_id) {
+	auto hash = duckdb_mbedtls::MbedTlsWrapper::ComputeSha256Hash(connection_id);
+	return QuackHexEncode(const_data_ptr_cast(hash.data()), hash.size());
+}
+
+unique_ptr<ErrorResponse> ErrorResponse::LostSession(const string &connection_id, const string &message) {
+	// The connection ID is a bearer token. Only its fingerprint belongs in user-visible error metadata.
+	unordered_map<string, string> extra_info {{QuackErrorInfo::LOST_SESSION_ID_HASH, SessionIdHash(connection_id)}};
+	return make_uniq<ErrorResponse>(
+	    ErrorData(StringUtil::ExceptionToJSONMap(ExceptionType::CONNECTION, message, extra_info)));
+}
+
+bool ErrorResponse::IsLostSession(const string &connection_id) const {
+	auto &extra_info = error.ExtraInfo();
+	auto entry = extra_info.find(QuackErrorInfo::LOST_SESSION_ID_HASH);
+	return error.Type() == ExceptionType::CONNECTION && entry != extra_info.end() &&
+	       entry->second == SessionIdHash(connection_id);
 }
 
 unique_ptr<ErrorResponse> ErrorResponse::FromWire(const string &message, const string &exception_type,

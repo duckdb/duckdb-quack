@@ -1,5 +1,6 @@
 #pragma once
 
+#include <deque>
 #include <queue>
 #include <thread>
 
@@ -188,6 +189,12 @@ protected:
 	weak_ptr<DatabaseInstance> db_ptr;
 	mutex active_connections_mutex;
 	unordered_map<string, shared_ptr<QuackConnection>> active_connections;
+	//! Connections closed because their lease expired, mapped to their heartbeat timeout, so that a client
+	//! coming back late is told why its session is gone. Oldest first in expired_connection_order, at most
+	//! MAX_EXPIRED_CONNECTIONS entries. Guarded by active_connections_mutex.
+	static constexpr idx_t MAX_EXPIRED_CONNECTIONS = 1024;
+	unordered_map<string, idx_t> expired_connections;
+	std::deque<string> expired_connection_order;
 	shared_ptr<atomic<idx_t>> live_caches = make_shared_ptr<atomic<idx_t>>(0);
 	//! Min-heap of the expiry-queue slots, at most one per connection with a cache
 	mutex cache_expiry_mutex;
@@ -199,6 +206,10 @@ protected:
 private:
 	bool RenewConnectionLease(const string &connection_id, const shared_ptr<QuackConnection> &connection);
 	static void CleanupExpiredConnection(QuackConnection &connection);
+	//! Caller must hold active_connections_mutex
+	void RememberExpiredConnection(const QuackConnection &connection);
+	//! The error for a message whose connection id is not in active_connections
+	unique_ptr<QuackMessage> UnknownConnectionError(const string &connection_id);
 	//! Destroys reaped caches on a one-shot detached thread so no response waits on their teardown
 	void DestroyCachesDetached(vector<unique_ptr<QuackResultCache>> doomed);
 

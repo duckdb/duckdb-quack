@@ -239,9 +239,39 @@ bool QuackServer::RenewConnectionLease(const string &connection_id, const shared
 		}
 		expired_connection = std::move(entry->second);
 		active_connections.erase(entry);
+		RememberExpiredConnection(*expired_connection);
 	}
 	CleanupExpiredConnection(*expired_connection);
 	return false;
+}
+
+void QuackServer::RememberExpiredConnection(const QuackConnection &connection) {
+	if (expired_connection_order.size() >= MAX_EXPIRED_CONNECTIONS) {
+		expired_connections.erase(expired_connection_order.front());
+		expired_connection_order.pop_front();
+	}
+	expired_connections[connection.connection_id] = connection.heartbeat_timeout_seconds;
+	expired_connection_order.push_back(connection.connection_id);
+}
+
+static string ExpiredConnectionMessage(idx_t heartbeat_timeout_seconds) {
+	return StringUtil::Format("Quack session expired: the server heard nothing from this client for longer than "
+	                          "its heartbeat_timeout (%llu seconds) and closed the session. DETACH and ATTACH again "
+	                          "to reconnect.",
+	                          heartbeat_timeout_seconds);
+}
+
+unique_ptr<QuackMessage> QuackServer::UnknownConnectionError(const string &connection_id) {
+	{
+		std::lock_guard<std::mutex> lock(active_connections_mutex);
+		auto entry = expired_connections.find(connection_id);
+		if (entry != expired_connections.end()) {
+			return ErrorResponse::LostSession(connection_id, ExpiredConnectionMessage(entry->second));
+		}
+	}
+	return ErrorResponse::LostSession(connection_id,
+	                                  "Unknown Quack session: this server has no session with this id, most likely "
+	                                  "because it restarted. DETACH and ATTACH again to reconnect.");
 }
 
 void QuackServer::DestroyCachesDetached(vector<unique_ptr<QuackResultCache>> doomed) {
@@ -568,7 +598,7 @@ unique_ptr<QuackMessage> QuackServer::DispatchMessage(MemoryStream &read_stream)
 	if (MessageRequiresConnection(header.type)) {
 		connection = GetConnection(header.connection_id);
 		if (!connection) {
-			return make_uniq<ErrorResponse>("Invalid connection id");
+			return UnknownConnectionError(header.connection_id);
 		}
 	}
 
@@ -579,7 +609,8 @@ unique_ptr<QuackMessage> QuackServer::DispatchMessage(MemoryStream &read_stream)
 	if (connection) {
 		// Only supported, structurally valid messages for an existing session renew its lease.
 		if (!RenewConnectionLease(header.connection_id, connection)) {
-			return make_uniq<ErrorResponse>("Connection heartbeat lease expired");
+			// expired just now (and remembered), or closed by a concurrent request
+			return UnknownConnectionError(header.connection_id);
 		}
 	}
 

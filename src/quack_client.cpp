@@ -55,13 +55,9 @@ static void LoadExtraHttpHeaders(optional_ptr<ClientContext> context, DatabaseIn
 }
 
 void QuackClientConnection::CancelQuery(hugeint_t query_uuid) {
-	lock_guard<mutex> guard(lock);
-	if (cached_clients.empty()) {
-		return;
-	}
-	// get a cached client, if any
-	auto &client = cached_clients.back();
+	auto client = TakeClient(nullptr);
 	client->Request<SuccessResponse>(nullptr, make_uniq<CancelRequestMessage>(connection_id, query_uuid));
+	StoreClient(std::move(client));
 }
 
 QuackClient::QuackClient(DatabaseInstance &db_p, const QuackUri &uri_p) : db(db_p), uri(uri_p) {
@@ -327,7 +323,7 @@ QuackClientConnection::QuackClientConnection(DatabaseInstance &db_p, unique_ptr<
 
 QuackClientConnection::~QuackClientConnection() {
 	heartbeat.Stop();
-	if (!cached_clients.empty()) {
+	if (!session_error.HasError() && !server_invalidated && !cached_clients.empty()) {
 		try {
 			auto &client = cached_clients.back();
 			// A dead peer at teardown must not block the destructor for the full request timeout (which
@@ -345,8 +341,13 @@ void QuackClientConnection::StartHeartbeat() {
 	                [this] { SendHeartbeat(); });
 }
 
-//! A failed attempt is not terminal: the worker swallows the throw and retries next interval.
+//! Transport failures are retried next interval. A confirmed lost session stops the worker in NoteError.
 void QuackClientConnection::SendHeartbeat() {
+	Value skip_heartbeats;
+	if (db.TryGetCurrentSetting("quack_debug_skip_heartbeats", skip_heartbeats) && !skip_heartbeats.IsNull() &&
+	    skip_heartbeats.GetValue<bool>()) {
+		return;
+	}
 	auto client = TakeClient(nullptr);
 	client->Request<SuccessResponse>(nullptr, make_uniq<HeartbeatRequestMessage>(connection_id));
 	StoreClient(std::move(client));
@@ -456,9 +457,18 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 }
 
 unique_ptr<QuackClient> QuackClientConnection::TakeClient(optional_ptr<ClientContext> context) const {
+	if (server_invalidated) {
+		throw InvalidInputException(
+		    "The Quack server at %s invalidated its database, so this attached database is gone with it. The "
+		    "server has to be restarted; DETACH and ATTACH again to use it afterwards.",
+		    uri.Uri());
+	}
 	unique_ptr<QuackClient> result;
 	{
 		lock_guard<mutex> guard(lock);
+		if (session_error.HasError()) {
+			session_error.Throw();
+		}
 		if (!cached_clients.empty()) {
 			result = std::move(cached_clients.back());
 			cached_clients.pop_back();
@@ -468,16 +478,12 @@ unique_ptr<QuackClient> QuackClientConnection::TakeClient(optional_ptr<ClientCon
 		result = QuackClient::GetClient(db, uri);
 	}
 	result->SetRequestLogger(context ? context->logger : nullptr);
+	// Control requests bypass QuackClientWrapper, but still belong to this connection.
+	result->SetOwnerConnection(this);
 	return result;
 }
 
 unique_ptr<QuackClientWrapper> QuackClientConnection::GetClient(ClientContext &context) const {
-	if (server_invalidated) {
-		throw InvalidInputException(
-		    "The Quack server at %s invalidated its database, so this attached database is gone with it. The "
-		    "server has to be restarted; DETACH and ATTACH again to use it afterwards.",
-		    uri.Uri());
-	}
 	// An in-process server shares the attached catalogs with its clients. A statement it runs for connection X
 	// must not send a request over X: it would supersede itself and hang.
 	if (auto session_state = QuackSessionState::Get(context)) {
@@ -492,16 +498,35 @@ unique_ptr<QuackClientWrapper> QuackClientConnection::GetClient(ClientContext &c
 }
 
 void QuackClient::NoteError(const ErrorResponse &error_response) {
-	if (error_response.MustInvalidate() && owner_connection) {
+	if (!owner_connection) {
+		return;
+	}
+	if (error_response.MustInvalidate()) {
 		owner_connection->MarkServerInvalidated();
+	}
+	if (error_response.IsLostSession(owner_connection->ConnectionId())) {
+		owner_connection->MarkSessionLost(error_response.Error());
 	}
 }
 
 void QuackClientConnection::MarkServerInvalidated() const {
 	server_invalidated = true;
+	heartbeat.RequestStop();
+}
+
+void QuackClientConnection::MarkSessionLost(const ErrorData &error) const {
+	{
+		lock_guard<mutex> guard(lock);
+		if (!session_error.HasError()) {
+			session_error = error;
+		}
+	}
+	// The heartbeat itself can discover the loss. Joining here would make it join its own thread.
+	heartbeat.RequestStop();
 }
 
 void QuackClientConnection::StoreClient(unique_ptr<QuackClient> client_p) const {
+	client_p->SetOwnerConnection(nullptr);
 	lock_guard<mutex> guard(lock);
 	if (cached_clients.size() >= max_connections_cached) {
 		// Beyond the cap, drop the client: destroying it closes its persistent socket, freeing the
@@ -516,13 +541,9 @@ void QuackClientConnection::StoreClient(unique_ptr<QuackClient> client_p) const 
 QuackClientWrapper::QuackClientWrapper(unique_ptr<QuackClient> client_p,
                                        shared_ptr<const QuackClientConnection> client_connection_p)
     : client(std::move(client_p)), client_connection(std::move(client_connection_p)) {
-	// while checked out, the client knows which attachment it serves, so an error that kills the server can
-	// mark that attachment dead (see QuackClient::NoteError)
-	client->SetOwnerConnection(client_connection.get());
 }
 
 QuackClientWrapper::~QuackClientWrapper() {
-	client->SetOwnerConnection(nullptr);
 	client_connection->StoreClient(std::move(client));
 }
 

@@ -35,7 +35,7 @@ from quack_query({server}, 'select case when i < 30000 then i::varchar else ''ab
 ----
 Conversion Error: Could not convert string 'abc' to INT32
 
-# errors raised by quack itself (not by a query) keep throwing as InvalidInputException
+# Authentication failures are invalid input; confirmed session loss is a Connection error.
 statement error
 from quack_query({server}, 'select 42', token='wrong-token')
 ----
