@@ -20,12 +20,12 @@ namespace duckdb {
 // Sends one serialized payload on an async-pool thread, and reads the answer.
 class QuackSendDataTask : public AsyncTask {
 public:
-	QuackSendDataTask(unique_ptr<QuackClientWrapper> client_wrapper_p, unique_ptr<MemoryStream> payload_p,
-	                  idx_t body_start_p, idx_t body_size_p, string connection_id_p, optional_idx client_query_id_p,
-	                  shared_ptr<Logger> logger_p, idx_t debug_delay_ms_p)
-	    : client_wrapper(std::move(client_wrapper_p)), payload(std::move(payload_p)), body_start(body_start_p),
-	      body_size(body_size_p), connection_id(std::move(connection_id_p)), client_query_id(client_query_id_p),
-	      logger(std::move(logger_p)), debug_delay_ms(debug_delay_ms_p) {
+	QuackSendDataTask(ClientContext &context_p, unique_ptr<QuackClientWrapper> client_wrapper_p,
+	                  unique_ptr<MemoryStream> payload_p, idx_t body_start_p, idx_t body_size_p, string connection_id_p,
+	                  optional_idx client_query_id_p, shared_ptr<Logger> logger_p, idx_t debug_delay_ms_p)
+	    : context(context_p), client_wrapper(std::move(client_wrapper_p)), payload(std::move(payload_p)),
+	      body_start(body_start_p), body_size(body_size_p), connection_id(std::move(connection_id_p)),
+	      client_query_id(client_query_id_p), logger(std::move(logger_p)), debug_delay_ms(debug_delay_ms_p) {
 	}
 
 	void Execute() override {
@@ -36,9 +36,9 @@ public:
 		}
 		auto &client = client_wrapper->GetClient();
 		auto start_time = QuackNowMillis();
-		// context=nullptr: this thread must not touch ClientContext.
+		// PostRaw only reads interruption/deadline state from the caller on this async thread.
 		// The payload holds its batch index, so a retry sends the same batch again.
-		auto response_body = client.PostRaw(nullptr, payload->GetData() + body_start, body_size);
+		auto response_body = client.PostRaw(context, payload->GetData() + body_start, body_size);
 		auto duration_ms = QuackNowMillis() - start_time;
 
 		auto response = QuackClient::DecodeResponse(response_body);
@@ -62,6 +62,8 @@ public:
 	}
 
 private:
+	//! The emitter drains the queue before the caller finishes its query.
+	ClientContext &context;
 	unique_ptr<QuackClientWrapper> client_wrapper;
 	unique_ptr<MemoryStream> payload;
 	//! Where the wire body starts in the payload buffer, and how long it runs.
@@ -208,15 +210,15 @@ public:
 		auto connection_id = prepared->connection_id;
 		auto client_query_id = prepared->client_query_id;
 		auto client_wrapper = quack_catalog.GetClientConnection()->GetClient(context);
-		queue->Register(make_uniq<QuackSendDataTask>(std::move(client_wrapper), std::move(prepared->payload),
+		queue->Register(make_uniq<QuackSendDataTask>(context, std::move(client_wrapper), std::move(prepared->payload),
 		                                             body_start, body_size, connection_id, client_query_id,
 		                                             context.logger, debug_delay_ms),
 		                body_size);
 		if (duplicate) {
 			auto retry_wrapper = quack_catalog.GetClientConnection()->GetClient(context);
-			queue->Register(make_uniq<QuackSendDataTask>(std::move(retry_wrapper), std::move(duplicate), 0, body_size,
-			                                             std::move(connection_id), client_query_id, context.logger,
-			                                             debug_delay_ms),
+			queue->Register(make_uniq<QuackSendDataTask>(context, std::move(retry_wrapper), std::move(duplicate), 0,
+			                                             body_size, std::move(connection_id), client_query_id,
+			                                             context.logger, debug_delay_ms),
 			                body_size);
 		}
 		queue->ApplyBackpressure();

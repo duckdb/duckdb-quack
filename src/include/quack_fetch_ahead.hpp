@@ -63,6 +63,8 @@ private:
 	void FinishTask(unique_ptr<QuackClientWrapper> client, bool pushed_batch);
 
 private:
+	//! Borrowed until StopAndDrain joins every fetch, before the caller finishes its query.
+	ClientContext &context;
 	unique_ptr<ManagedAsyncTaskQueue> queue;
 	shared_ptr<QuackFetchBuffer> buffer;
 	hugeint_t query_uuid;

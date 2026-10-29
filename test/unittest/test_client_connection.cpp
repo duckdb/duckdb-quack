@@ -2,6 +2,8 @@
 #include "catch.hpp"
 
 #include "duckdb.hpp"
+#include "duckdb/main/client_context.hpp"
+#include "duckdb/main/config.hpp"
 #include "quack_client.hpp"
 
 #include <future>
@@ -42,7 +44,54 @@ private:
 	CancelState &state;
 };
 
+class InterruptHTTPUtil : public HTTPUtil {
+public:
+	unique_ptr<HTTPResponse> SendRequest(BaseRequest &request, unique_ptr<HTTPClient> &) override {
+		requests++;
+		caller = request.interrupt_context;
+		if (caller) {
+			caller->Interrupt();
+			request.InterruptCheck();
+		}
+		MemoryStream stream(Allocator::DefaultAllocator());
+		SuccessResponse response;
+		response.ToMemoryStream(stream);
+		request.Cast<PostRequestInfo>().buffer_out.assign(const_char_ptr_cast(stream.GetData()), stream.GetPosition());
+		return make_uniq<HTTPResponse>(HTTPStatusCode::OK_200);
+	}
+
+	idx_t requests = 0;
+	optional_ptr<ClientContext> caller;
+};
+
 } // namespace
+
+TEST_CASE("Quack HTTP requests preserve interruption and leave cleanup runnable", "[quack]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	con.BeginTransaction();
+	auto http = make_shared_ptr<InterruptHTTPUtil>();
+	db.instance->config.SetHTTPUtil(http);
+	HttpsQuackClient client(*db.instance, QuackUri("quack://localhost:1"));
+	SECTION("decoded request") {
+		CHECK_THROWS_AS(client.Request<SuccessResponse>(
+		                    *con.context, make_uniq<PrepareRequestMessage>("test-session", "SELECT 1", hugeint_t(1))),
+		                InterruptException);
+	}
+	SECTION("serialized async request") {
+		CHECK_THROWS_AS(client.PostRaw(*con.context, nullptr, 0), InterruptException);
+	}
+	CHECK(http->caller.get() == con.context.get());
+	CHECK(http->requests == 1);
+	CHECK(con.context->IsInterrupted());
+	CHECK(client.Request<SuccessResponse>(*con.context, make_uniq<CancelRequestMessage>("test-session", hugeint_t(1))));
+	CHECK_FALSE(http->caller);
+	CHECK(client.Request<SuccessResponse>(*con.context, make_uniq<HeartbeatRequestMessage>("test-session")));
+	CHECK_FALSE(http->caller);
+	CHECK(client.Request<SuccessResponse>(*con.context, make_uniq<DisconnectMessage>("test-session")));
+	CHECK_FALSE(http->caller);
+	CHECK(http->requests == 4);
+}
 
 TEST_CASE("A pending cancel does not block the client cache", "[quack][intraquery]") {
 	DuckDB db(nullptr);

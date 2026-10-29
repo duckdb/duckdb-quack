@@ -45,9 +45,9 @@ private:
 	void ExecuteInternal() {
 		auto &client = client_wrapper->GetClient();
 		auto start_time = QuackNowMillis();
-		// context=nullptr: called off the execution thread, must not touch ClientContext.
+		// PostRaw only reads interruption/deadline state from the caller on this async thread.
 		// The payload names its batch index, so an HTTP retry asks for the SAME batch again.
-		auto response_body = client.PostRaw(nullptr, payload->GetData(), payload_size);
+		auto response_body = client.PostRaw(fetcher.context, payload->GetData(), payload_size);
 		auto duration_ms = QuackNowMillis() - start_time;
 
 		auto response = QuackClient::DecodeResponse(response_body);
@@ -126,7 +126,7 @@ idx_t QuackFetcher::GetReadAheadDepth(ClientContext &context) {
 
 QuackFetcher::QuackFetcher(ClientContext &context, QuackClientConnection &connection, hugeint_t query_uuid,
                            idx_t depth_p)
-    : depth(MaxValue<idx_t>(depth_p, 1)) {
+    : context(context), depth(MaxValue<idx_t>(depth_p, 1)) {
 	queue = make_uniq<ManagedAsyncTaskQueue>(context, depth);
 	if (!queue->IsAsync()) {
 		// Register runs the POST inline on the scan thread; deeper pipelining is impossible.
