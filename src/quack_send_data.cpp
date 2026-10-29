@@ -228,7 +228,9 @@ public:
 	optional_idx Finish(ClientContext &context, idx_t total_batches) override {
 		// Drain every send first. The buffer checks the count when the terminal message arrives.
 		queue->Close();
-		queue.reset();
+		context.BlockingInterruptCheck();
+		// The terminal send may commit the INSERT, so wait for its result without caller cancellation.
+		context.SuppressInterrupts();
 
 		auto &quack_catalog = table.catalog.Cast<QuackCatalog>();
 		auto client_wrapper = quack_catalog.GetClientConnection()->GetClient(context);
@@ -244,6 +246,7 @@ public:
 		// failure after the last batch surfaces here too.
 		auto fetch = make_uniq<FetchRequestMessage>(quack_catalog.GetConnectionId(), query_uuid, 1, 1);
 		auto response = client.Request<FetchResponseMessage>(context, std::move(fetch));
+		queue.reset();
 		for (auto &chunk : response->MutableResults()) {
 			if (chunk->size() > 0 && chunk->ColumnCount() > 0) {
 				return optional_idx(NumericCast<idx_t>(chunk->GetValue(0, 0).GetValue<int64_t>()));
