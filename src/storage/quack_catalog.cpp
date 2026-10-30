@@ -29,12 +29,89 @@
 
 namespace duckdb {
 
-QuackCatalog::QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri, ClientContext &context,
-                           const string &token, string client_id, idx_t heartbeat_timeout_seconds)
-    : Catalog(db_p) {
-	// connect to the server
-	client_connection =
-	    QuackClient::ConnectToServer(context, server_uri, token, std::move(client_id), heartbeat_timeout_seconds);
+//! The server connections of one attached quack catalog, one per client context that uses it
+class QuackConnectionRegistry {
+public:
+	shared_ptr<QuackClientConnection> Find(ClientContext &context) {
+		lock_guard<mutex> guard(lock);
+		auto entry = connections.find(&context);
+		return entry == connections.end() ? nullptr : entry->second;
+	}
+
+	shared_ptr<QuackClientConnection> FindById(const string &connection_id) {
+		lock_guard<mutex> guard(lock);
+		for (auto &entry : connections) {
+			if (entry.second->ConnectionId() == connection_id) {
+				return entry.second;
+			}
+		}
+		return nullptr;
+	}
+
+	//! Returns the connection that won if "context" raced to connect from two threads
+	shared_ptr<QuackClientConnection> Add(ClientContext &context, shared_ptr<QuackClientConnection> connection) {
+		lock_guard<mutex> guard(lock);
+		return connections.emplace(&context, std::move(connection)).first->second;
+	}
+
+	//! Hands the connection back so it disconnects outside the lock
+	shared_ptr<QuackClientConnection> Remove(ClientContext &context) {
+		lock_guard<mutex> guard(lock);
+		auto entry = connections.find(&context);
+		if (entry == connections.end()) {
+			return nullptr;
+		}
+		auto connection = std::move(entry->second);
+		connections.erase(entry);
+		return connection;
+	}
+
+private:
+	mutex lock;
+	unordered_map<ClientContext *, shared_ptr<QuackClientConnection>> connections;
+};
+
+//! Drops the connections a client context opened once the context goes away
+class QuackContextConnections : public ClientContextState {
+public:
+	static constexpr const char *KEY = "quack_context_connections";
+
+	explicit QuackContextConnections(ClientContext &context_p) : context(context_p) {
+	}
+
+	~QuackContextConnections() override {
+		vector<weak_ptr<QuackConnectionRegistry>> to_release;
+		{
+			lock_guard<mutex> guard(lock);
+			to_release = std::move(registries);
+		}
+		for (auto &registry : to_release) {
+			if (auto live = registry.lock()) {
+				live->Remove(context);
+			}
+		}
+	}
+
+	void Track(const shared_ptr<QuackConnectionRegistry> &registry) {
+		lock_guard<mutex> guard(lock);
+		registries.push_back(registry);
+	}
+
+private:
+	ClientContext &context;
+	mutex lock;
+	vector<weak_ptr<QuackConnectionRegistry>> registries;
+};
+
+QuackCatalog::QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri_p, ClientContext &context,
+                           const string &token_p, string client_id_p, idx_t heartbeat_timeout_seconds_p)
+    : Catalog(db_p), server_uri(server_uri_p), token(token_p), client_id(std::move(client_id_p)),
+      heartbeat_timeout_seconds(heartbeat_timeout_seconds_p), connections(make_shared_ptr<QuackConnectionRegistry>()) {
+	// connect to the server; the attaching context keeps using this connection
+	client_connection = QuackClient::ConnectToServer(context, server_uri, token, client_id, heartbeat_timeout_seconds);
+	connections->Add(context, client_connection);
+	context.registered_state->GetOrCreate<QuackContextConnections>(QuackContextConnections::KEY, context)
+	    ->Track(connections);
 
 	// load the entire catalog up-front
 	auto load_info = LoadCatalog(context);
@@ -108,10 +185,12 @@ const QuackUri &QuackCatalog::GetServerUri() {
 unique_ptr<ColumnDataCollection> QuackCatalog::ExecuteCommandInternal(ClientContext &context, const string &query) {
 	auto chunk_collection = make_uniq<ColumnDataCollection>(Allocator::DefaultAllocator());
 	// get a client to query
-	auto client_wrapper = client_connection->GetClient(context);
+	auto connection = GetClientConnection(context);
+	auto &connection_id = connection->ConnectionId();
+	auto client_wrapper = connection->GetClient(context);
 	auto &client = client_wrapper->GetClient();
 	auto response =
-	    client.Request<PrepareResponseMessage>(context, make_uniq<PrepareRequestMessage>(GetConnectionId(), query, 0));
+	    client.Request<PrepareResponseMessage>(context, make_uniq<PrepareRequestMessage>(connection_id, query, 0));
 	chunk_collection->Initialize(response->Types());
 	for (auto &chunk : response->MutableResults()) {
 		chunk_collection->Append(chunk->Chunk());
@@ -125,7 +204,7 @@ unique_ptr<ColumnDataCollection> QuackCatalog::ExecuteCommandInternal(ClientCont
 		for (idx_t batch_index = 1;; batch_index++) {
 			// ack everything before this batch: we never ask for an earlier batch again
 			auto fetch_response = client.Request<FetchResponseMessage>(
-			    context, make_uniq<FetchRequestMessage>(GetConnectionId(), query_uuid, batch_index, batch_index - 1));
+			    context, make_uniq<FetchRequestMessage>(connection_id, query_uuid, batch_index, batch_index - 1));
 			if (fetch_response->MutableResults().empty()) {
 				// an empty FETCH is how the server says the result is exhausted (cf. QuackScan)
 				break;
@@ -138,18 +217,40 @@ unique_ptr<ColumnDataCollection> QuackCatalog::ExecuteCommandInternal(ClientCont
 	return chunk_collection;
 }
 
-shared_ptr<QuackClientConnection> QuackCatalog::GetClientConnection() {
-	return client_connection;
+shared_ptr<QuackClientConnection> QuackCatalog::GetClientConnection(ClientContext &context) {
+	// a server session of a self-attached server stays on the connection it serves - GetClient then refuses to
+	// route back through it, where a fresh connection would open yet another session for every lookup
+	if (auto session = QuackSessionState::Get(context)) {
+		if (auto own = connections->FindById(session->ConnectionId())) {
+			return own;
+		}
+	}
+	if (auto existing = connections->Find(context)) {
+		return existing;
+	}
+	auto connection = QuackClient::ConnectToServer(context, server_uri, token, client_id, heartbeat_timeout_seconds);
+	auto result = connections->Add(context, std::move(connection));
+	context.registered_state->GetOrCreate<QuackContextConnections>(QuackContextConnections::KEY, context)
+	    ->Track(connections);
+	return result;
 }
 
 void QuackCatalog::Refresh(ClientContext &context) {
 	Invalidate();
+	auto &transaction = QuackTransaction::Get(context, *this);
+	if (transaction.CatalogChanged()) {
+		transaction.MarkCatalogChanged();
+	}
 	GetSchemas(context);
 }
 
 void QuackCatalog::Invalidate() {
 	lock_guard<mutex> guard(snapshot_lock);
 	invalidated_version++;
+}
+
+void QuackCatalog::Invalidate(ClientContext &context) {
+	QuackTransaction::Get(context, *this).MarkCatalogChanged();
 }
 
 void QuackCatalog::InvalidateIfChangedSince(idx_t version) {
@@ -166,17 +267,30 @@ idx_t QuackCatalog::InvalidatedVersion() {
 
 bool QuackCatalog::ServesOwnConnection(ClientContext &context) {
 	auto session = QuackSessionState::Get(context);
-	return session && session->ConnectionId() == GetConnectionId();
+	return session && connections->FindById(session->ConnectionId());
 }
 
 QuackSchemaSet &QuackCatalog::GetSchemas(ClientContext &context) {
-	auto current = AcquireSnapshot(context);
+	auto &transaction = QuackTransaction::Get(context, *this);
+	auto current = AcquireSnapshot(context, transaction);
 	auto &result = *current;
-	QuackTransaction::Get(context, *this).Retain(std::move(current));
+	transaction.Retain(std::move(current));
 	return result;
 }
 
-shared_ptr<QuackSchemaSet> QuackCatalog::AcquireSnapshot(ClientContext &context) {
+shared_ptr<QuackSchemaSet> QuackCatalog::AcquireSnapshot(ClientContext &context, QuackTransaction &transaction) {
+	if (transaction.CatalogChanged()) {
+		// what this transaction created or dropped is visible only to its own server transaction - loading it
+		// into the shared snapshot would hand it to every other connection, and another connection's reload
+		// would take it away from this one
+		auto own = transaction.OwnSnapshot();
+		if (!own) {
+			auto load_data = LoadCatalog(context);
+			own = make_shared_ptr<QuackSchemaSet>(context, *this, load_data);
+			transaction.SetOwnSnapshot(own);
+		}
+		return own;
+	}
 	auto uses_published = ServesOwnConnection(context);
 	unique_lock<mutex> guard(snapshot_lock);
 	while (loaded_version != invalidated_version && !uses_published && loading_context.get() != &context) {
@@ -207,8 +321,8 @@ shared_ptr<QuackSchemaSet> QuackCatalog::AcquireSnapshot(ClientContext &context)
 	return snapshot;
 }
 
-const string &QuackCatalog::GetConnectionId() {
-	return client_connection->ConnectionId();
+string QuackCatalog::GetConnectionId(ClientContext &context) {
+	return GetClientConnection(context)->ConnectionId();
 }
 
 QuackCatalog &QuackCatalog::GetQuackCatalog(ClientContext &context, Value &catalog_name) {
@@ -251,7 +365,7 @@ optional_ptr<CatalogEntry> QuackCatalog::CreateSchema(CatalogTransaction transac
 	remote_info->StripCatalogQualification();
 	auto &quack_transaction = QuackTransaction::Get(transaction);
 	quack_transaction.Query(remote_info->ToString());
-	Invalidate();
+	quack_transaction.MarkCatalogChanged();
 
 	auto existing = target_set.get().GetEntry(info.SchemaName().GetIdentifierName());
 	if (existing && info.on_conflict != OnCreateConflict::REPLACE_ON_CONFLICT) {
@@ -349,7 +463,7 @@ void QuackCatalog::DropSchema(ClientContext &context, DropInfo &info) {
 	drop_info->SetQualifiedName(remote_name);
 	auto &transaction = QuackTransaction::Get(context, *this);
 	transaction.Query(drop_info->ToString());
-	Invalidate();
+	Invalidate(context);
 }
 
 bool QuackCatalog::SupportsPushdown(const TableRef &ref) {

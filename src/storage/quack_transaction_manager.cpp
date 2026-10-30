@@ -29,6 +29,9 @@ ErrorData QuackTransactionManager::CommitTransaction(ClientContext &context, Tra
 	}
 	if (error.HasError()) {
 		quack_catalog.InvalidateIfChangedSince(quack_transaction.StartVersion());
+	} else if (quack_transaction.CatalogChanged()) {
+		// the change is everyone's now
+		quack_catalog.Invalidate();
 	}
 	DestroyTransaction(transaction);
 	return error;

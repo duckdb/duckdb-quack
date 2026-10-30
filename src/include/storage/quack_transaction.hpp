@@ -41,6 +41,15 @@ public:
 	void Retain(shared_ptr<QuackSchemaSet> snapshot);
 	optional_ptr<CatalogEntry> Retain(unique_ptr<CatalogEntry> entry);
 
+	//! This transaction changed the remote catalog: until it ends it reads the catalog as its own server
+	//! transaction sees it, and the shared snapshot is invalidated only once the change is committed
+	void MarkCatalogChanged();
+	bool CatalogChanged() const {
+		return catalog_changed;
+	}
+	shared_ptr<QuackSchemaSet> OwnSnapshot();
+	void SetOwnSnapshot(shared_ptr<QuackSchemaSet> snapshot);
+
 private:
 	QuackCatalog &quack_catalog;
 	QuackTransactionState transaction_state;
@@ -48,6 +57,9 @@ private:
 	mutex retained_lock;
 	vector<shared_ptr<QuackSchemaSet>> retained_snapshots;
 	vector<unique_ptr<CatalogEntry>> retained_entries;
+	bool catalog_changed = false;
+	//! The catalog as this transaction sees it after its own change - empty until loaded
+	shared_ptr<QuackSchemaSet> own_snapshot;
 };
 
 } // namespace duckdb

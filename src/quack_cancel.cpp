@@ -39,7 +39,7 @@ static unique_ptr<FunctionData> QuackCancelBind(ClientContext &context, TableFun
 
 	// get the quack catalog
 	auto &catalog = QuackCatalog::GetQuackCatalog(context, input.inputs[0]);
-	auto client_connection = catalog.Cast<QuackCatalog>().GetClientConnection();
+	auto client_connection = catalog.Cast<QuackCatalog>().GetClientConnection(context);
 
 	auto client_wrapper = client_connection->GetClient(context);
 	auto &client = client_wrapper->GetClient();
