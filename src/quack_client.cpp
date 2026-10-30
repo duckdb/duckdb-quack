@@ -55,13 +55,9 @@ static void LoadExtraHttpHeaders(optional_ptr<ClientContext> context, DatabaseIn
 }
 
 void QuackClientConnection::CancelQuery(hugeint_t query_uuid) {
-	lock_guard<mutex> guard(lock);
-	if (cached_clients.empty()) {
-		return;
-	}
-	// get a cached client, if any
-	auto &client = cached_clients.back();
+	auto client = TakeClient(nullptr);
 	client->Request<SuccessResponse>(nullptr, make_uniq<CancelRequestMessage>(connection_id, query_uuid));
+	StoreClient(std::move(client));
 }
 
 QuackClient::QuackClient(DatabaseInstance &db_p, const QuackUri &uri_p) : db(db_p), uri(uri_p) {
@@ -122,17 +118,22 @@ HttpsQuackClient::HttpsQuackClient(DatabaseInstance &db, const QuackUri &uri_p) 
 HttpsQuackClient::~HttpsQuackClient() {
 }
 
-string HttpsQuackClient::PostRawLocked(const_data_ptr_t data, idx_t size) {
+string HttpsQuackClient::PostRawLocked(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size) {
 	D_ASSERT(http_params);
 	auto &http_util = HTTPUtil::Get(db);
 	auto request_url = uri.Http() + "/quack";
 	HTTPHeaders headers = extra_headers;
 	PostRequestInfo post_request(request_url, headers, *http_params, data, size);
+	post_request.interrupt_context = context;
 	unique_ptr<HTTPResponse> response;
 	try {
 		response = http_util.Request(post_request, http_client);
 	} catch (std::exception &ex) {
 		ErrorData error(ex);
+		if (error.Type() == ExceptionType::INTERRUPT) {
+			http_client.reset();
+			throw;
+		}
 		throw IOException("Failed to send message: %s", error.Message());
 	}
 	if (!response || !response->Success()) {
@@ -182,8 +183,8 @@ void HttpsQuackClient::PrepareTeardownRequest() {
 
 string HttpsQuackClient::PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size) {
 	lock_guard<mutex> guard(request_mutex);
-	EnsureHttpParams(context);
-	return PostRawLocked(data, size);
+	EnsureHttpParams(nullptr);
+	return PostRawLocked(context, data, size);
 }
 
 unique_ptr<QuackMessage> HttpsQuackClient::RequestInternal(optional_ptr<ClientContext> context,
@@ -195,7 +196,14 @@ unique_ptr<QuackMessage> HttpsQuackClient::RequestInternal(optional_ptr<ClientCo
 
 	auto start_time = QuackNowMillis();
 	EncodeRequest(context, *request_message, write_stream);
-	auto response_body = PostRawLocked(write_stream.GetData(), write_stream.GetPosition());
+	// Cleanup and lease maintenance must still run after the query was interrupted.
+	auto interrupt_context = context;
+	if (request_message->Type() == MessageType::CANCEL_REQUEST ||
+	    request_message->Type() == MessageType::HEARTBEAT_REQUEST ||
+	    request_message->Type() == MessageType::DISCONNECT_MESSAGE) {
+		interrupt_context = nullptr;
+	}
+	auto response_body = PostRawLocked(interrupt_context, write_stream.GetData(), write_stream.GetPosition());
 	auto response_message = DecodeResponse(response_body);
 	auto duration_ms = QuackNowMillis() - start_time;
 

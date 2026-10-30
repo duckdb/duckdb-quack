@@ -39,6 +39,8 @@ public:
 public:
 	//! Resolve the read-ahead depth from the quack_fetch_read_ahead setting (0 = async thread count).
 	static idx_t GetReadAheadDepth(ClientContext &context);
+	//! Start prefetch only after construction, so failures can drain through the destructor.
+	void Start(ClientContext &context);
 
 	//! Pop this thread's claimed batch, claiming a fresh index when `claim` is empty; the claim
 	//! survives BLOCKED yields. Yields via input.async_result when supported, else waits inline.
@@ -63,6 +65,8 @@ private:
 	void FinishTask(unique_ptr<QuackClientWrapper> client, bool pushed_batch);
 
 private:
+	//! Borrowed until StopAndDrain joins every fetch, before the caller finishes its query.
+	ClientContext &context;
 	unique_ptr<ManagedAsyncTaskQueue> queue;
 	shared_ptr<QuackFetchBuffer> buffer;
 	hugeint_t query_uuid;

@@ -311,6 +311,7 @@ unique_ptr<GlobalTableFunctionState> QuackScanInitGlobal(ClientContext &context,
 		// start pipelining FETCH requests on the ASYNC pool before the first scan call
 		global_state->fetcher = make_shared_ptr<QuackFetcher>(context, *bind_data.client_connection, query_uuid,
 		                                                      QuackFetcher::GetReadAheadDepth(context));
+		global_state->fetcher->Start(context);
 	}
 	return std::move(global_state);
 }

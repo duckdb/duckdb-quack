@@ -15,7 +15,7 @@ SET GLOBAL quack_result_ttl = 0;
 
 # A block is 256KB, so 100 caches that each pin one are 25MB
 statement ok quack_db:quack_server_con
-SET GLOBAL temp_directory = '__TEST_DIR__/quack_cache_spill';
+SET GLOBAL temp_directory = '{TEST_DIR}/quack_cache_spill';
 
 statement ok quack_db:quack_server_con
 SET GLOBAL memory_limit = '16MB';
