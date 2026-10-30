@@ -17,6 +17,21 @@ SELECT current_setting('quack_control_timeout'), current_setting('quack_http_tim
 ----
 5	86400
 
+statement error
+SET quack_control_timeout=0;
+----
+quack_control_timeout must be between 1
+
+statement error
+SET quack_control_timeout=18446744073709551615;
+----
+quack_control_timeout must be between 1
+
+statement error
+SET quack_control_timeout=NULL;
+----
+quack_control_timeout cannot be null
+
 statement ok
 RESET quack_control_timeout;
 

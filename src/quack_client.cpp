@@ -29,6 +29,20 @@ static idx_t RequestClockMillis() {
 	return NumericCast<idx_t>(TimePoint::GetTickMs());
 }
 
+static optional_idx ControlRequestDeadline(idx_t timeout) {
+	const auto now = RequestClockMillis();
+	const auto maximum = NumericCast<idx_t>(
+	    std::chrono::duration_cast<milliseconds>(steady_clock::time_point::max().time_since_epoch()).count());
+	if (timeout == 0 || timeout > (maximum - now) / 1000) {
+		throw InvalidInputException("quack_control_timeout must be between 1 and %llu seconds", (maximum - now) / 1000);
+	}
+	return now + timeout * 1000;
+}
+
+void QuackClient::ValidateControlTimeout(idx_t timeout_seconds) {
+	ControlRequestDeadline(timeout_seconds);
+}
+
 static void CheckControlDeadline(optional_idx deadline) {
 	if (deadline.IsValid() && RequestClockMillis() >= deadline.GetIndex()) {
 		throw IOException("Quack control request timed out");
@@ -53,12 +67,7 @@ unique_ptr<QuackMessage> QuackClient::RequestMessage(optional_ptr<ClientContext>
                                                      unique_ptr<QuackMessage> message) {
 	optional_idx deadline;
 	if (IsControlRequest(message->Type())) {
-		const auto now = RequestClockMillis();
-		const auto timeout = QuackControlTimeout(db);
-		if (timeout > (NumericCast<idx_t>(NumericLimits<int64_t>::Maximum()) - now) / 1000) {
-			throw InvalidInputException("quack_control_timeout is too large");
-		}
-		deadline = now + timeout * 1000;
+		deadline = ControlRequestDeadline(QuackControlTimeout(db));
 	}
 	try {
 		return RequestInternal(context, std::move(message), deadline);
@@ -213,9 +222,6 @@ void HttpsQuackClient::EnsureHttpParams(optional_ptr<ClientContext> context, boo
 	http_params->timeout = timeout;
 	http_params->timeout_usec = 0;
 	http_params->retries = 0;
-	if (http_client && timeout_changed) {
-		http_client->Initialize(*http_params);
-	}
 	// http_params is cached across checkouts; re-scope its logger each request so a context-less
 	// teardown on a pooled client never logs under a prior query's scope.
 	if (request_logger) {
@@ -224,6 +230,14 @@ void HttpsQuackClient::EnsureHttpParams(optional_ptr<ClientContext> context, boo
 		}
 	} else if (!context) {
 		http_params->logger.reset();
+	}
+	if (http_client && timeout_changed) {
+		try {
+			http_client->Initialize(*http_params);
+		} catch (...) {
+			http_client.reset();
+			throw;
+		}
 	}
 }
 
@@ -311,8 +325,8 @@ void PinnedHttpsQuackClient::ConfigureTimeouts(optional_idx deadline) {
 string PinnedHttpsQuackClient::PostRawLocked(const_data_ptr_t data, idx_t size, optional_idx deadline) {
 	CheckControlDeadline(deadline);
 	auto result = https_client->Post("/quack", const_char_ptr_cast(data), size, "application/vnd.duckdb");
-	CheckControlDeadline(deadline);
 	if (!result) {
+		CheckControlDeadline(deadline);
 		auto error = result.error();
 		if (error == duckdb_httplib_openssl::Error::SSLServerVerification) {
 			throw IOException("Failed to send message: the certificate presented by %s does not match the pinned "

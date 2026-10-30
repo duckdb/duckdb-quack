@@ -89,6 +89,7 @@ public:
 	static void ValidateClientId(const string &client_id);
 	//! Heartbeat leases must have a positive timeout.
 	static void ValidateHeartbeatTimeout(idx_t heartbeat_timeout_seconds);
+	static void ValidateControlTimeout(idx_t timeout_seconds);
 
 protected:
 	//! Resolve the logger for a request: the context (per-query) logger when available, else the db logger.

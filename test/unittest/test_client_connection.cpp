@@ -50,6 +50,7 @@ public:
 	unique_ptr<HTTPResponse> SendRequest(BaseRequest &request, unique_ptr<HTTPClient> &) override {
 		requests++;
 		caller = request.interrupt_context;
+		deadline = request.deadline;
 		if (caller && interrupt_requests) {
 			caller->Interrupt();
 			request.InterruptCheck();
@@ -64,6 +65,7 @@ public:
 	bool interrupt_requests = true;
 	idx_t requests = 0;
 	optional_ptr<ClientContext> caller;
+	optional_idx deadline;
 };
 
 } // namespace
@@ -84,15 +86,19 @@ TEST_CASE("Quack HTTP requests preserve interruption and leave cleanup runnable"
 		CHECK_THROWS_AS(client.PostRaw(*con.context, nullptr, 0), InterruptException);
 	}
 	CHECK(http->caller.get() == con.context.get());
+	CHECK_FALSE(http->deadline.IsValid());
 	CHECK(http->requests == 1);
 	CHECK(con.context->IsInterrupted());
 	http->interrupt_requests = false;
 	CHECK(client.Request<SuccessResponse>(*con.context, make_uniq<CancelRequestMessage>("test-session", hugeint_t(1))));
 	CHECK_FALSE(http->caller);
+	CHECK(http->deadline.IsValid());
 	CHECK(client.Request<SuccessResponse>(*con.context, make_uniq<HeartbeatRequestMessage>("test-session")));
 	CHECK_FALSE(http->caller);
+	CHECK(http->deadline.IsValid());
 	CHECK(client.Request<SuccessResponse>(*con.context, make_uniq<DisconnectMessage>("test-session")));
 	CHECK_FALSE(http->caller);
+	CHECK(http->deadline.IsValid());
 	CHECK(http->requests == 4);
 }
 
