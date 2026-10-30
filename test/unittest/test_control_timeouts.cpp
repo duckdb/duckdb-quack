@@ -26,6 +26,9 @@ public:
 		REQUIRE_FALSE(
 		    con.Query(legacy ? "SET httpfs_client_implementation='httplib'" : "SET httpfs_client_implementation='curl'")
 		        ->HasError());
+		if (tls && legacy) {
+			REQUIRE_FALSE(con.Query("SET GLOBAL enable_server_cert_verification=false")->HasError());
+		}
 		con.BeginTransaction();
 		if (tls) {
 			server = make_uniq<duckdb_httplib_openssl::SSLServer>(QUACK_TEST_CERT_DIR "/server.pem",
@@ -90,7 +93,7 @@ public:
 		REQUIRE(port > 0);
 		uri = make_uniq<QuackUri>("quack://127.0.0.1:" + std::to_string(port));
 		uri->SetSsl(tls);
-		if (tls) {
+		if (tls && !legacy) {
 			uri->SetSslFingerprint(
 			    "2B:31:F0:0A:44:D3:E8:D0:5B:82:C4:0A:31:3D:EC:F2:31:01:1E:0A:3A:37:73:6B:50:99:BC:99:84:37:BC:EA");
 		}
@@ -183,8 +186,9 @@ private:
 } // namespace
 
 TEST_CASE("Quack control requests time out independently of their caller", "[quack][control_timeout]") {
-	const auto transport = GENERATE(0, 1, 2);
-	ControlServer server(transport == 1, transport == 2);
+	const auto transport = GENERATE(0, 1, 2, 3);
+	CAPTURE(transport);
+	ControlServer server(transport == 1 || transport == 3, transport >= 2);
 	auto client = QuackClient::GetClient(*server.db.instance, *server.uri);
 	auto type = MessageType::CANCEL_REQUEST;
 	bool body = false;
@@ -215,8 +219,9 @@ TEST_CASE("Quack control requests time out independently of their caller", "[qua
 }
 
 TEST_CASE("Quack shutdown joins a stalled heartbeat within its control budget", "[quack][control_timeout]") {
-	const auto transport = GENERATE(0, 1, 2);
-	ControlServer server(transport == 1, transport == 2);
+	const auto transport = GENERATE(0, 1, 2, 3);
+	CAPTURE(transport);
+	ControlServer server(transport == 1 || transport == 3, transport >= 2);
 	server.Stall(MessageType::HEARTBEAT_REQUEST);
 	auto connection = QuackClient::ConnectToServer(*server.con.context, *server.uri, "test-token", "test-client", 1);
 	const auto started = server.WaitUntilStarted();
@@ -229,8 +234,9 @@ TEST_CASE("Quack shutdown joins a stalled heartbeat within its control budget", 
 }
 
 TEST_CASE("Quack control timeouts do not shorten later data requests", "[quack][control_timeout]") {
-	const auto transport = GENERATE(0, 1, 2);
-	ControlServer server(transport == 1, transport == 2);
+	const auto transport = GENERATE(0, 1, 2, 3);
+	CAPTURE(transport);
+	ControlServer server(transport == 1 || transport == 3, transport >= 2);
 	server.Stall(MessageType::CANCEL_REQUEST);
 	auto client = QuackClient::GetClient(*server.db.instance, *server.uri);
 	auto result = std::async(std::launch::async, [&] {
@@ -268,8 +274,9 @@ TEST_CASE("Quack control budget includes waiting for its client lock", "[quack][
 }
 
 TEST_CASE("Quack control requests respect a shorter configured HTTP timeout", "[quack][control_timeout]") {
-	const auto transport = GENERATE(0, 1, 2);
-	ControlServer server(transport == 1, transport == 2);
+	const auto transport = GENERATE(0, 1, 2, 3);
+	CAPTURE(transport);
+	ControlServer server(transport == 1 || transport == 3, transport >= 2);
 	REQUIRE_FALSE(server.con.Query("SET quack_http_timeout=1")->HasError());
 	server.Stall(MessageType::HEARTBEAT_REQUEST);
 	auto client = QuackClient::GetClient(*server.db.instance, *server.uri);
@@ -287,8 +294,9 @@ TEST_CASE("Quack control requests respect a shorter configured HTTP timeout", "[
 }
 
 TEST_CASE("A successful heartbeat does not shorten later data requests", "[quack][control_timeout]") {
-	const auto transport = GENERATE(0, 1, 2);
-	ControlServer server(transport == 1, transport == 2);
+	const auto transport = GENERATE(0, 1, 2, 3);
+	CAPTURE(transport);
+	ControlServer server(transport == 1 || transport == 3, transport >= 2);
 	auto client = QuackClient::GetClient(*server.db.instance, *server.uri);
 	REQUIRE(client->Request<SuccessResponse>(nullptr, ControlMessage(MessageType::HEARTBEAT_REQUEST)));
 	server.DelayData(milliseconds(2500));
@@ -336,8 +344,9 @@ TEST_CASE("Closing a database drains its heartbeat without extending database li
 }
 
 TEST_CASE("Quack control timeout can be increased for a slow peer", "[quack][control_timeout]") {
-	const auto transport = GENERATE(0, 1, 2);
-	ControlServer server(transport == 1, transport == 2);
+	const auto transport = GENERATE(0, 1, 2, 3);
+	CAPTURE(transport);
+	ControlServer server(transport == 1 || transport == 3, transport >= 2);
 	REQUIRE_FALSE(server.con.Query("SET quack_control_timeout=4")->HasError());
 	server.DelayData(milliseconds(2500), MessageType::HEARTBEAT_REQUEST);
 	auto client = QuackClient::GetClient(*server.db.instance, *server.uri);
