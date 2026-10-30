@@ -1,6 +1,7 @@
 #include "catch.hpp"
 
 #include "duckdb.hpp"
+#include "duckdb_static_extension.h"
 #include "duckdb/common/serializer/binary_deserializer.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -9,6 +10,9 @@
 #include "quack_server.hpp"
 
 using namespace duckdb;
+
+extern "C" int32_t duckdb_extension_httpfs_describe(duckdb_extension_descriptor *descriptor);
+extern "C" int32_t duckdb_extension_quack_describe(duckdb_extension_descriptor *descriptor);
 
 namespace {
 
@@ -108,13 +112,13 @@ int64_t Scalar(Connection &con, const string &sql) {
 
 TEST_CASE("Quack cancellation preserves transaction finalization and connection reuse", "[quack][intraquery]") {
 	DuckDB server_db(nullptr);
+	server_db.LoadStaticExtension(duckdb_extension_quack_describe);
 	Connection server_con(server_db);
-	QueryOk(server_con, "LOAD quack");
 	LoopbackQuackServer server(*server_con.context, QuackUri("quack://localhost:1"), "test-token");
 	DuckDB client_db(nullptr);
+	client_db.LoadStaticExtension(duckdb_extension_httpfs_describe);
+	client_db.LoadStaticExtension(duckdb_extension_quack_describe);
 	Connection con(client_db);
-	QueryOk(con, "LOAD httpfs");
-	QueryOk(con, "LOAD quack");
 	auto http = make_shared_ptr<LoopbackHTTPUtil>(server);
 	http->caller = con.context.get();
 	client_db.instance->config.SetHTTPUtil(http);

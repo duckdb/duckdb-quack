@@ -148,7 +148,6 @@ QuackFetcher::QuackFetcher(ClientContext &context, QuackClientConnection &connec
 	for (idx_t i = 0; i < depth; i++) {
 		idle_clients.push_back(connection.GetClient(context));
 	}
-	TopUp(context);
 }
 
 QuackFetcher::~QuackFetcher() {
