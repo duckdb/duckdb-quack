@@ -305,14 +305,15 @@ TEST_CASE("A successful heartbeat does not shorten later data requests", "[quack
 }
 
 TEST_CASE("Closing a database drains its heartbeat without extending database lifetime", "[quack][control_timeout]") {
-	const auto transport = GENERATE(0, 1, 2);
+	const auto transport = GENERATE(0, 1, 2, 3);
+	CAPTURE(transport);
 	bool stalled = false;
 	SECTION("idle connection sends disconnect during database teardown") {
 	}
 	SECTION("database closes with a heartbeat in flight") {
 		stalled = true;
 	}
-	ControlServer server(transport == 1, transport == 2);
+	ControlServer server(transport == 1 || transport == 3, transport >= 2);
 	if (stalled) {
 		server.Stall(MessageType::HEARTBEAT_REQUEST);
 	}
@@ -321,9 +322,12 @@ TEST_CASE("Closing a database drains its heartbeat without extending database li
 	client_db->LoadStaticExtension(duckdb_extension_quack_describe);
 	{
 		Connection con(*client_db);
-		REQUIRE_FALSE(con.Query(transport == 2 ? "SET httpfs_client_implementation='httplib'"
+		REQUIRE_FALSE(con.Query(transport >= 2 ? "SET httpfs_client_implementation='httplib'"
 		                                       : "SET httpfs_client_implementation='curl'")
 		                  ->HasError());
+		if (transport == 3) {
+			REQUIRE_FALSE(con.Query("SET GLOBAL enable_server_cert_verification=false")->HasError());
+		}
 		con.BeginTransaction();
 		auto connection = QuackClient::ConnectToServer(*con.context, *server.uri, "test-token", "test-client", 1);
 		client_db->instance->GetObjectCache().Put("quack_control_test",
