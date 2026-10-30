@@ -150,6 +150,10 @@ QuackFetcher::QuackFetcher(ClientContext &context, QuackClientConnection &connec
 	}
 }
 
+void QuackFetcher::Start(ClientContext &context) {
+	TopUp(context);
+}
+
 QuackFetcher::~QuackFetcher() {
 	StopAndDrain();
 }
