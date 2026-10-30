@@ -22,6 +22,16 @@ idx_t QuackGetUBigintSetting(DatabaseInstance &db, const char *name, idx_t defau
 	return default_value;
 }
 
+idx_t QuackControlTimeout(DatabaseInstance &db) {
+	return MinValue<idx_t>(
+	    QuackHttpTimeout(db),
+	    MaxValue<idx_t>(1, QuackGetUBigintSetting(db, "quack_control_timeout", QUACK_CONTROL_TIMEOUT_DEFAULT)));
+}
+
+idx_t QuackHttpTimeout(DatabaseInstance &db) {
+	return MaxValue<idx_t>(1, QuackGetUBigintSetting(db, "quack_http_timeout", QUACK_HTTP_TIMEOUT_DEFAULT));
+}
+
 idx_t QuackServerStreamBufferBytes(DatabaseInstance &db) {
 	// The budget applies separately to each buffer; an INSERT also has a result buffer.
 	auto bytes =

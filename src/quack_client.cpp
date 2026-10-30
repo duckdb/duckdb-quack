@@ -15,9 +15,69 @@
 #include "quack_client.hpp"
 #include "quack_secret.hpp"
 #include "quack_session_state.hpp"
+#include "quack_settings.hpp"
 #include "quack_uri.hpp"
 
 namespace duckdb {
+
+static bool IsControlRequest(MessageType type) {
+	return type == MessageType::CANCEL_REQUEST || type == MessageType::HEARTBEAT_REQUEST ||
+	       type == MessageType::DISCONNECT_MESSAGE;
+}
+
+static idx_t RequestClockMillis() {
+	return NumericCast<idx_t>(TimePoint::GetTickMs());
+}
+
+static optional_idx ControlRequestDeadline(idx_t timeout) {
+	const auto now = RequestClockMillis();
+	const auto maximum = NumericCast<idx_t>(
+	    std::chrono::duration_cast<milliseconds>(steady_clock::time_point::max().time_since_epoch()).count());
+	if (timeout == 0 || timeout > (maximum - now) / 1000) {
+		throw InvalidInputException("quack_control_timeout must be between 1 and %llu seconds", (maximum - now) / 1000);
+	}
+	return now + timeout * 1000;
+}
+
+void QuackClient::ValidateControlTimeout(idx_t timeout_seconds) {
+	ControlRequestDeadline(timeout_seconds);
+}
+
+static void CheckControlDeadline(optional_idx deadline) {
+	if (deadline.IsValid() && RequestClockMillis() >= deadline.GetIndex()) {
+		throw IOException("Quack control request timed out");
+	}
+}
+
+static std::unique_lock<std::timed_mutex> LockRequest(std::timed_mutex &mutex, optional_idx deadline) {
+	std::unique_lock<std::timed_mutex> lock(mutex, std::defer_lock);
+	if (deadline.IsValid()) {
+		const auto until = steady_clock::time_point(milliseconds(deadline.GetIndex()));
+		if (!lock.try_lock_until(until)) {
+			throw IOException("Quack control request timed out waiting for its client");
+		}
+		CheckControlDeadline(deadline);
+	} else {
+		lock.lock();
+	}
+	return lock;
+}
+
+unique_ptr<QuackMessage> QuackClient::RequestMessage(optional_ptr<ClientContext> context,
+                                                     unique_ptr<QuackMessage> message) {
+	optional_idx deadline;
+	if (IsControlRequest(message->Type())) {
+		deadline = ControlRequestDeadline(QuackControlTimeout(db));
+	}
+	try {
+		return RequestInternal(context, std::move(message), deadline);
+	} catch (InterruptException &) {
+		if (!deadline.IsValid()) {
+			throw;
+		}
+		throw IOException("Quack control request timed out");
+	}
+}
 
 static milliseconds HeartbeatInterval(idx_t heartbeat_timeout_seconds, RandomEngine &random) {
 	auto interval_ms = heartbeat_timeout_seconds * 1000 / 3;
@@ -55,13 +115,9 @@ static void LoadExtraHttpHeaders(optional_ptr<ClientContext> context, DatabaseIn
 }
 
 void QuackClientConnection::CancelQuery(hugeint_t query_uuid) {
-	lock_guard<mutex> guard(lock);
-	if (cached_clients.empty()) {
-		return;
-	}
-	// get a cached client, if any
-	auto &client = cached_clients.back();
+	auto client = TakeClient(nullptr);
 	client->Request<SuccessResponse>(nullptr, make_uniq<CancelRequestMessage>(connection_id, query_uuid));
+	StoreClient(std::move(client));
 }
 
 QuackClient::QuackClient(DatabaseInstance &db_p, const QuackUri &uri_p) : db(db_p), uri(uri_p) {
@@ -122,17 +178,24 @@ HttpsQuackClient::HttpsQuackClient(DatabaseInstance &db, const QuackUri &uri_p) 
 HttpsQuackClient::~HttpsQuackClient() {
 }
 
-string HttpsQuackClient::PostRawLocked(const_data_ptr_t data, idx_t size) {
+string HttpsQuackClient::PostRawLocked(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size,
+                                       optional_idx deadline) {
 	D_ASSERT(http_params);
 	auto &http_util = HTTPUtil::Get(db);
 	auto request_url = uri.Http() + "/quack";
 	HTTPHeaders headers = extra_headers;
 	PostRequestInfo post_request(request_url, headers, *http_params, data, size);
+	post_request.interrupt_context = deadline.IsValid() ? nullptr : context;
+	post_request.deadline = deadline;
 	unique_ptr<HTTPResponse> response;
 	try {
 		response = http_util.Request(post_request, http_client);
 	} catch (std::exception &ex) {
 		ErrorData error(ex);
+		if (error.Type() == ExceptionType::INTERRUPT) {
+			http_client.reset();
+			throw;
+		}
 		throw IOException("Failed to send message: %s", error.Message());
 	}
 	if (!response || !response->Success()) {
@@ -142,7 +205,7 @@ string HttpsQuackClient::PostRawLocked(const_data_ptr_t data, idx_t size) {
 	return std::move(post_request.buffer_out);
 }
 
-void HttpsQuackClient::EnsureHttpParams(optional_ptr<ClientContext> context) {
+void HttpsQuackClient::EnsureHttpParams(optional_ptr<ClientContext> context, bool control_request) {
 	if (!http_params) {
 		auto &http_util = HTTPUtil::Get(db);
 		auto request_url = uri.Http() + "/quack";
@@ -154,7 +217,10 @@ void HttpsQuackClient::EnsureHttpParams(optional_ptr<ClientContext> context) {
 		// Resolve EXTRA_HTTP_HEADERS from the quack secret once; reused for every request on this client.
 		LoadExtraHttpHeaders(context, db, uri, extra_headers);
 	}
-	http_params->timeout = HTTP_TIMEOUT_SECONDS;
+	const auto timeout = control_request ? QuackControlTimeout(db) : QuackHttpTimeout(db);
+	const auto timeout_changed = http_params->timeout != timeout;
+	http_params->timeout = timeout;
+	http_params->timeout_usec = 0;
 	http_params->retries = 0;
 	// http_params is cached across checkouts; re-scope its logger each request so a context-less
 	// teardown on a pooled client never logs under a prior query's scope.
@@ -165,37 +231,34 @@ void HttpsQuackClient::EnsureHttpParams(optional_ptr<ClientContext> context) {
 	} else if (!context) {
 		http_params->logger.reset();
 	}
-	if (teardown_request) {
-		// The final DisconnectMessage is best-effort. The transport derives its timeout from
-		// http_params->timeout, which a caller may have set very high (e.g. an hour) for long-running
-		// task dispatch. Against a gone or half-open peer at teardown that would block the destructor for
-		// the whole timeout, so cap it hard and drop retries — a couple of seconds, then give up.
-		http_params->timeout = 2;
-		http_params->timeout_usec = 0;
-		http_params->retries = 0;
+	if (http_client && timeout_changed) {
+		try {
+			http_client->Initialize(*http_params);
+		} catch (...) {
+			http_client.reset();
+			throw;
+		}
 	}
 }
 
-void HttpsQuackClient::PrepareTeardownRequest() {
-	teardown_request = true;
-}
-
 string HttpsQuackClient::PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size) {
-	lock_guard<mutex> guard(request_mutex);
-	EnsureHttpParams(context);
-	return PostRawLocked(data, size);
+	std::lock_guard<std::timed_mutex> guard(request_mutex);
+	EnsureHttpParams(nullptr);
+	return PostRawLocked(context, data, size);
 }
 
 unique_ptr<QuackMessage> HttpsQuackClient::RequestInternal(optional_ptr<ClientContext> context,
-                                                           unique_ptr<QuackMessage> request_message) {
+                                                           unique_ptr<QuackMessage> request_message,
+                                                           optional_idx deadline) {
 	D_ASSERT(request_message);
 
-	lock_guard<mutex> guard(request_mutex);
-	EnsureHttpParams(context);
+	const auto control_request = deadline.IsValid();
+	auto guard = LockRequest(request_mutex, deadline);
+	EnsureHttpParams(context, control_request);
 
 	auto start_time = QuackNowMillis();
 	EncodeRequest(context, *request_message, write_stream);
-	auto response_body = PostRawLocked(write_stream.GetData(), write_stream.GetPosition());
+	auto response_body = PostRawLocked(context, write_stream.GetData(), write_stream.GetPosition(), deadline);
 	auto response_message = DecodeResponse(response_body);
 	auto duration_ms = QuackNowMillis() - start_time;
 
@@ -231,30 +294,39 @@ PinnedHttpsQuackClient::PinnedHttpsQuackClient(DatabaseInstance &db, const Quack
 	});
 	https_client->set_keep_alive(true);
 	https_client->set_tcp_nodelay(true);
-	// Same knob the httpfs transport honors, so a caller that raised http_timeout for long requests
-	// gets the same bound here (seconds).
-	Value timeout_val;
-	if (db.TryGetCurrentSetting("http_timeout", timeout_val) && !timeout_val.IsNull()) {
-		auto timeout_seconds = NumericCast<time_t>(timeout_val.GetValue<uint64_t>());
-		https_client->set_connection_timeout(timeout_seconds, 0);
-		https_client->set_read_timeout(timeout_seconds, 0);
-		https_client->set_write_timeout(timeout_seconds, 0);
-	}
 }
 
 PinnedHttpsQuackClient::~PinnedHttpsQuackClient() {
 }
 
-void PinnedHttpsQuackClient::PrepareTeardownRequest() {
-	// see HttpsQuackClient::EnsureHttpParams: the final DisconnectMessage must not hang on a dead peer
-	https_client->set_connection_timeout(2, 0);
-	https_client->set_read_timeout(2, 0);
-	https_client->set_write_timeout(2, 0);
+void PinnedHttpsQuackClient::ConfigureTimeouts(optional_idx deadline) {
+	auto seconds = NumericCast<time_t>(QuackHttpTimeout(db));
+	time_t microseconds = 0;
+	if (deadline.IsValid()) {
+		const auto now = RequestClockMillis();
+		const auto remaining = deadline.GetIndex() > now ? deadline.GetIndex() - now : 1;
+		seconds = NumericCast<time_t>(remaining / 1000);
+		microseconds = NumericCast<time_t>((remaining % 1000) * 1000);
+		https_client->set_max_timeout(NumericCast<time_t>(remaining));
+	} else {
+		https_client->set_max_timeout(0);
+	}
+	https_client->set_connection_timeout(seconds, microseconds);
+	https_client->set_read_timeout(seconds, microseconds);
+	https_client->set_write_timeout(seconds, microseconds);
+	// httplib installs socket timeouts only on connect; reused TLS sockets need them too.
+	const auto socket = https_client->socket();
+	if (socket != INVALID_SOCKET) {
+		duckdb_httplib_openssl::detail::set_socket_opt_time(socket, SOL_SOCKET, SO_RCVTIMEO, seconds, microseconds);
+		duckdb_httplib_openssl::detail::set_socket_opt_time(socket, SOL_SOCKET, SO_SNDTIMEO, seconds, microseconds);
+	}
 }
 
-string PinnedHttpsQuackClient::PostRawLocked(const_data_ptr_t data, idx_t size) {
+string PinnedHttpsQuackClient::PostRawLocked(const_data_ptr_t data, idx_t size, optional_idx deadline) {
+	CheckControlDeadline(deadline);
 	auto result = https_client->Post("/quack", const_char_ptr_cast(data), size, "application/vnd.duckdb");
 	if (!result) {
+		CheckControlDeadline(deadline);
 		auto error = result.error();
 		if (error == duckdb_httplib_openssl::Error::SSLServerVerification) {
 			throw IOException("Failed to send message: the certificate presented by %s does not match the pinned "
@@ -271,19 +343,22 @@ string PinnedHttpsQuackClient::PostRawLocked(const_data_ptr_t data, idx_t size) 
 }
 
 string PinnedHttpsQuackClient::PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size) {
-	lock_guard<mutex> guard(request_mutex);
+	std::lock_guard<std::timed_mutex> guard(request_mutex);
+	ConfigureTimeouts({});
 	return PostRawLocked(data, size);
 }
 
 unique_ptr<QuackMessage> PinnedHttpsQuackClient::RequestInternal(optional_ptr<ClientContext> context,
-                                                                 unique_ptr<QuackMessage> request_message) {
+                                                                 unique_ptr<QuackMessage> request_message,
+                                                                 optional_idx deadline) {
 	D_ASSERT(request_message);
 
-	lock_guard<mutex> guard(request_mutex);
+	auto guard = LockRequest(request_mutex, deadline);
 
 	auto start_time = QuackNowMillis();
 	EncodeRequest(context, *request_message, write_stream);
-	auto response_body = PostRawLocked(write_stream.GetData(), write_stream.GetPosition());
+	ConfigureTimeouts(deadline);
+	auto response_body = PostRawLocked(write_stream.GetData(), write_stream.GetPosition(), deadline);
 	auto response_message = DecodeResponse(response_body);
 	auto duration_ms = QuackNowMillis() - start_time;
 
@@ -330,9 +405,6 @@ QuackClientConnection::~QuackClientConnection() {
 	if (!cached_clients.empty()) {
 		try {
 			auto &client = cached_clients.back();
-			// A dead peer at teardown must not block the destructor for the full request timeout (which
-			// task dispatch may have set to an hour). Bound the transport first.
-			client->PrepareTeardownRequest();
 			client->Request<SuccessResponse>(nullptr, make_uniq<DisconnectMessage>(connection_id));
 		} catch (...) {
 		}
