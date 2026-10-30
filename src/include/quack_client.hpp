@@ -89,6 +89,7 @@ public:
 	static void ValidateClientId(const string &client_id);
 	//! Heartbeat leases must have a positive timeout.
 	static void ValidateHeartbeatTimeout(idx_t heartbeat_timeout_seconds);
+	//! Validate that a control timeout is positive and fits the monotonic clock.
 	static void ValidateControlTimeout(idx_t timeout_seconds);
 
 protected:

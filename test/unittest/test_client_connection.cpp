@@ -68,7 +68,97 @@ public:
 	optional_idx deadline;
 };
 
+struct InitializeState {
+	vector<shared_ptr<Logger>> loggers;
+	idx_t clients_created = 0;
+	bool throw_on_initialize = false;
+};
+
+class RecordingHTTPClient : public HTTPClient {
+public:
+	explicit RecordingHTTPClient(InitializeState &state_p) : state(state_p) {
+		state.clients_created++;
+	}
+
+	void Initialize(HTTPParams &params) override {
+		state.loggers.push_back(params.logger);
+		if (state.throw_on_initialize) {
+			throw IOException("Test HTTP client initialization failed");
+		}
+	}
+
+	unique_ptr<HTTPResponse> Get(GetRequestInfo &) override {
+		throw InternalException("Unexpected HTTP client request");
+	}
+	unique_ptr<HTTPResponse> Put(PutRequestInfo &) override {
+		throw InternalException("Unexpected HTTP client request");
+	}
+	unique_ptr<HTTPResponse> Head(HeadRequestInfo &) override {
+		throw InternalException("Unexpected HTTP client request");
+	}
+	unique_ptr<HTTPResponse> Delete(DeleteRequestInfo &) override {
+		throw InternalException("Unexpected HTTP client request");
+	}
+	unique_ptr<HTTPResponse> Post(PostRequestInfo &) override {
+		throw InternalException("Unexpected HTTP client request");
+	}
+	unique_ptr<HTTPResponse> Options(OptionsRequestInfo &) override {
+		throw InternalException("Unexpected HTTP client request");
+	}
+
+private:
+	InitializeState &state;
+};
+
+class ReinitializingHTTPUtil : public InterruptHTTPUtil {
+public:
+	unique_ptr<HTTPResponse> SendRequest(BaseRequest &request, unique_ptr<HTTPClient> &client) override {
+		if (!client) {
+			client = make_uniq<RecordingHTTPClient>(state);
+			client->Initialize(request.params);
+		}
+		return InterruptHTTPUtil::SendRequest(request, client);
+	}
+
+	InitializeState state;
+};
+
 } // namespace
+
+TEST_CASE("Quack control requests reinitialize the transport with the current logger", "[quack]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	con.BeginTransaction();
+	auto http = make_shared_ptr<ReinitializingHTTPUtil>();
+	http->interrupt_requests = false;
+	db.instance->config.SetHTTPUtil(http);
+	HttpsQuackClient client(*db.instance, QuackUri("quack://localhost:1"));
+
+	client.SetRequestLogger(con.context->logger);
+	REQUIRE(client.Request<SuccessResponse>(
+	    *con.context, make_uniq<PrepareRequestMessage>("test-session", "SELECT 1", hugeint_t(1))));
+	REQUIRE(http->state.loggers.size() == 1);
+	CHECK(http->state.loggers.back() == con.context->logger);
+	CHECK(http->state.clients_created == 1);
+
+	client.SetRequestLogger(nullptr);
+	REQUIRE(client.Request<SuccessResponse>(nullptr, make_uniq<HeartbeatRequestMessage>("test-session")));
+	REQUIRE(http->state.loggers.size() == 2);
+	CHECK_FALSE(http->state.loggers.back());
+	CHECK(http->state.clients_created == 1);
+
+	client.SetRequestLogger(con.context->logger);
+	http->state.throw_on_initialize = true;
+	CHECK_THROWS_AS(client.Request<SuccessResponse>(
+	                    *con.context, make_uniq<PrepareRequestMessage>("test-session", "SELECT 1", hugeint_t(2))),
+	                IOException);
+	http->state.throw_on_initialize = false;
+	REQUIRE(client.Request<SuccessResponse>(
+	    *con.context, make_uniq<PrepareRequestMessage>("test-session", "SELECT 1", hugeint_t(3))));
+	CHECK(http->state.clients_created == 2);
+	REQUIRE(http->state.loggers.size() == 4);
+	CHECK(http->state.loggers.back() == con.context->logger);
+}
 
 TEST_CASE("Quack HTTP requests preserve interruption and leave cleanup runnable", "[quack]") {
 	DuckDB db(nullptr);

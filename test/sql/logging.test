@@ -270,7 +270,7 @@ statement ok
 CALL disable_logging();
 
 statement ok
-CALL enable_logging(['HTTP', 'HTTPFSInfo']);
+CALL enable_logging('HTTP');
 
 statement ok
 attach {server} as rpc_td (token 'asdf')
@@ -297,12 +297,6 @@ detach rpc_td
 # the DISCONNECT POST must not carry the finished query's connection id
 query I
 select count(*) = 0 from duckdb_logs_parsed('HTTP') where request.type = 'POST' and connection_id is not null
-----
-true
-
-# Reinitializing the cached transport for DISCONNECT must use the teardown scope too.
-query I
-select count(*) = 0 from duckdb_logs where type = 'HTTPFSInfo' and connection_id is not null
 ----
 true
 
