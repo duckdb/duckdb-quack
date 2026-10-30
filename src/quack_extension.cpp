@@ -202,6 +202,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "Maximum concurrent connections the RPC server accepts; beyond this new "
 	                          "connections are refused",
 	                          LogicalType::UBIGINT, Value::UBIGINT(1024), nullptr, SetScope::GLOBAL);
+	config.AddExtensionOption("quack_control_timeout", "Seconds allowed for heartbeat, cancel and disconnect requests",
+	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_CONTROL_TIMEOUT_DEFAULT), nullptr,
+	                          SetScope::GLOBAL);
+
 	config.AddExtensionOption("quack_http_timeout", "Seconds a client waits for the server to answer one request",
 	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_HTTP_TIMEOUT_DEFAULT), nullptr,
 	                          SetScope::GLOBAL);

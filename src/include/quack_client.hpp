@@ -1,5 +1,7 @@
 #pragma once
 
+#include <mutex>
+
 #include "duckdb/common/http_util.hpp"
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/types/value.hpp"
@@ -27,7 +29,7 @@ public:
 
 	template <class TARGET>
 	unique_ptr<TARGET> Request(optional_ptr<ClientContext> context, unique_ptr<QuackMessage> request_message) {
-		auto response_message = RequestInternal(context, std::move(request_message));
+		auto response_message = RequestMessage(context, std::move(request_message));
 		if (response_message->Type() != TARGET::TYPE) {
 			if (response_message->Type() == MessageType::ERROR_RESPONSE) {
 				// if we get an error throw it immediately
@@ -54,13 +56,6 @@ public:
 	//! context is borrowed only for interruption/deadline checks and must outlive the request. Parameters are
 	//! resolved from the database, without reading query-local settings from an async thread.
 	virtual string PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size) = 0;
-
-	//! Best-effort teardown hint: bound the transport for subsequent (final DisconnectMessage) requests so a
-	//! gone/half-open peer cannot block the destructor for the full, possibly hour-long, request timeout.
-	//! Default no-op; the HTTPS client caps the timeout and skips retries. Not thread-safe — call on a client
-	//! that is being torn down and will issue at most one more request.
-	virtual void PrepareTeardownRequest() {
-	}
 
 	//! Encode a request (inject client_query_id when a query is active, then serialize) into `out`.
 	//! Protocol-level and lock-free; the caller owns `out` and any locking around it.
@@ -99,7 +94,7 @@ protected:
 	//! Resolve the logger for a request: the context (per-query) logger when available, else the db logger.
 	Logger &GetRequestLogger(optional_ptr<ClientContext> context);
 
-	mutex request_mutex;
+	std::timed_mutex request_mutex;
 	MemoryStream write_stream;
 	DatabaseInstance &db;
 	QuackUri uri;
@@ -109,8 +104,11 @@ protected:
 	optional_ptr<const QuackClientConnection> owner_connection;
 
 private:
+	unique_ptr<QuackMessage> RequestMessage(optional_ptr<ClientContext> context,
+	                                        unique_ptr<QuackMessage> request_message);
 	virtual unique_ptr<QuackMessage> RequestInternal(optional_ptr<ClientContext> context,
-	                                                 unique_ptr<QuackMessage> request_message) = 0;
+	                                                 unique_ptr<QuackMessage> request_message,
+	                                                 optional_idx deadline) = 0;
 };
 
 class QuackClientConnection : public enable_shared_from_this<QuackClientConnection> {
@@ -185,15 +183,15 @@ public:
 	~HttpsQuackClient() override;
 
 	string PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size) override;
-	void PrepareTeardownRequest() override;
 
 private:
 	unique_ptr<QuackMessage> RequestInternal(optional_ptr<ClientContext> context,
-	                                         unique_ptr<QuackMessage> request_message) override;
+	                                         unique_ptr<QuackMessage> request_message, optional_idx deadline) override;
 	//! POST bytes assuming request_mutex is already held.
-	string PostRawLocked(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size);
+	string PostRawLocked(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size,
+	                     optional_idx deadline = {});
 	//! Lazily initialise http_params (context-aware) and attach request_logger; assumes request_mutex is held.
-	void EnsureHttpParams(optional_ptr<ClientContext> context);
+	void EnsureHttpParams(optional_ptr<ClientContext> context, bool control_request = false);
 
 private:
 	unique_ptr<HTTPParams> http_params;
@@ -203,9 +201,6 @@ private:
 	//! Persistent keep-alive HTTP client: reused across requests so the TCP connection (and its
 	//! warm congestion window) survives between POSTs; replaced by the retry path on dead sockets.
 	unique_ptr<HTTPClient> http_client;
-	//! Set by PrepareTeardownRequest(): cap the transport timeout and drop retries so the final
-	//! best-effort DisconnectMessage cannot hang the destructor on a dead peer.
-	bool teardown_request = false;
 };
 
 //! HTTPS client that trusts exactly one server certificate, the one whose SHA-256 fingerprint the URI
@@ -218,13 +213,13 @@ public:
 	~PinnedHttpsQuackClient() override;
 
 	string PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size) override;
-	void PrepareTeardownRequest() override;
 
 private:
 	unique_ptr<QuackMessage> RequestInternal(optional_ptr<ClientContext> context,
-	                                         unique_ptr<QuackMessage> request_message) override;
+	                                         unique_ptr<QuackMessage> request_message, optional_idx deadline) override;
 	//! POST bytes assuming request_mutex is already held.
-	string PostRawLocked(const_data_ptr_t data, idx_t size);
+	string PostRawLocked(const_data_ptr_t data, idx_t size, optional_idx deadline = {});
+	void ConfigureTimeouts(optional_idx deadline);
 
 private:
 	unique_ptr<duckdb_httplib_openssl::Client> https_client;

@@ -2,8 +2,11 @@ include_directories(${CMAKE_SOURCE_DIR}/third_party/catch)
 
 add_executable(unittest_quack test_client_connection.cpp)
 if(DUCKDB_EXTENSION_HTTPFS_SHOULD_BUILD)
-  target_sources(unittest_quack PRIVATE test_http_cancellation.cpp)
+  target_sources(unittest_quack PRIVATE test_http_cancellation.cpp
+                                       test_control_timeouts.cpp)
   target_link_libraries(unittest_quack httpfs_extension)
+  target_compile_definitions(unittest_quack PRIVATE
+                            QUACK_TEST_CERT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../certs")
 endif()
 set_target_properties(unittest_quack PROPERTIES RUNTIME_OUTPUT_DIRECTORY
                                                 ${CMAKE_BINARY_DIR}/test)

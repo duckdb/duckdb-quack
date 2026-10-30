@@ -31,7 +31,8 @@ public:
 	}
 
 private:
-	unique_ptr<QuackMessage> RequestInternal(optional_ptr<ClientContext>, unique_ptr<QuackMessage> message) override {
+	unique_ptr<QuackMessage> RequestInternal(optional_ptr<ClientContext>, unique_ptr<QuackMessage> message,
+	                                         optional_idx) override {
 		if (message->Type() == MessageType::CANCEL_REQUEST) {
 			state.started.set_value();
 			state.released.wait();
@@ -49,7 +50,7 @@ public:
 	unique_ptr<HTTPResponse> SendRequest(BaseRequest &request, unique_ptr<HTTPClient> &) override {
 		requests++;
 		caller = request.interrupt_context;
-		if (caller) {
+		if (caller && interrupt_requests) {
 			caller->Interrupt();
 			request.InterruptCheck();
 		}
@@ -60,6 +61,7 @@ public:
 		return make_uniq<HTTPResponse>(HTTPStatusCode::OK_200);
 	}
 
+	bool interrupt_requests = true;
 	idx_t requests = 0;
 	optional_ptr<ClientContext> caller;
 };
@@ -84,6 +86,7 @@ TEST_CASE("Quack HTTP requests preserve interruption and leave cleanup runnable"
 	CHECK(http->caller.get() == con.context.get());
 	CHECK(http->requests == 1);
 	CHECK(con.context->IsInterrupted());
+	http->interrupt_requests = false;
 	CHECK(client.Request<SuccessResponse>(*con.context, make_uniq<CancelRequestMessage>("test-session", hugeint_t(1))));
 	CHECK_FALSE(http->caller);
 	CHECK(client.Request<SuccessResponse>(*con.context, make_uniq<HeartbeatRequestMessage>("test-session")));
