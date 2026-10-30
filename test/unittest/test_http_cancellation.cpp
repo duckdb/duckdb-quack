@@ -111,7 +111,11 @@ int64_t Scalar(Connection &con, const string &sql) {
 } // namespace
 
 TEST_CASE("Quack cancellation preserves transaction finalization and connection reuse", "[quack][intraquery]") {
-	DuckDB server_db(nullptr);
+	DBConfig server_config;
+	server_config.SetOptionByName("autoload_known_extensions", Value::BOOLEAN(false));
+	server_config.SetOptionByName("autoinstall_known_extensions", Value::BOOLEAN(false));
+	DuckDB server_db(nullptr, &server_config);
+	server_db.LoadStaticExtension(duckdb_extension_httpfs_describe);
 	server_db.LoadStaticExtension(duckdb_extension_quack_describe);
 	Connection server_con(server_db);
 	LoopbackQuackServer server(*server_con.context, QuackUri("quack://localhost:1"), "test-token");
