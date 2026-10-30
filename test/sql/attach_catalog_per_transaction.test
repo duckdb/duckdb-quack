@@ -1,0 +1,44 @@
+# name: test/sql/attach_catalog_per_transaction.test
+# description: a table one connection creates in its open transaction stays in its catalog while another connection reloads the catalog
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+statement ok con1
+BEGIN
+
+statement ok con1
+create table rpc.mine(i INT)
+
+# con2 changes the catalog and reloads it, from a transaction that cannot see con1's table
+statement ok con2
+create table rpc.theirs(i INT)
+
+query I con2
+select count(*) from rpc.theirs
+----
+0
+
+statement ok con1
+insert into rpc.mine values (1)
+
+query I con1
+select i from rpc.mine
+----
+1
+
+statement error con2
+select * from rpc.mine
+----
+does not exist
+
+statement ok con1
+COMMIT
+
+query I con2
+select i from rpc.mine
+----
+1

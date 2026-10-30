@@ -31,6 +31,8 @@ public:
 	QuackSchemaSet(ClientContext &context, QuackCatalog &catalog, const QuackLoadCatalogData &load_data);
 
 	static string GetLoadQuery();
+	//! The schemas of the server's temp catalog - each server session has its own
+	static string GetTempLoadQuery();
 
 private:
 	//! Register a schema at the given (possibly nested) local path, creating any missing parent level
@@ -68,6 +70,8 @@ public:
 	//! The fully qualified name of an entry in this schema as the server sees it. The local schema path is
 	//! exactly the remote qualification - the catalog name is only the local ATTACH alias, so it is dropped
 	QualifiedName GetRemoteName(const Identifier &entry_name) const;
+	//! A schema of the server's temp catalog (temp.main), not one named temp in its default catalog
+	bool InTemp() const;
 
 	void Scan(ClientContext &context, CatalogType type, const std::function<void(CatalogEntry &)> &callback) override;
 	void Scan(CatalogType type, const std::function<void(CatalogEntry &)> &callback) override;

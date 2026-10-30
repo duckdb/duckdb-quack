@@ -18,7 +18,7 @@ struct QuackOperators {
 	unordered_map<string, QuackOperatorInfo> op_info;
 };
 
-void GatherQuackScans(LogicalOperator &op, QuackOperators &result) {
+void GatherQuackScans(ClientContext &context, LogicalOperator &op, QuackOperators &result) {
 	if (op.type == LogicalOperatorType::LOGICAL_GET) {
 		auto &get = op.Cast<LogicalGet>();
 		auto &table_scan = get.function;
@@ -34,7 +34,7 @@ void GatherQuackScans(LogicalOperator &op, QuackOperators &result) {
 		auto &catalog = insert.schema.ParentCatalog();
 		if (catalog.GetCatalogType() == "quack") {
 			auto &quack_catalog = catalog.Cast<QuackCatalog>();
-			auto connection_id = quack_catalog.GetConnectionId();
+			auto connection_id = quack_catalog.GetConnectionId(context);
 			result.op_info[connection_id].insert_count += 1;
 		}
 	}
@@ -43,20 +43,20 @@ void GatherQuackScans(LogicalOperator &op, QuackOperators &result) {
 		auto &catalog = insert.table.ParentCatalog();
 		if (catalog.GetCatalogType() == "quack") {
 			auto &quack_catalog = catalog.Cast<QuackCatalog>();
-			auto connection_id = quack_catalog.GetConnectionId();
+			auto connection_id = quack_catalog.GetConnectionId(context);
 			result.op_info[connection_id].insert_count += 1;
 		}
 	}
 	// recurse into children
 	for (auto &child : op.children) {
-		GatherQuackScans(*child, result);
+		GatherQuackScans(context, *child, result);
 	}
 }
 
 void QuackOptimizer::Optimize(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
 	// look at the query plan and check if we can enable streaming query scans
 	QuackOperators operators;
-	GatherQuackScans(*plan, operators);
+	GatherQuackScans(input.context, *plan, operators);
 	if (operators.op_info.empty()) {
 		// no scans
 		return;

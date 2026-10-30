@@ -29,6 +29,9 @@ ErrorData QuackTransactionManager::CommitTransaction(ClientContext &context, Tra
 	}
 	if (error.HasError()) {
 		quack_catalog.InvalidateIfChangedSince(quack_transaction.StartVersion());
+	} else if (quack_transaction.CatalogChanged()) {
+		// the change is everyone's now
+		quack_catalog.Invalidate();
 	}
 	DestroyTransaction(transaction);
 	return error;
@@ -43,6 +46,11 @@ void QuackTransactionManager::RollbackTransaction(Transaction &transaction) {
 		failure = std::current_exception();
 	}
 	quack_catalog.InvalidateIfChangedSince(quack_transaction.StartVersion());
+	auto context = transaction.context.lock();
+	if (context && quack_transaction.CatalogChanged()) {
+		// what it made in temp is gone with it
+		quack_catalog.ForgetTemp(*context);
+	}
 	DestroyTransaction(transaction);
 	if (failure) {
 		std::rethrow_exception(failure);

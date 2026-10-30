@@ -513,6 +513,16 @@ void QuackClientConnection::StoreClient(unique_ptr<QuackClient> client_p) const 
 	cached_clients.push_back(std::move(client_p));
 }
 
+shared_ptr<QuackSchemaSet> QuackClientConnection::TempSchemas() const {
+	lock_guard<mutex> guard(lock);
+	return temp_schemas;
+}
+
+void QuackClientConnection::SetTempSchemas(shared_ptr<QuackSchemaSet> schemas) const {
+	lock_guard<mutex> guard(lock);
+	temp_schemas = std::move(schemas);
+}
+
 QuackClientWrapper::QuackClientWrapper(unique_ptr<QuackClient> client_p,
                                        shared_ptr<const QuackClientConnection> client_connection_p)
     : client(std::move(client_p)), client_connection(std::move(client_connection_p)) {
