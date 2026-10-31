@@ -86,6 +86,11 @@ public:
 	void Invalidate();
 	void InvalidateIfChangedSince(idx_t version);
 	idx_t InvalidatedVersion();
+	//! A name the cached catalog lacks may have been created on the server after it was loaded: reload the
+	//! catalog, at most once per transaction. Returns whether it did, so the lookup can be tried again
+	bool ReloadOnMiss(ClientContext &context);
+	//! The schema at "schema_path", or nullptr
+	optional_ptr<SchemaCatalogEntry> FindSchema(ClientContext &context, const vector<Identifier> &schema_path);
 
 private:
 	void DropSchema(ClientContext &context, DropInfo &info) override;

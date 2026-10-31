@@ -78,20 +78,27 @@ optional_ptr<SchemaCatalogEntry> QuackCatalog::LookupSchema(CatalogTransaction t
 	if (!transaction.HasContext()) {
 		throw InternalException("Quack catalog lookups require a client context");
 	}
+	auto &context = transaction.GetContext();
 	auto schema_path = GetSchemaPath(schema_lookup);
+	auto schema = FindSchema(context, schema_path);
+	if (!schema && !schema_path.empty() && ReloadOnMiss(context)) {
+		schema = FindSchema(context, schema_path);
+	}
+	if (!schema && !schema_path.empty() && if_not_found == OnEntryNotFound::THROW_EXCEPTION) {
+		throw BinderException("Schema with name \"%s\" not found", schema_path.back().GetIdentifierName());
+	}
+	return schema;
+}
+
+optional_ptr<SchemaCatalogEntry> QuackCatalog::FindSchema(ClientContext &context,
+                                                          const vector<Identifier> &schema_path) {
 	// navigate the schema chain: the outermost schema lives in the catalog, each nested one in its parent
-	reference<QuackCatalogSet> current_set = GetSchemas(transaction.GetContext());
+	reference<QuackCatalogSet> current_set = GetSchemas(context);
 	optional_ptr<CatalogEntry> entry;
 	for (idx_t i = 0; i < schema_path.size(); i++) {
 		entry = current_set.get().GetEntry(schema_path[i].GetIdentifierName());
 		if (!entry) {
-			switch (if_not_found) {
-			case OnEntryNotFound::THROW_EXCEPTION:
-				throw BinderException("Schema with name \"%s\" not found", schema_path[i].GetIdentifierName());
-			case OnEntryNotFound::RETURN_NULL:
-			default:
-				return nullptr;
-			}
+			return nullptr;
 		}
 		current_set = entry->Cast<QuackSchemaCatalogEntry>().Schemas();
 	}
@@ -99,6 +106,15 @@ optional_ptr<SchemaCatalogEntry> QuackCatalog::LookupSchema(CatalogTransaction t
 		return nullptr;
 	}
 	return entry->Cast<SchemaCatalogEntry>();
+}
+
+bool QuackCatalog::ReloadOnMiss(ClientContext &context) {
+	auto &transaction = QuackTransaction::Get(context, *this);
+	if (!transaction.TakeMissReload()) {
+		return false;
+	}
+	Invalidate();
+	return true;
 }
 
 const QuackUri &QuackCatalog::GetServerUri() {

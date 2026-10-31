@@ -138,8 +138,20 @@ optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::LookupEntry(CatalogTransacti
 	case CatalogType::SCHEMA_ENTRY:
 		return schemas->GetEntry(entry_name);
 	case CatalogType::TABLE_ENTRY:
-	case CatalogType::VIEW_ENTRY:
-		return tables->GetEntry(entry_name);
+	case CatalogType::VIEW_ENTRY: {
+		auto entry = tables->GetEntry(entry_name);
+		if (entry || !transaction.HasContext()) {
+			return entry;
+		}
+		// created on the server after the catalog was loaded? look again in a fresh one
+		auto &context = transaction.GetContext();
+		auto &quack_catalog = ParentCatalog().Cast<QuackCatalog>();
+		if (!quack_catalog.ReloadOnMiss(context)) {
+			return nullptr;
+		}
+		auto fresh = quack_catalog.FindSchema(context, GetSchemaPath());
+		return fresh ? fresh->LookupEntry(transaction, lookup_info) : nullptr;
+	}
 	default:
 		return nullptr;
 	}
