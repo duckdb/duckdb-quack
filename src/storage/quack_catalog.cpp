@@ -295,8 +295,11 @@ DatabaseSize QuackCatalog::GetDatabaseSize(ClientContext &context) {
 }
 
 unique_ptr<TableRef> QuackCatalog::RemoteExecute(ClientContext &context, unique_ptr<QueryNode> node) {
-	// attached-catalog path: a read of this catalog, so it joins the local transaction
-	return CreateRemoteQueryRef(node->ToString(), false, true);
+	// attached-catalog path: a read of this catalog, so it joins the local transaction - when there is one to
+	// join. Under auto-commit the statement is the transaction, and it holds one remote scan per connection at
+	// most (QuackOptimizer refuses more): a server-side BEGIN and COMMIT around it are two round trips that
+	// change nothing the server's own auto-commit does not already give
+	return CreateRemoteQueryRef(node->ToString(), false, !context.transaction.IsAutoCommit());
 }
 
 unique_ptr<TableRef> QuackCatalog::RemoteExecute(ClientContext &context, unique_ptr<SQLStatement> statement) {
