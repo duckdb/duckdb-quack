@@ -89,6 +89,9 @@ public:
 	//! A name the cached catalog lacks may have been created on the server after it was loaded: reload the
 	//! catalog, at most once per transaction. Returns whether it did, so the lookup can be tried again
 	bool ReloadOnMiss(ClientContext &context);
+	//! Whether "schema_path" is a lone name of an attached database: the binder's probe before it reads the
+	//! name as a database, not a schema created on the server since the catalog was loaded
+	static bool NamesDatabase(ClientContext &context, const vector<Identifier> &schema_path);
 	//! The schema at "schema_path", or nullptr
 	optional_ptr<SchemaCatalogEntry> FindSchema(ClientContext &context, const vector<Identifier> &schema_path);
 

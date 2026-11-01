@@ -81,7 +81,7 @@ optional_ptr<SchemaCatalogEntry> QuackCatalog::LookupSchema(CatalogTransaction t
 	auto &context = transaction.GetContext();
 	auto schema_path = GetSchemaPath(schema_lookup);
 	auto schema = FindSchema(context, schema_path);
-	if (!schema && !schema_path.empty() && ReloadOnMiss(context)) {
+	if (!schema && !schema_path.empty() && !NamesDatabase(context, schema_path) && ReloadOnMiss(context)) {
 		schema = FindSchema(context, schema_path);
 	}
 	if (!schema && !schema_path.empty() && if_not_found == OnEntryNotFound::THROW_EXCEPTION) {
@@ -106,6 +106,12 @@ optional_ptr<SchemaCatalogEntry> QuackCatalog::FindSchema(ClientContext &context
 		return nullptr;
 	}
 	return entry->Cast<SchemaCatalogEntry>();
+}
+
+bool QuackCatalog::NamesDatabase(ClientContext &context, const vector<Identifier> &schema_path) {
+	// the binder tries a lone name as a schema of the default catalog before it tries it as a database: USE
+	// of this catalog while it is the default looks for a schema named like it on every run
+	return schema_path.size() == 1 && DatabaseManager::Get(context).GetDatabase(context, schema_path[0]);
 }
 
 bool QuackCatalog::ReloadOnMiss(ClientContext &context) {
