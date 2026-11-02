@@ -2,29 +2,20 @@
 # description: the catalog-load query must be drained across fetch batches.
 # group: [sql]
 
-require quack
-
-require httpfs
-
-set ignore_error_messages __none__
+include test/template/quack_setup.test_template
 
 # one chunk per fetch batch: the catalog listing no longer fits in the PREPARE response
-statement ok
+statement ok quack_db:quack_server_con
 set global quack_prepare_inline_rows=1;
 
-statement ok
+statement ok quack_db:quack_server_con
 set global quack_target_batch_bytes=1;
 
-foreach server 'quack:localhost'
-
-statement ok con1
-call quack_serve({server}, token='asdf');
-
 # a table AND a view: >= 2 chunks out of the UNION ALL, so the listing spans batches
-statement ok
+statement ok quack_db:quack_server_con
 create table t1 as select i, i * 2 as j from range(10) t(i);
 
-statement ok
+statement ok quack_db:quack_server_con
 create view v1 as select i, i * 2 as j from range(10) t(i);
 
 statement ok
@@ -49,7 +40,4 @@ select count(*), sum(i) from rpc.t1
 statement ok con2
 detach rpc;
 
-statement ok con1
-call quack_stop({server});
-
-endloop
+include test/template/quack_teardown.test_template

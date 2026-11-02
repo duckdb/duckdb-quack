@@ -12,6 +12,8 @@
 #include "storage/quack_schema.hpp"
 #include "quack_uri.hpp"
 
+#include <condition_variable>
+
 namespace duckdb {
 
 class QuackCatalog;
@@ -85,6 +87,9 @@ public:
 	const string &GetSchemaFilter() const {
 		return schema_filter;
 	}
+	void Invalidate();
+	void InvalidateIfChangedSince(idx_t version);
+	idx_t InvalidatedVersion();
 
 private:
 	void DropSchema(ClientContext &context, DropInfo &info) override;
@@ -94,11 +99,19 @@ private:
 	unique_ptr<TableRef> CreateRemoteQueryRef(const string &sql, bool refresh_catalog, bool use_transaction = true);
 
 	QuackLoadCatalogData LoadCatalog(ClientContext &context);
+	QuackSchemaSet &GetSchemas(ClientContext &context);
+	shared_ptr<QuackSchemaSet> AcquireSnapshot(ClientContext &context);
+	bool ServesOwnConnection(ClientContext &context);
 
 private:
 	shared_ptr<QuackClientConnection> client_connection;
-	unique_ptr<QuackSchemaSet> schemas;
 	string schema_filter;
+	mutex snapshot_lock;
+	std::condition_variable snapshot_loaded;
+	shared_ptr<QuackSchemaSet> snapshot;
+	idx_t invalidated_version = 0;
+	idx_t loaded_version = 0;
+	optional_ptr<ClientContext> loading_context;
 };
 
 } // namespace duckdb

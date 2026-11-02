@@ -1,0 +1,36 @@
+# name: test/sql/attach_read_only.test
+# description: READ_ONLY attaches are rejected until quack can enforce them
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok quack_db:quack_server_con
+create table t as values(42);
+
+statement error
+attach {server} as ro (token 'asdf', read_only)
+----
+READ_ONLY is not currently supported for Quack databases
+
+statement error
+attach {server} as ro (token 'asdf', readonly true)
+----
+READ_ONLY is not currently supported for Quack databases
+
+# the read-write spellings still work
+statement ok
+attach {server} as rw (token 'asdf', read_write)
+
+query I
+select * from rw.t
+----
+42
+
+statement ok
+detach rw
+
+statement ok
+attach {server} as rw2 (token 'asdf', readonly false)
+
+statement ok
+detach rw2

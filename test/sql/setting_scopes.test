@@ -1,0 +1,84 @@
+# name: test/sql/setting_scopes.test
+# description: a plain SET of a setting the server reads from the global configuration takes effect
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok quack_db:quack_server_con
+CREATE TABLE tbl AS SELECT range AS i FROM range(5);
+
+statement ok
+CREATE SECRET (TYPE quack, TOKEN 'asdf');
+
+statement ok
+ATTACH {server} AS remote;
+
+statement ok
+CALL enable_logging(['Quack'], storage='memory');
+
+# --- quack_prepare_inline_rows: with no inline rows even a one-row result needs a FETCH
+
+statement ok quack_db:quack_server_con
+SET quack_prepare_inline_rows = 0;
+
+query I
+FROM quack_query_by_name('remote', 'SELECT 42');
+----
+42
+
+query I
+SELECT count(*) > 0 FROM duckdb_logs_parsed('Quack') WHERE message_type = 'FETCH_REQUEST'
+----
+true
+
+statement ok quack_db:quack_server_con
+RESET quack_prepare_inline_rows;
+
+# --- quack_enable_reconnects: the server caches the result, the client acknowledges it
+
+statement ok quack_db:quack_server_con
+SET quack_enable_reconnects = true;
+
+query I
+SELECT i FROM remote.tbl ORDER BY i;
+----
+0
+1
+2
+3
+4
+
+query I quack_db:quack_server_con
+SELECT cached_rows FROM quack_active_connections();
+----
+5
+
+statement ok
+SET quack_enable_reconnects = true;
+
+query I
+SELECT i FROM remote.tbl ORDER BY i;
+----
+0
+1
+2
+3
+4
+
+query I
+SELECT count(*) > 0 FROM duckdb_logs_parsed('Quack') WHERE message_type = 'ACKNOWLEDGEMENT'
+----
+true
+
+query I quack_db:quack_server_con
+SELECT cached_rows FROM quack_active_connections();
+----
+NULL
+
+statement ok
+RESET quack_enable_reconnects;
+
+statement ok quack_db:quack_server_con
+RESET quack_enable_reconnects;
+
+include test/template/quack_teardown.test_template

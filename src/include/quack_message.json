@@ -80,7 +80,7 @@
     "members": [
       {
         "id": 1,
-        "name": "uuid",
+        "name": "query_uuid",
         "type": "hugeint_t"
       },
       {

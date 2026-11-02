@@ -110,7 +110,7 @@ statement ok
 reset async_threads;
 
 # --- client-side source failure mid-stream: the client sends some chunks then errors and never sends
-# FINALIZE. The server must abort (roll back) the abandoned insert rather than hang holding the
+# the terminal SEND_DATA. The server must abort (roll back) the abandoned insert rather than hang holding the
 # connection lock, so a following statement on the same connection still works.
 statement ok
 create table rpc.local_fail(i bigint);

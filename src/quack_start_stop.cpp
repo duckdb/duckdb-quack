@@ -158,17 +158,26 @@ static void QuackServe(ClientContext &context, TableFunctionInput &data_p, DataC
 
 TableFunctionSet QuackServeFunction::GetFunction() {
 	TableFunctionSet set("quack_serve");
-	auto fun = TableFunction("quack_serve", {LogicalType::VARCHAR}, QuackServe, QuackServeBind);
-	fun.named_parameters["disable_ssl"] = LogicalType::BOOLEAN;
-	fun.named_parameters["ssl_cert_file"] = LogicalType::VARCHAR;
-	fun.named_parameters["ssl_key_file"] = LogicalType::VARCHAR;
-	fun.named_parameters["allow_other_hostname"] = LogicalType::BOOLEAN;
-	fun.named_parameters["token"] = LogicalType::VARCHAR;
-	fun.named_parameters["secret"] = LogicalType::VARCHAR;
-	fun.named_parameters["create_secret_if_not_exists"] = LogicalType::BOOLEAN;
-	set.AddFunction(fun);
-	fun.arguments.clear();
-	set.AddFunction(fun);
+	auto add_options = [](FunctionSignature &signature) -> FunctionSignature & {
+		return signature.WithTypedKwargs("options", [&](TypedKwargs &options) {
+			options.Add("disable_ssl", LogicalType::BOOLEAN)
+			    .Add("ssl_cert_file", LogicalType::VARCHAR)
+			    .Add("ssl_key_file", LogicalType::VARCHAR)
+			    .Add("allow_other_hostname", LogicalType::BOOLEAN)
+			    .Add("token", LogicalType::VARCHAR)
+			    .Add("secret", LogicalType::VARCHAR)
+			    .Add("create_secret_if_not_exists", LogicalType::BOOLEAN);
+		});
+	};
+
+	// the listening URI is optional - QuackServeBind defaults it when the overload without it is chosen
+	FunctionSignature with_uri;
+	add_options(with_uri.AddParameter("listen_uri", LogicalType::VARCHAR));
+	set.AddFunction(TableFunction("quack_serve", std::move(with_uri), QuackServe, QuackServeBind));
+
+	FunctionSignature without_uri;
+	add_options(without_uri);
+	set.AddFunction(TableFunction("quack_serve", std::move(without_uri), QuackServe, QuackServeBind));
 
 	return set;
 }
@@ -204,7 +213,9 @@ static void QuackStop(ClientContext &context, TableFunctionInput &data_p, DataCh
 }
 
 TableFunction QuackStopFunction::GetFunction() {
-	return TableFunction("quack_stop", {LogicalType::VARCHAR}, QuackStop, QuackStopBind);
+	FunctionSignature signature;
+	signature.AddParameter("listen_uri", LogicalType::VARCHAR);
+	return TableFunction("quack_stop", std::move(signature), QuackStop, QuackStopBind);
 }
 
 struct QuackServerListFunctionData : public TableFunctionData {
@@ -295,7 +306,7 @@ static void QuackGenerateKeysFun(ClientContext &context, TableFunctionInput &dat
 	if (bind_data.finished) {
 		return;
 	}
-	output.SetCardinality(1);
+	output.SetChildCardinality(1);
 	bind_data.finished = true;
 
 	auto &fs = FileSystem::GetFileSystem(context);
@@ -328,7 +339,7 @@ static void QuackGenerateKeysFun(ClientContext &context, TableFunctionInput &dat
 }
 
 TableFunction QuackGenerateKeysFunction::GetFunction() {
-	auto fun = TableFunction("quack_generate_keys", {}, QuackGenerateKeysFun, QuackGenerateKeysBind);
-	fun.named_parameters["directory"] = LogicalType::VARCHAR;
-	return fun;
+	FunctionSignature signature;
+	signature.WithTypedKwargs("options", [&](TypedKwargs &options) { options.Add("directory", LogicalType::VARCHAR); });
+	return TableFunction("quack_generate_keys", std::move(signature), QuackGenerateKeysFun, QuackGenerateKeysBind);
 }

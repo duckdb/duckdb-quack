@@ -1,0 +1,77 @@
+# name: test/sql/attach_unbindable_table.test
+# description: an unbindable remote table fails ATTACH with its cause and recovery guidance (#202)
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+# the CHECK calls a macro the server finds through its search path, so the client cannot bind the table
+statement ok quack_db:quack_server_con
+create schema s
+
+statement ok quack_db:quack_server_con
+create macro s.pos(x) as x > 0
+
+statement ok quack_db:quack_server_con
+set search_path = 's'
+
+statement ok quack_db:quack_server_con
+create table s.bad (i INT CHECK (pos(i)))
+
+statement ok quack_db:quack_server_con
+insert into s.bad values (7)
+
+statement ok quack_db:quack_server_con
+reset search_path
+
+statement ok quack_db:quack_server_con
+create table s.good as select 42 i
+
+# The entire ATTACH fails, naming the remote table and retaining the cause.
+# The diagnostic also explains the Iceberg UNKNOWN workaround and the direct-query alternative.
+statement error
+attach {server} as rpc (token 'asdf')
+----
+<REGEX>:.*Failed to bind remote table s.bad while attaching quack catalog "rpc":.*Scalar Function with name pos does not exist.*Quack ATTACH requires all remote table definitions to bind on the client.*TABLE_RESOLUTION 'eager'.*quack_query\(\).*SQL: CREATE TABLE s.bad.*
+
+query I
+select count(*) from duckdb_databases() where database_name = 'rpc'
+----
+0
+
+# Standalone quack_query does not require the failed attachment or client-side table binding.
+query I
+from quack_query({server}, 'FROM s.good', token = 'asdf')
+----
+42
+
+query I
+from quack_query({server}, 'FROM s.bad', token = 'asdf')
+----
+7
+
+# Once the client can bind the definition, ATTACH exposes both tables.
+statement ok
+create macro pos(x) as x > 0
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+query I
+from rpc.s.good
+----
+42
+
+query I
+from rpc.s.bad
+----
+7
+
+query I
+select count(*) from duckdb_tables() where database_name = 'rpc' and table_name in ('good', 'bad')
+----
+2
+
+statement ok
+detach rpc
+
+include test/template/quack_teardown.test_template

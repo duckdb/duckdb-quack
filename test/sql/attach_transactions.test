@@ -23,4 +23,47 @@ query I
 from rpc.t
 ----
 
+# an INSERT that sends local rows joins the client's explicit transaction (#173)
+statement ok
+insert into rpc.t values (1);
+
+statement ok
+create table local_src as select range::INT i from range(10, 13)
+
+statement ok
+BEGIN
+
+statement ok
+insert into rpc.t select i from local_src
+
+query I
+select count(*) from rpc.t
+----
+4
+
+statement ok
+ROLLBACK
+
+query I
+from rpc.t
+----
+1
+
+statement ok
+BEGIN
+
+statement ok
+insert into rpc.t select i from local_src
+
+statement ok
+COMMIT
+
+query I quack_db:quack_server_con
+from t order by i
+----
+1
+10
+11
+12
+
 include test/template/quack_teardown.test_template

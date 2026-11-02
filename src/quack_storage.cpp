@@ -1,5 +1,7 @@
 #include <thread>
 
+#include "duckdb/common/exception/binder_exception.hpp"
+#include "duckdb/common/unordered_set.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/parser/parsed_data/attach_info.hpp"
@@ -17,7 +19,7 @@ QuackStorageExtensionInfo &QuackStorageExtensionInfo::GetState(const DatabaseIns
 	auto &config = instance.config;
 	auto ext = StorageExtension::Find(config, STORAGE_EXTENSION_KEY);
 	if (!ext) {
-		throw std::runtime_error("Fatal error: couldn't find rpc extension state.");
+		throw std::runtime_error("Fatal error: couldn't find quack extension state.");
 	}
 	return *static_cast<QuackStorageExtensionInfo *>(ext->storage_info.get());
 }
@@ -103,6 +105,20 @@ static bool IsBareQuackPath(const string &uri) {
 static unique_ptr<Catalog> QuackAttach(optional_ptr<StorageExtensionInfo> storage_info, ClientContext &context,
                                        AttachedDatabase &db, const string &name, AttachInfo &info,
                                        AttachOptions &attach_options) {
+	// writes are pushed down to the server as whole statements, so a read-only attach cannot be enforced yet
+	if (attach_options.access_mode == AccessMode::READ_ONLY) {
+		throw NotImplementedException("READ_ONLY is not currently supported for Quack databases - attach \"%s\" "
+		                              "without the READ_ONLY option, or with (READ_WRITE)",
+		                              name);
+	}
+	// the options the core did not consume are ours; the parser lower-cases their names
+	static const unordered_set<string> KNOWN_OPTIONS {"token",           "secret",    "disable_ssl",
+	                                                  "ssl_fingerprint", "client_id", "heartbeat_timeout"};
+	for (auto &entry : attach_options.options) {
+		if (KNOWN_OPTIONS.find(entry.first) == KNOWN_OPTIONS.end()) {
+			throw BinderException("Unrecognized option for attach \"%s\"", entry.first);
+		}
+	}
 	// info.path may or may not already carry the "quack:" prefix.
 	auto uri = StringUtil::StartsWith(info.path, "quack:") ? info.path : "quack:" + info.path;
 

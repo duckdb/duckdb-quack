@@ -11,6 +11,7 @@
 #include "quack_fetch_collector.hpp"
 #include "quack_insert_stream.hpp"
 #include "quack_session_state.hpp"
+#include "quack_settings.hpp"
 
 namespace duckdb {
 
@@ -101,7 +102,8 @@ static unique_ptr<FunctionData> QuackScanFromClientBind(ClientContext &context, 
 
 	auto bind_data = make_uniq<QuackScanFromClientBindData>();
 	bind_data->types = types;
-	bind_data->stream = session_state->Streams().Create(stream_id, std::move(types), ordered);
+	bind_data->stream = session_state->Streams().Create(stream_id, std::move(types), ordered,
+	                                                    QuackServerStreamBufferBytes(*context.db));
 	bind_data->stream_id = std::move(stream_id);
 	// The stream exists now, so the client may send. PREPARE waits for this.
 	if (auto statement = session_state->Statement()) {
@@ -244,10 +246,13 @@ static OperatorPartitionData QuackScanFromClientGetPartitionData(ClientContext &
 }
 
 TableFunction QuackScanFromClientFunction::GetFunction() {
-	TableFunction fun("scan_data_from_quack_client", {LogicalType::VARCHAR, LogicalType::ANY}, QuackScanFromClient,
-	                  QuackScanFromClientBind, QuackScanFromClientInitGlobal, QuackScanFromClientInitLocal);
+	FunctionSignature signature;
+	signature.AddParameter("stream_id", LogicalType::VARCHAR)
+	    .AddParameter("prototype", LogicalType::ANY)
+	    .WithTypedKwargs("options", [&](TypedKwargs &options) { options.Add("ordered", LogicalType::BOOLEAN); });
+	TableFunction fun("scan_data_from_quack_client", std::move(signature), QuackScanFromClient, QuackScanFromClientBind,
+	                  QuackScanFromClientInitGlobal, QuackScanFromClientInitLocal);
 	fun.get_partition_data = QuackScanFromClientGetPartitionData;
-	fun.named_parameters["ordered"] = LogicalType::BOOLEAN;
 	return fun;
 }
 

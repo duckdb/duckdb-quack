@@ -2,21 +2,18 @@
 #include "storage/quack_schema.hpp"
 #include "storage/quack_table.hpp"
 #include "quack_client.hpp"
+#include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 #include "duckdb/catalog/catalog_entry/table_macro_catalog_entry.hpp"
+#include "duckdb/common/sql_identifier.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "storage/quack_transaction.hpp"
 #include "storage/quack_view.hpp"
 
 namespace duckdb {
-
-QuackSchemaSet::QuackSchemaSet(ClientContext &context, QuackCatalog &catalog, const QuackLoadCatalogData &load_data)
-    : QuackCatalogSet(catalog) {
-	Reload(context, catalog, load_data);
-}
 
 //! Build the CreateSchemaInfo for a schema entry. The parent chain is tracked through the entry itself, so the
 //! info only carries the schema's own name
@@ -54,8 +51,8 @@ void QuackSchemaSet::RegisterSchema(ClientContext &context, QuackCatalog &catalo
 	target_set.get().CreateEntry(std::move(schema), OnCreateConflict::REPLACE_ON_CONFLICT);
 }
 
-void QuackSchemaSet::Reload(ClientContext &context, QuackCatalog &catalog, const QuackLoadCatalogData &load_data) {
-	Clear();
+QuackSchemaSet::QuackSchemaSet(ClientContext &context, QuackCatalog &catalog, const QuackLoadCatalogData &load_data)
+    : QuackCatalogSet(catalog) {
 	for (auto &row : load_data.schemas->Rows()) {
 		auto remote_oid = row.GetValue(0).GetValue<int64_t>();
 		auto database_name = row.GetValue(1).GetValue<string>();
@@ -199,8 +196,13 @@ optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateTable(CatalogTransacti
 
 	auto &quack_transaction = QuackTransaction::Get(transaction);
 	quack_transaction.Query(create_table_info->ToString());
+	ParentCatalog().Cast<QuackCatalog>().Invalidate();
+	auto existing = tables->GetEntry(create_table_info->GetQualifiedName().Name().GetIdentifierName());
+	if (existing && info.Base().on_conflict != OnCreateConflict::REPLACE_ON_CONFLICT) {
+		return existing;
+	}
 	auto quack_entry = make_uniq<QuackTableCatalogEntry>(catalog, *this, create_table_info->Cast<CreateTableInfo>());
-	return tables->CreateEntry(std::move(quack_entry), info.Base().on_conflict);
+	return quack_transaction.Retain(std::move(quack_entry));
 }
 
 optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateView(CatalogTransaction transaction, CreateViewInfo &info) {
@@ -212,13 +214,19 @@ optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateView(CatalogTransactio
 	// create the view verbatim in the serer
 	auto &quack_transaction = QuackTransaction::Get(transaction);
 	quack_transaction.Query(create_view_info->ToString());
+	ParentCatalog().Cast<QuackCatalog>().Invalidate();
 
 	// locally, override the query with a remote procedure call to ensure the view is evaluated remotely
 	info.sql = QuackViewCatalogEntry::CreateViewSQL(ParentCatalog().GetName().GetIdentifierName(), remote_name);
-	info.query = CreateViewInfo::ParseSelect(info.sql);
+	auto parser = Parser::GetBuiltinParser();
+	info.query = CreateViewInfo::ParseSelect(parser, info.sql);
 
+	auto existing = tables->GetEntry(info.GetQualifiedName().Name().GetIdentifierName());
+	if (existing && info.on_conflict != OnCreateConflict::REPLACE_ON_CONFLICT) {
+		return existing;
+	}
 	auto quack_entry = make_uniq<QuackViewCatalogEntry>(catalog, *this, info);
-	return tables->CreateEntry(std::move(quack_entry), info.on_conflict);
+	return quack_transaction.Retain(std::move(quack_entry));
 }
 optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateSequence(CatalogTransaction transaction,
                                                                    CreateSequenceInfo &info) {
@@ -257,7 +265,7 @@ void QuackSchemaCatalogEntry::DropEntry(ClientContext &context, DropInfo &info_p
 	}
 	auto &transaction = QuackTransaction::Get(context, ParentCatalog());
 	transaction.Query(drop_info->ToString());
-	tables->DropEntry(info_p.GetQualifiedName().Name().GetIdentifierName());
+	ParentCatalog().Cast<QuackCatalog>().Invalidate();
 }
 void QuackSchemaCatalogEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 	throw NotImplementedException("Alter not implemented yet, Alter!");
@@ -280,9 +288,8 @@ static const DefaultTableMacro quack_table_macros[] = {
 // 'borrowed' from ducklake
 optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::LoadBuiltInFunction(DefaultTableMacro macro) {
 	string macro_def = macro.macro;
-	macro_def = StringUtil::Replace(macro_def, "{CATALOG}",
-	                                KeywordHelper::WriteQuoted(catalog.GetName().GetIdentifierName(), '\''));
-	macro_def = StringUtil::Replace(macro_def, "{SCHEMA}", KeywordHelper::WriteQuoted(name.GetIdentifierName(), '\''));
+	macro_def = StringUtil::Replace(macro_def, "{CATALOG}", SQLString::ToString(catalog.GetName().GetIdentifierName()));
+	macro_def = StringUtil::Replace(macro_def, "{SCHEMA}", SQLString::ToString(name.GetIdentifierName()));
 	macro.macro = macro_def.c_str();
 	auto info = DefaultTableFunctionGenerator::CreateTableMacroInfo(macro);
 	auto table_macro =

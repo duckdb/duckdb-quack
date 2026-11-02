@@ -1,0 +1,29 @@
+# name: test/sql/server_stream_buffer_setting.test
+# description: a plain SET or RESET of the server stream buffer budget changes the global configuration
+# group: [sql]
+
+require quack
+
+statement ok
+SET quack_server_stream_buffer_bytes = 123456;
+
+query I con2
+SELECT current_setting('quack_server_stream_buffer_bytes');
+----
+123456
+
+statement ok
+SET quack_server_stream_buffer_bytes = 0;
+
+query I con2
+SELECT current_setting('quack_server_stream_buffer_bytes');
+----
+0
+
+statement ok
+RESET quack_server_stream_buffer_bytes;
+
+query I con2
+SELECT current_setting('quack_server_stream_buffer_bytes');
+----
+268435456

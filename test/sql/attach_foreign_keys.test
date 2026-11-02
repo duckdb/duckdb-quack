@@ -1,0 +1,63 @@
+# name: test/sql/attach_foreign_keys.test
+# description: attach a catalog whose tables have foreign keys (#288)
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok quack_db:quack_server_con
+create table arch(arch INTEGER PRIMARY KEY, name VARCHAR);
+
+statement ok quack_db:quack_server_con
+create table item(word VARCHAR, arch INTEGER, FOREIGN KEY (arch) REFERENCES arch(arch));
+
+statement ok quack_db:quack_server_con
+insert into arch values (1, 'one');
+
+statement ok quack_db:quack_server_con
+insert into item values ('w', 1);
+
+# a non-main schema, where the child sorts before the parent
+statement ok quack_db:quack_server_con
+create schema s2;
+
+statement ok quack_db:quack_server_con
+create table s2.zparent(id INTEGER PRIMARY KEY);
+
+statement ok quack_db:quack_server_con
+create table s2.achild(id INTEGER, parent_id INTEGER REFERENCES s2.zparent(id));
+
+statement ok quack_db:quack_server_con
+insert into s2.zparent values (7);
+
+statement ok quack_db:quack_server_con
+insert into s2.achild values (1, 7);
+
+statement ok
+attach {server} as remote (token 'asdf')
+
+query TIT
+select i.word, a.arch, a.name from remote.item i join remote.arch a using (arch)
+----
+w	1	one
+
+query II
+select c.id, p.id from remote.s2.achild c join remote.s2.zparent p on c.parent_id = p.id
+----
+1	7
+
+# the server still enforces the foreign key
+statement ok
+insert into remote.item values ('x', 1)
+
+statement error
+insert into remote.item values ('y', 99)
+----
+foreign key
+
+query T
+select word from remote.item order by word
+----
+w
+x
+
+include test/template/quack_teardown.test_template

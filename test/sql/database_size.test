@@ -1,0 +1,21 @@
+# name: test/sql/database_size.test
+# description: PRAGMA database_size works while a quack catalog is attached
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok
+attach {server} as my_remote (token 'asdf')
+
+statement ok
+PRAGMA database_size;
+
+query IIII
+SELECT database_size, block_size, total_blocks, wal_size FROM pragma_database_size() WHERE database_name = 'my_remote';
+----
+0 bytes	0	0	0 bytes
+
+statement ok
+detach my_remote;
+
+include test/template/quack_teardown.test_template

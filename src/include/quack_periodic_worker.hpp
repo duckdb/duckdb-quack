@@ -20,7 +20,12 @@ public:
 		D_ASSERT(!thread.joinable());
 		interval = std::move(interval_p);
 		tick = std::move(tick_p);
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+		// Single-threaded wasm cannot start a thread, so the tick never runs there
+		// TODO: drive the tick from the event loop instead (emscripten_set_interval)
+#else
 		thread = std::thread(&QuackPeriodicWorker::Loop, this);
+#endif
 	}
 
 	//! Wake the worker and join its thread

@@ -93,14 +93,14 @@ unique_ptr<ErrorResponse> ErrorResponse::Deserialize(Deserializer &deserializer)
 }
 
 void FetchRequestMessage::Serialize(Serializer &serializer) const {
-	serializer.WriteProperty<hugeint_t>(1, "uuid", uuid);
+	serializer.WriteProperty<hugeint_t>(1, "query_uuid", query_uuid);
 	serializer.WritePropertyWithDefault<idx_t>(2, "batch_index", batch_index, 0);
 	serializer.WritePropertyWithDefault<idx_t>(3, "ack_index", ack_index, 0);
 }
 
 unique_ptr<FetchRequestMessage> FetchRequestMessage::Deserialize(Deserializer &deserializer) {
 	auto result = duckdb::unique_ptr<FetchRequestMessage>(new FetchRequestMessage());
-	deserializer.ReadProperty<hugeint_t>(1, "uuid", result->uuid);
+	deserializer.ReadProperty<hugeint_t>(1, "query_uuid", result->query_uuid);
 	deserializer.ReadPropertyWithExplicitDefault<idx_t>(2, "batch_index", result->batch_index, 0);
 	deserializer.ReadPropertyWithExplicitDefault<idx_t>(3, "ack_index", result->ack_index, 0);
 	return result;

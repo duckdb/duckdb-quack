@@ -8,7 +8,7 @@ include test/template/quack_setup.test_template
 # the head batch then finds no capacity while the client waits for it. Head-of-stream admission must
 # let the head in. Without it, this test waits for ever.
 statement ok quack_db:quack_server_con
-SET GLOBAL quack_fetch_producer_buffer_bytes = 524288;
+SET GLOBAL quack_server_stream_buffer_bytes = 524288;
 
 statement ok quack_db:quack_server_con
 SET GLOBAL quack_target_batch_bytes = 65536;
@@ -41,7 +41,7 @@ statement ok
 RESET quack_fetch_read_ahead;
 
 statement ok quack_db:quack_server_con
-RESET GLOBAL quack_fetch_producer_buffer_bytes;
+RESET GLOBAL quack_server_stream_buffer_bytes;
 
 statement ok quack_db:quack_server_con
 RESET GLOBAL quack_target_batch_bytes;

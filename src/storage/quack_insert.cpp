@@ -8,10 +8,12 @@
 #include "quack_client.hpp"
 #include "quack_message.hpp"
 #include "quack_send_data.hpp"
+#include "quack_settings.hpp"
 #include "storage/quack_catalog.hpp"
 #include "storage/quack_insert.hpp"
 #include "storage/quack_schema.hpp"
 #include "storage/quack_table.hpp"
+#include "storage/quack_transaction.hpp"
 
 using namespace duckdb;
 
@@ -73,6 +75,10 @@ unique_ptr<GlobalSinkState> QuackInsert::GetGlobalSinkState(ClientContext &conte
 	    "INSERT INTO %s SELECT * FROM scan_data_from_quack_client(%s, NULL::%s, ordered := %s)", remote_name.ToString(),
 	    SQLString(stream_id), StructPrototype(types), order_mode != AppendOrderMode::UNORDERED ? "true" : "false");
 
+	if (!context.transaction.IsAutoCommit()) {
+		QuackTransaction::Get(context, quack_catalog).ForceStart();
+	}
+
 	// inline_rows = 0, because the statement waits for our batches and has no row to answer with. The
 	// scan registers the stream while it binds, so PREPARE must land before the first batch.
 	auto client_wrapper = quack_catalog.GetClientConnection()->GetClient(context);
@@ -103,7 +109,7 @@ SinkCombineResultType QuackInsert::Combine(ExecutionContext &context, OperatorSi
 
 SinkFinalizeType QuackInsert::Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
                                        OperatorSinkFinalizeInput &input) const {
-	// FINALIZE then carries the batch count, so the server can check the stream is complete.
+	// The terminal SEND_DATA then carries the batch count, so the server can check the stream is complete.
 	return QuackRebalancerFinalize(pipeline, event, context, input.global_state.Cast<QuackRebalancerGlobalState>());
 }
 
@@ -114,7 +120,7 @@ SourceResultType QuackInsert::GetDataInternal(ExecutionContext &context, DataChu
                                               OperatorSourceInput &input) const {
 	auto &gstate = sink_state->Cast<QuackRebalancerGlobalState>();
 	chunk.data[0].Append(Value::BIGINT(NumericCast<int64_t>(gstate.row_count.load())));
-	chunk.SetCardinality(1);
+	chunk.CheckCardinality(1);
 	return SourceResultType::FINISHED;
 }
 
@@ -122,7 +128,7 @@ SourceResultType QuackInsert::GetDataInternal(ExecutionContext &context, DataChu
 // Helpers
 //===--------------------------------------------------------------------===//
 string QuackInsert::GetName() const {
-	return table ? "RPC_INSERT" : "RPC_CREATE_TABLE_AS";
+	return table ? "QUACK_INSERT" : "QUACK_CREATE_TABLE_AS";
 }
 
 InsertionOrderPreservingMap<string> QuackInsert::ParamsToString() const {

@@ -9,7 +9,8 @@ namespace duckdb {
 QuackTransaction::QuackTransaction(QuackCatalog &quack_catalog_p, TransactionManager &manager_p,
                                    ClientContext &context_p)
     : Transaction(manager_p, context_p), quack_catalog(quack_catalog_p),
-      transaction_state(QuackTransactionState::TRANSACTION_NOT_YET_STARTED) {
+      transaction_state(QuackTransactionState::TRANSACTION_NOT_YET_STARTED),
+      start_version(quack_catalog_p.InvalidatedVersion()) {
 }
 
 QuackTransaction::~QuackTransaction() {
@@ -38,6 +39,19 @@ void QuackTransaction::Rollback() {
 		transaction_state = QuackTransactionState::TRANSACTION_FINISHED;
 		Query("ROLLBACK");
 	}
+}
+
+void QuackTransaction::Retain(shared_ptr<QuackSchemaSet> snapshot) {
+	lock_guard<mutex> guard(retained_lock);
+	if (retained_snapshots.empty() || retained_snapshots.back() != snapshot) {
+		retained_snapshots.push_back(std::move(snapshot));
+	}
+}
+
+optional_ptr<CatalogEntry> QuackTransaction::Retain(unique_ptr<CatalogEntry> entry) {
+	lock_guard<mutex> guard(retained_lock);
+	retained_entries.push_back(std::move(entry));
+	return retained_entries.back().get();
 }
 
 QuackTransaction &QuackTransaction::Get(ClientContext &context, Catalog &catalog) {

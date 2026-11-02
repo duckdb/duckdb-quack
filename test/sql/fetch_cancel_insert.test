@@ -7,7 +7,7 @@ include test/template/quack_setup.test_template
 # The client stops the scan. The producer then fills the small buffer and parks, and it holds the
 # connection lock. CANCEL must abort the stream, or the next statement waits for ever.
 statement ok quack_db:quack_server_con
-SET GLOBAL quack_fetch_producer_buffer_bytes = 262144;
+SET GLOBAL quack_server_stream_buffer_bytes = 262144;
 
 statement ok quack_db:quack_server_con
 SET GLOBAL quack_target_batch_bytes = 65536;
@@ -58,7 +58,7 @@ SELECT count(*) FROM remote.sink_t;
 1
 
 statement ok quack_db:quack_server_con
-RESET GLOBAL quack_fetch_producer_buffer_bytes;
+RESET GLOBAL quack_server_stream_buffer_bytes;
 
 statement ok quack_db:quack_server_con
 RESET GLOBAL quack_target_batch_bytes;

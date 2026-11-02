@@ -55,17 +55,15 @@ private:
 template <class PAYLOAD>
 class QuackClaimBuffer {
 public:
+	//! A full buffer holds the producer back. 0 = no byte limit.
+	explicit QuackClaimBuffer(idx_t capacity_bytes = 0) : capacity(capacity_bytes) {
+	}
+
 	using PopStatus = QuackClaimPopStatus;
 
 	idx_t ClaimBatch() {
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		return next_claim++;
-	}
-
-	//! Limit the buffered bytes. A full buffer holds the producer back. 0 = no limit.
-	void SetCapacity(idx_t bytes) {
-		annotated_lock_guard<annotated_mutex> guard(lock);
-		capacity = bytes;
 	}
 
 	//! Publish a batch under its dense index. The call waits until the batch fits. An empty buffer
@@ -337,7 +335,7 @@ private:
 	idx_t next_claim DUCKDB_GUARDED_BY(lock) = 1;
 	std::map<idx_t, Entry> batches DUCKDB_GUARDED_BY(lock);
 	idx_t buffered_bytes DUCKDB_GUARDED_BY(lock) = 0;
-	idx_t capacity DUCKDB_GUARDED_BY(lock) = 0;
+	const idx_t capacity;
 	//! A publish of one index fires the waiter for that index only.
 	std::map<idx_t, shared_ptr<ReadAheadJobCompletion>> waiters DUCKDB_GUARDED_BY(lock);
 	//! Parked by TryPushBatch. A pop that frees bytes, or a stream close, fires all of them.

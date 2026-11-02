@@ -36,6 +36,9 @@ using QuackFetchPayloadBuffer = QuackClaimBuffer<QuackFetchPayload>;
 //! Server state for one client-facing result. The fetch collector fills the claim buffer with sealed
 //! payloads, out of order and under a byte limit. The FETCH handlers drain it.
 struct QuackResultStream {
+	explicit QuackResultStream(idx_t capacity_bytes) : buffer(capacity_bytes) {
+	}
+
 	QuackFetchPayloadBuffer buffer;
 
 	void SignalBound(vector<LogicalType> types_p, vector<string> names_p) {

@@ -18,7 +18,8 @@ namespace duckdb {
 //! Server state for one client data stream. The SEND_DATA handler fills the buffer, and
 //! scan_data_from_quack_client drains it. It is the mirror of QuackResultStream.
 struct QuackInsertStream {
-	QuackInsertStream(vector<LogicalType> types_p, bool ordered_p) : types(std::move(types_p)), ordered(ordered_p) {
+	QuackInsertStream(vector<LogicalType> types_p, bool ordered_p, idx_t capacity_bytes)
+	    : types(std::move(types_p)), ordered(ordered_p), buffer(capacity_bytes) {
 	}
 
 	vector<LogicalType> types;
@@ -31,12 +32,13 @@ struct QuackInsertStream {
 //! until the session's next statement, so a repeated terminal message still finds its outcome.
 class QuackInsertStreamRegistry {
 public:
-	shared_ptr<QuackInsertStream> Create(const string &id, vector<LogicalType> types, bool ordered) {
+	shared_ptr<QuackInsertStream> Create(const string &id, vector<LogicalType> types, bool ordered,
+	                                     idx_t capacity_bytes) {
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		if (streams.find(id) != streams.end()) {
 			throw InvalidInputException("scan_data_from_quack_client: a data stream '%s' already exists", id);
 		}
-		auto stream = make_shared_ptr<QuackInsertStream>(std::move(types), ordered);
+		auto stream = make_shared_ptr<QuackInsertStream>(std::move(types), ordered, capacity_bytes);
 		streams[id] = stream;
 		return stream;
 	}

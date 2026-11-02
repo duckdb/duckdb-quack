@@ -60,6 +60,7 @@ private:
 		                  fetcher.client_query_id, string(), duration_ms, response->Type(), error);
 
 		if (response->Type() == MessageType::ERROR_RESPONSE) {
+			client.NoteError(response->Cast<ErrorResponse>());
 			response->Cast<ErrorResponse>().Error().Throw();
 		}
 		if (response->Type() != FetchResponseMessage::TYPE) {
@@ -135,7 +136,7 @@ QuackFetcher::QuackFetcher(ClientContext &context, QuackClientConnection &connec
 	if (context.TryGetCurrentSetting("quack_debug_fetch_delay_ms", delay_val) && !delay_val.IsNull()) {
 		debug_delay_ms = delay_val.GetValue<uint64_t>();
 	}
-	// Claims start at 1: server-assigned FETCH batch indices are dense from 1 (the PREPARE batch is 0).
+	// Claims start at 1: FETCH batch indices are dense from 1 (the PREPARE batch is 0).
 	buffer = make_shared_ptr<QuackFetchBuffer>();
 
 	this->query_uuid = query_uuid;
@@ -216,12 +217,13 @@ void QuackFetcher::TopUp(ClientContext &context) {
 		}
 		// Each task asks for one index, in dense order. Its payload is encoded once here, with the
 		// current ack, and it does not change. An HTTP retry is therefore safe.
+		// Counted before the claim: a terminal answer must not see in_flight reach 0 while this index is unsent.
+		++in_flight;
 		auto request_index = next_request++;
 		FetchRequestMessage fetch_msg(connection_id, query_uuid, request_index, CurrentAck());
 		auto request_payload = make_uniq<MemoryStream>();
 		QuackClient::EncodeRequest(context, fetch_msg, *request_payload);
 		auto request_size = request_payload->GetPosition();
-		++in_flight;
 		queue->Register(make_uniq<QuackFetchDataTask>(*this, std::move(client), request_index,
 		                                              std::move(request_payload), request_size),
 		                request_size);

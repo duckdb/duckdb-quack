@@ -26,6 +26,9 @@ public:
 	void Checkpoint(ClientContext &context, bool force = false) override;
 
 private:
+	void DestroyTransaction(Transaction &transaction);
+
+private:
 	QuackCatalog &quack_catalog;
 	mutex transaction_lock;
 	reference_map_t<Transaction, unique_ptr<QuackTransaction>> transactions;

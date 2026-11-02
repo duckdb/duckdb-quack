@@ -7,7 +7,6 @@ add_library(
   quack_table.cpp
   quack_schema.cpp
   quack_transaction.cpp
-  quack_transaction.cpp
   quack_transaction_manager.cpp
   quack_view.cpp)
 set(EXTENSION_SOURCES

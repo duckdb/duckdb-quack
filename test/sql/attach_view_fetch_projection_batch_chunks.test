@@ -2,26 +2,17 @@
 # description: projected scan of an attached view spanning multiple fetch batches, by batch size
 # group: [sql]
 
-require quack
-
-require httpfs
-
-set ignore_error_messages __none__
+include test/template/quack_setup.test_template
 
 # force tiny fetch batches so even a small view spans many FETCH responses
-statement ok
+statement ok quack_db:quack_server_con
 set global quack_prepare_inline_rows=1;
 
-statement ok
+statement ok quack_db:quack_server_con
 set global quack_target_batch_bytes=1;
 
-foreach server 'quack:localhost'
-
-statement ok con1
-call quack_serve({server}, token='asdf');
-
 # 3-column view so a projected scan is narrower than the wire chunks
-statement ok
+statement ok quack_db:quack_server_con
 create view big_view as select i, i * 2 as j, 'payload_' || i as k from range(100_000) t(i);
 
 statement ok
@@ -62,7 +53,4 @@ select count(*), max(k) from (select i, k from rpc.big_view)
 statement ok con2
 detach rpc;
 
-statement ok con1
-call quack_stop({server});
-
-endloop
+include test/template/quack_teardown.test_template

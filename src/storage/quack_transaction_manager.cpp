@@ -1,4 +1,7 @@
 #include "storage/quack_transaction_manager.hpp"
+#include "storage/quack_catalog.hpp"
+
+#include <exception>
 
 namespace duckdb {
 
@@ -16,17 +19,45 @@ Transaction &QuackTransactionManager::StartTransaction(ClientContext &context) {
 }
 ErrorData QuackTransactionManager::CommitTransaction(ClientContext &context, Transaction &transaction) {
 	auto &quack_transaction = transaction.Cast<QuackTransaction>();
-	quack_transaction.Commit();
-	lock_guard<mutex> l(transaction_lock);
-	transactions.erase(transaction);
-	return ErrorData();
+	ErrorData error;
+	try {
+		quack_transaction.Commit();
+	} catch (const std::exception &ex) {
+		error = ErrorData(ex);
+	} catch (...) {
+		error = ErrorData("Server COMMIT failed");
+	}
+	if (error.HasError()) {
+		quack_catalog.InvalidateIfChangedSince(quack_transaction.StartVersion());
+	}
+	DestroyTransaction(transaction);
+	return error;
 }
 
 void QuackTransactionManager::RollbackTransaction(Transaction &transaction) {
 	auto &quack_transaction = transaction.Cast<QuackTransaction>();
-	quack_transaction.Rollback();
-	lock_guard<mutex> l(transaction_lock);
-	transactions.erase(transaction);
+	std::exception_ptr failure;
+	try {
+		quack_transaction.Rollback();
+	} catch (...) {
+		failure = std::current_exception();
+	}
+	quack_catalog.InvalidateIfChangedSince(quack_transaction.StartVersion());
+	DestroyTransaction(transaction);
+	if (failure) {
+		std::rethrow_exception(failure);
+	}
+}
+
+void QuackTransactionManager::DestroyTransaction(Transaction &transaction) {
+	unique_ptr<QuackTransaction> removed_transaction;
+	{
+		lock_guard<mutex> guard(transaction_lock);
+		auto entry = transactions.find(transaction);
+		D_ASSERT(entry != transactions.end());
+		removed_transaction = std::move(entry->second);
+		transactions.erase(entry);
+	}
 }
 
 void QuackTransactionManager::Checkpoint(ClientContext &context, bool force) {

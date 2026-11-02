@@ -104,6 +104,21 @@ CREATE TABLE remote.hello2 AS FROM VALUES ('world2') v(s);
 FROM hello2;
 ```
 
+### Selecting a schema and refreshing its catalog
+
+Use the `schema` attachment option to load one top-level schema and its descendants
+from each remote catalog:
+
+```sql
+ATTACH 'quack:localhost' AS scoped (schema 'wanted');
+CALL quack_clear_cache('scoped');
+```
+
+The optional catalog argument refreshes only that Quack attachment. Calling
+`quack_clear_cache()` without an argument refreshes every attached Quack catalog.
+Schema scoping limits catalog visibility and local DDL; explicit remote SQL remains
+available, so it does not provide server authorization.
+
 ## Development
 
 ### Managing dependencies

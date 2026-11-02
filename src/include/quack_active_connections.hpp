@@ -4,7 +4,7 @@ namespace duckdb {
 
 class TableFunction;
 
-class QuacktivityFunction {
+class QuackActiveConnectionsFunction {
 public:
 	static TableFunction GetFunction();
 };

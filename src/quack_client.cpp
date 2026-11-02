@@ -305,7 +305,7 @@ unique_ptr<QuackClient> QuackClient::GetClient(DatabaseInstance &db, const Quack
 	}
 	ExtensionHelper::AutoLoadExtension(db, "httpfs");
 	if (!db.ExtensionIsLoaded("httpfs")) {
-		throw MissingExtensionException("The rpc extension requires the httpfs extension to be loaded!");
+		throw MissingExtensionException("The quack extension requires the httpfs extension to be loaded!");
 	}
 
 	return make_uniq<HttpsQuackClient>(db, uri);

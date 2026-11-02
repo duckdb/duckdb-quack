@@ -23,7 +23,7 @@ statement ok quack_db:quack_server_con
 SET GLOBAL quack_target_batch_bytes = 65536;
 
 statement ok quack_db:quack_server_con
-SET GLOBAL quack_fetch_producer_buffer_bytes = 262144;
+SET GLOBAL quack_server_stream_buffer_bytes = 262144;
 
 statement ok
 CREATE SECRET (TYPE quack, TOKEN 'asdf');
@@ -66,6 +66,6 @@ statement ok quack_db:quack_server_con
 RESET GLOBAL quack_target_batch_bytes;
 
 statement ok quack_db:quack_server_con
-RESET GLOBAL quack_fetch_producer_buffer_bytes;
+RESET GLOBAL quack_server_stream_buffer_bytes;
 
 include test/template/quack_teardown.test_template

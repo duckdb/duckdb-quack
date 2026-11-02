@@ -331,7 +331,7 @@ reset async_threads;
 
 # --- Duplicate sends: every batch goes out two times, as a transport retry would do. The receiver
 # keys on the dense index and drops the second copy, so the row count must not change and the
-# FINALIZE count check must still agree.
+# terminal SEND_DATA count check must still agree.
 statement ok
 SET quack_target_batch_bytes=65536;
 

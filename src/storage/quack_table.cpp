@@ -2,6 +2,7 @@
 #include "storage/quack_schema.hpp"
 #include "storage/quack_table.hpp"
 #include "quack_scan.hpp"
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/statement/create_statement.hpp"
 #include "duckdb/parser/parsed_data/alter_info.hpp"
@@ -13,7 +14,7 @@
 namespace duckdb {
 
 unique_ptr<CreateInfo> ParseCreateTable(const string &sql) {
-	Parser parser;
+	auto parser = Parser::GetBuiltinParser();
 	parser.ParseQuery(sql);
 	if (parser.statements.size() != 1 || parser.statements[0]->type != StatementType::CREATE_STATEMENT) {
 		throw BinderException(
@@ -42,6 +43,17 @@ QuackTableSet::QuackTableSet(ClientContext &context, QuackSchemaCatalogEntry &pa
 			if (info->type != CatalogType::TABLE_ENTRY) {
 				throw InternalException("Expected a CREATE TABLE");
 			}
+			auto remote_name = parent.GetRemoteName(info->GetQualifiedName().Name()).ToString();
+			// The server enforces foreign keys, and binding them would look up tables in the unregistered catalog
+			auto &table_info = info->Cast<CreateTableInfo>();
+			vector<unique_ptr<Constraint>> constraints;
+			for (auto &constraint : table_info.constraints) {
+				if (constraint->type != ConstraintType::FOREIGN_KEY) {
+					constraints.push_back(std::move(constraint));
+				}
+			}
+			table_info.constraints = std::move(constraints);
+
 			// Bind to resolve the types. SKIP_BINDING leaves the column DEFAULT expressions unbound:
 			// binding them here would resolve functions through the catalog we are still constructing,
 			// which is not registered yet - a computed DEFAULT (now(), 1 + 0, nextval(...)) then aborts
@@ -53,8 +65,12 @@ QuackTableSet::QuackTableSet(ClientContext &context, QuackSchemaCatalogEntry &pa
 				bound_info = binder->BindCreateTableInfo(std::move(info), schema, AlterBindMode::SKIP_BINDING);
 			} catch (std::exception &ex) {
 				throw BinderException(
-				    "Failed to bind remote table while attaching quack catalog \"%s\" (schema \"%s\"): %s\nSQL: %s",
-				    catalog.GetName().GetIdentifierName(), schema.name.GetIdentifierName(), ex.what(), sql);
+				    "Failed to bind remote table %s while attaching quack catalog \"%s\": %s\n"
+				    "Quack ATTACH requires all remote table definitions to bind on the client.\n"
+				    "For Iceberg tables listed with UNKNOWN column types, attach the Iceberg catalog on the server "
+				    "with TABLE_RESOLUTION 'eager'.\n"
+				    "Alternatively, use quack_query() to run SQL on the server without ATTACH.\nSQL: %s",
+				    remote_name, catalog.GetName().GetIdentifierName(), ErrorData(ex).Message(), sql);
 			}
 			auto table = make_uniq<QuackTableCatalogEntry>(catalog, parent, bound_info->Base());
 			entry = std::move(table);
@@ -66,7 +82,8 @@ QuackTableSet::QuackTableSet(ClientContext &context, QuackSchemaCatalogEntry &pa
 			CreateViewInfo info(schema, view_name);
 			info.sql = QuackViewCatalogEntry::CreateViewSQL(catalog.GetName().GetIdentifierName(),
 			                                                parent.GetRemoteName(view_name));
-			info.query = CreateViewInfo::ParseSelect(info.sql);
+			auto parser = Parser::GetBuiltinParser();
+			info.query = CreateViewInfo::ParseSelect(parser, info.sql);
 
 			// bind to resolve the types
 			auto view = make_uniq<QuackViewCatalogEntry>(catalog, parent, info);

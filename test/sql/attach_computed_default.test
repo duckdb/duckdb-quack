@@ -2,29 +2,20 @@
 # description: ATTACH must not fail when remote tables have computed DEFAULT expressions (issue #132)
 # group: [sql]
 
-require quack
-
-require httpfs
-
-set ignore_error_messages __none__
-
-foreach server 'quack:localhost'
-
-statement ok con1
-call quack_serve({server}, token='asdf');
+include test/template/quack_setup.test_template
 
 # constant default (always worked)
-statement ok con1
+statement ok quack_db:quack_server_con
 create table t_const (x integer not null default 1);
 
 # computed defaults — previously aborted client ATTACH with "Catalog does not exist"
-statement ok con1
+statement ok quack_db:quack_server_con
 create table t_expr (x integer not null default 1 + 0);
 
-statement ok con1
+statement ok quack_db:quack_server_con
 create table t_ts (ts timestamptz default current_timestamp, v integer);
 
-statement ok con1
+statement ok quack_db:quack_server_con
 insert into t_const default values;
 insert into t_expr default values;
 insert into t_ts (v) values (42);
@@ -60,7 +51,4 @@ select count(*) from r.t_expr
 statement ok con2
 detach r
 
-statement ok con1
-call quack_stop({server})
-
-endloop
+include test/template/quack_teardown.test_template

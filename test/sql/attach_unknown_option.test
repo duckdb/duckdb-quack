@@ -1,0 +1,24 @@
+# name: test/sql/attach_unknown_option.test
+# description: an ATTACH option quack does not know is an error
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement error
+attach {server} as rpc (token 'asdf', foo_bar 1)
+----
+Unrecognized option for attach "foo_bar"
+
+statement error
+attach {server} as rpc (FOO_BAR 1, token 'asdf')
+----
+Unrecognized option for attach "foo_bar"
+
+# the options the core handles itself are not ours to reject
+statement ok
+attach {server} as rpc (token 'asdf', read_write, heartbeat_timeout 30)
+
+statement ok
+detach rpc
+
+include test/template/quack_teardown.test_template

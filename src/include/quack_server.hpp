@@ -22,28 +22,25 @@ class ClientContext;
 class QuackMessage;
 class Connection;
 class MemoryStream;
-class QueryResult;
 class DatabaseInstance;
 struct QuackResultStream;
-class PreparedStatement;
-struct QuackInsertStream;
 class ErrorData;
 
-enum class QuackQueryState : uint8_t { IDLE, ACTIVE, FINISHED, CANCELLED, QUACK_ERROR };
+enum class QuackQueryState : uint8_t { IDLE, ACTIVE, FINISHED, CANCELLED };
 
 //! The stream the connection's active query fills, one at a time. The query runs on a background
 //! thread with a rebalancing result collector, and the FETCH handlers drain the stream's buffer.
 struct QuackStatementState {
-	mutex lock;
-	shared_ptr<QuackResultStream> stream;
-	std::thread thread;
-	hugeint_t uuid = 0;
-	//! A late FETCH for this uuid gets this error. The stream and its payloads can then go away.
-	ErrorData abort_error;
+	annotated_mutex lock;
+	shared_ptr<QuackResultStream> stream DUCKDB_GUARDED_BY(lock);
+	std::thread thread DUCKDB_GUARDED_BY(lock);
+	hugeint_t query_uuid DUCKDB_GUARDED_BY(lock) = 0;
+	//! A late FETCH for this query_uuid gets this error. The stream and its payloads can then go away.
+	ErrorData abort_error DUCKDB_GUARDED_BY(lock);
 };
 
 struct QuackConnection {
-	QuackConnection(string session_id_p, idx_t heartbeat_timeout_seconds_p);
+	QuackConnection(string connection_id_p, idx_t heartbeat_timeout_seconds_p);
 	~QuackConnection();
 
 	//! Renew unless the timeout has already elapsed. Once expired, a lease cannot be revived.
@@ -55,7 +52,7 @@ struct QuackConnection {
 	mutex lock;
 	//! Held for a whole statement, because `duckdb_connection` runs one at a time. Only the query
 	//! driver takes it. Request handlers must not.
-	mutex statement_lock;
+	mutex execution_lock;
 	unique_ptr<Connection> duckdb_connection;
 	//! Replay cache of the last client query's result stream, null unless quack_enable_reconnects.
 	unique_ptr<QuackResultCache> result_cache;
@@ -63,9 +60,7 @@ struct QuackConnection {
 	shared_ptr<atomic<idx_t>> live_caches;
 	//! Rows held by result_cache
 	atomic<idx_t> cached_rows {DConstants::INVALID_INDEX};
-	//! Current query UUID
-	hugeint_t query_uuid;
-	string session_id;
+	string connection_id;
 
 	void SyncCachedRows() {
 		cached_rows = result_cache ? result_cache->retained_rows : DConstants::INVALID_INDEX;
@@ -82,7 +77,7 @@ struct QuackConnection {
 	bool cache_in_expiry_queue = false;
 
 	//! Stable per-client reconnect key: HMAC-SHA256(server_hmac_key, client_id). Intentionally excludes
-	//! session_id so it stays identical across (re)connections for the same client_id. Empty if no client_id.
+	//! connection_id so it stays identical across (re)connections for the same client_id. Empty if no client_id.
 	string client_id_hash;
 
 	//! Heartbeat and lease variables
@@ -96,12 +91,18 @@ struct QuackConnection {
 	atomic<QuackQueryState> query_state {QuackQueryState::IDLE};
 	timestamp_t query_started_at {0};
 
+	//! Only an ACTIVE query can finish, so a concurrent CANCEL is not overwritten
+	void MarkQueryFinished() {
+		auto expected = QuackQueryState::ACTIVE;
+		query_state.compare_exchange_strong(expected, QuackQueryState::FINISHED);
+	}
+
 	QuackStatementState statement;
 };
 
 struct QuackConnectionSnapshot {
 	string server_id;
-	string session_id;
+	string connection_id;
 	string client_id_hash;
 	string sql_query;
 	QuackQueryState query_state = QuackQueryState::IDLE;
@@ -114,7 +115,7 @@ enum class QuackServerState { UNINITIALIZED, WAITING_TO_START, RUNNING, CLOSED }
 
 struct CacheExpiryEntry {
 	timestamp_t served_at;
-	string session_id;
+	string connection_id;
 };
 
 struct CacheExpiresLater {
@@ -140,11 +141,11 @@ public:
 	virtual void Close() {};
 
 	shared_ptr<QuackConnection> GetConnection(const string &connection_id);
-	string CreateNewConnection(const string &session_id, const string &client_id_hash, idx_t heartbeat_timeout_seconds);
-	bool DisconnectConnection(const string &session_id);
-	// TODO need something to destroy connections
+	string CreateNewConnection(const string &connection_id, const string &client_id_hash,
+	                           idx_t heartbeat_timeout_seconds);
+	bool DisconnectConnection(const string &connection_id);
 
-	string GenerateSessionId();
+	string GenerateConnectionId();
 
 	//! Throw InvalidInputException if `token` doesn't meet requirements(currently, length >= 4)
 	static void ValidateToken(const string &token);
@@ -220,8 +221,6 @@ public:
 
 private:
 	static void ListenThread(HttpQuackServer *server, const string &listen_host, uint16_t listen_port);
-
-	unique_ptr<QuackMessage> ReadMessage(MemoryStream &read_stream);
 
 	unique_ptr<duckdb_httplib_openssl::Server> server;
 	mutex state_lock;

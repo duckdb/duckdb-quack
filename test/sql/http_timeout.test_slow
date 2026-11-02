@@ -2,20 +2,13 @@
 # description: quack owns its request timeout and does not inherit httpfs's http_timeout/http_retries
 # group: [sql]
 
-require quack
-
-require httpfs
-
-set ignore_error_messages __none__
-
-statement ok quack_db:quack_server_con
-call quack_serve('quack:localhost', token='asdf');
+include test/template/quack_setup.test_template
 
 statement ok con2
 create secret (type quack, token 'asdf')
 
 statement ok con2
-attach 'quack:localhost' as rpc
+attach {server} as rpc
 
 statement ok quack_db:quack_server_con
 CREATE TABLE exec_log(started TIMESTAMP, slept BOOLEAN);
@@ -28,12 +21,11 @@ SET http_retries=3;
 
 # The client waits for the query rather than erroring at 1 second.
 statement ok
-FROM quack_query('quack:localhost', 'INSERT INTO exec_log SELECT now(), sleep_ms(2000)', token='asdf')
+FROM quack_query({server}, 'INSERT INTO exec_log SELECT now(), sleep_ms(2000)', token='asdf')
 
 query I quack_db:quack_server_con
 SELECT count(*) FROM exec_log;
 ----
 1
 
-statement ok quack_db:quack_server_con
-call quack_stop('quack:localhost');
+include test/template/quack_teardown.test_template

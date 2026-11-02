@@ -9,7 +9,7 @@
 #include "quack_scan.hpp"
 #include "quack_client.hpp"
 #include "quack_fetch_ahead.hpp"
-#include "include/storage/quack_catalog.hpp"
+#include "storage/quack_catalog.hpp"
 #include "storage/quack_transaction.hpp"
 
 #include <queue>
@@ -52,8 +52,7 @@ static unique_ptr<FunctionData> QuackScanBind(ClientContext &context, TableFunct
 		server_uri.SetSslFingerprint(ssl_fingerprint);
 	}
 
-	// Resolve auth token: prefer a quack secret scoped to this URI; fall back to the
-	// global rpc_default_token setting. Mirrors the logic in QuackCatalog::QuackCatalog.
+	// An explicit token wins; otherwise ConnectToServer takes it from a quack secret scoped to this URI.
 	string token;
 	if (input.named_parameters.find("token") != input.named_parameters.end()) {
 		token = input.named_parameters["token"].GetValue<string>();
@@ -144,9 +143,8 @@ static unique_ptr<FunctionData> QuackScanBindCatalogName(ClientContext &context,
 	bind_data->query_uuid = bind_response->QueryUUID();
 	if (refresh_catalog) {
 		// the query was a statement pushed down by the RemotePushdownOptimizer - the server has already
-		// executed it (PREPARE runs the query), so reload our snapshot of the remote catalog. Such a
-		// statement is always bound on its own, so no catalog entry is in use here
-		catalog.Refresh(context);
+		// executed it (PREPARE runs the query), so our snapshot of the remote catalog is out of date
+		catalog.Invalidate();
 	}
 	return bind_data;
 }
@@ -178,7 +176,7 @@ struct QuackScanLocalState : public LocalTableFunctionState {
 	~QuackScanLocalState() override {
 	}
 
-	//! Server-assigned index of the batch currently being drained; surfaced via get_partition_data
+	//! Claimed FETCH index of the batch currently being drained; surfaced via get_partition_data
 	//! so order-preserving operators (CTAS, COPY TO) can run the scan in parallel without losing order.
 	optional_idx current_batch_index;
 
@@ -233,8 +231,6 @@ static string BuildPushdownQuery(const QuackScanBindData &bind_data, const Table
 	string query;
 
 	// Projection: select only the columns DuckDB actually needs in the output.
-	// With filter_prune, projection_ids indexes into column_ids for output columns only.
-	// Filter-only columns are in column_ids but NOT in projection_ids — they go in WHERE, not SELECT.
 	if (!input.column_indexes.empty()) {
 		for (auto &col_id : input.column_indexes) {
 			if (!query.empty()) {
@@ -257,49 +253,7 @@ static string BuildPushdownQuery(const QuackScanBindData &bind_data, const Table
 		}
 		query = "SELECT " + query + " ";
 	}
-	// 	vector<string> selected_columns;
-	// 	if (!input.projection_ids.empty()) {
-	// 		for (auto &proj_id : input.projection_ids) {
-	// 			auto col_id = input.column_ids[proj_id];
-	// 			if (IsRowIdColumnId(col_id) || col_id >= bind_data.column_names.size()) {
-	// 				continue;
-	// 			}
-	// 			selected_columns.push_back(KeywordHelper::WriteOptionallyQuoted(bind_data.column_names[col_id].GetIdentifierName()));
-	// 		}
-	// 	} else {
-	// 		for (auto &col_id : input.column_ids) {
-	// 			if (IsRowIdColumnId(col_id) || col_id >= bind_data.column_names.size()) {
-	// 				continue;
-	// 			}
-	// 			selected_columns.push_back(KeywordHelper::WriteOptionallyQuoted(bind_data.column_names[col_id].GetIdentifierName()));
-	// 		}
-	// 	}
-	// 	if (!selected_columns.empty()) {
-	// 		query = "SELECT " + StringUtil::Join(selected_columns, ", ") + " ";
-	// 	}
-	// }
 	query += StringUtil::Format("FROM %s", bind_data.qualified_table_name.ToString());
-	//
-	// // Filters: build WHERE clause from pushable filters
-	// if (input.filters) {
-	// 	vector<string> where_clauses;
-	// 	for (auto &entry : input.filters->filters) {
-	// 		auto col_idx = entry.second.GetIndex();
-	// 		if (col_idx >= bind_data.column_names.size()) {
-	// 			continue;
-	// 		}
-	// 		auto &filter = entry.Filter();
-	// 		if (!CanPushdownFilter(filter)) {
-	// 			continue;
-	// 		}
-	// 		auto col_name = KeywordHelper::WriteOptionallyQuoted(bind_data.column_names[col_idx].GetIdentifierName());
-	// 		where_clauses.push_back(filter.ToString(col_name));
-	// 	}
-	// 	if (!where_clauses.empty()) {
-	// 		query += " WHERE " + StringUtil::Join(where_clauses, " AND ");
-	// 	}
-	// }
-
 	return query;
 }
 
@@ -509,11 +463,11 @@ InsertionOrderPreservingMap<string> QuackScanToString(TableFunctionToStringInput
 }
 
 void QuackScanSerialize(Serializer &serializer, const optional_ptr<FunctionData> bind_data,
-                        const TableFunction &function) {
+                        const BoundTableFunction &function) {
 	throw NotImplementedException("Quack scans cannot be serialized (yet?)");
 }
 
-unique_ptr<FunctionData> QuackScanDeserialize(Deserializer &deserializer, TableFunction &function) {
+unique_ptr<FunctionData> QuackScanDeserialize(Deserializer &deserializer, BoundTableFunction &function) {
 	throw NotImplementedException("Quack scans cannot be deserialized (yet?)");
 }
 
@@ -528,22 +482,24 @@ static virtual_column_map_t QuackGetVirtualColumns(ClientContext &, optional_ptr
 	return result;
 }
 
-BindInfo QuackScanGetBindInfo(const optional_ptr<FunctionData> bind_data_p) {
-	auto &bind_data = bind_data_p->CastNoConst<QuackScanBindData>();
-	if (bind_data.table_entry) {
-		return BindInfo(*bind_data.table_entry);
-	}
-	return BindInfo(ScanType::EXTERNAL);
+optional_ptr<TableCatalogEntry> QuackScanGetTableEntry(optional_ptr<const FunctionData> bind_data_p) {
+	auto &bind_data = bind_data_p->Cast<QuackScanBindData>();
+	return bind_data.table_entry;
 }
 
 TableFunction QuackScanFunction::GetFunction() {
-	auto fun = TableFunction("quack_query", {LogicalType::VARCHAR, LogicalType::VARCHAR}, QuackScan, QuackScanBind,
-	                         QuackScanInitGlobal, QuackScanInitLocal);
-	fun.named_parameters["disable_ssl"] = LogicalType::BOOLEAN;
-	fun.named_parameters["ssl_fingerprint"] = LogicalType::VARCHAR;
-	fun.named_parameters["token"] = LogicalType::VARCHAR;
-	fun.named_parameters["client_id"] = LogicalType::VARCHAR;
-	fun.named_parameters["heartbeat_timeout"] = LogicalType::UBIGINT;
+	FunctionSignature signature;
+	signature.AddParameter("uri", LogicalType::VARCHAR)
+	    .AddParameter("query", LogicalType::VARCHAR)
+	    .WithTypedKwargs("options", [&](TypedKwargs &options) {
+		    options.Add("disable_ssl", LogicalType::BOOLEAN)
+		        .Add("ssl_fingerprint", LogicalType::VARCHAR)
+		        .Add("token", LogicalType::VARCHAR)
+		        .Add("client_id", LogicalType::VARCHAR)
+		        .Add("heartbeat_timeout", LogicalType::UBIGINT);
+	    });
+	auto fun = TableFunction("quack_query", std::move(signature), QuackScan, QuackScanBind, QuackScanInitGlobal,
+	                         QuackScanInitLocal);
 
 	fun.projection_pushdown = true;
 	fun.get_partition_data = QuackScanGetPartitionData;
@@ -551,24 +507,28 @@ TableFunction QuackScanFunction::GetFunction() {
 	fun.serialize = QuackScanSerialize;
 	fun.deserialize = QuackScanDeserialize;
 	fun.get_virtual_columns = QuackGetVirtualColumns;
-	fun.get_bind_info = QuackScanGetBindInfo;
+	fun.get_table_entry = QuackScanGetTableEntry;
 	// fun.filter_pushdown = true;
 	// fun.filter_prune = true;
 	return fun;
 }
 
 TableFunction QuackScanByNameFunction::GetFunction() {
-	auto fun = TableFunction("quack_query_by_name", {LogicalType::VARCHAR, LogicalType::VARCHAR}, QuackScan,
-	                         QuackScanBindCatalogName, QuackScanInitGlobal, QuackScanInitLocal);
+	FunctionSignature signature;
+	signature.AddParameter("catalog", LogicalType::VARCHAR)
+	    .AddParameter("query", LogicalType::VARCHAR)
+	    .WithTypedKwargs("options", [&](TypedKwargs &options) {
+		    options.Add("use_transaction", LogicalType::BOOLEAN).Add("refresh_catalog", LogicalType::BOOLEAN);
+	    });
+	auto fun = TableFunction("quack_query_by_name", std::move(signature), QuackScan, QuackScanBindCatalogName,
+	                         QuackScanInitGlobal, QuackScanInitLocal);
 	fun.projection_pushdown = true;
 	fun.get_partition_data = QuackScanGetPartitionData;
 	fun.to_string = QuackScanToString;
 	fun.serialize = QuackScanSerialize;
 	fun.deserialize = QuackScanDeserialize;
 	fun.get_virtual_columns = QuackGetVirtualColumns;
-	fun.get_bind_info = QuackScanGetBindInfo;
-	fun.named_parameters["use_transaction"] = LogicalType::BOOLEAN;
-	fun.named_parameters["refresh_catalog"] = LogicalType::BOOLEAN;
+	fun.get_table_entry = QuackScanGetTableEntry;
 	// fun.filter_pushdown = true;
 	// fun.filter_prune = true;
 	return fun;

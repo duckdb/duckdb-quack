@@ -2,16 +2,7 @@
 # description: RETURNING over quack returns the real rows when the statement is pushed down, and is a clean error - never silently-wrong data - when the insert is planned locally
 # group: [sql]
 
-require quack
-
-require httpfs
-
-set ignore_error_messages __none__
-
-foreach server 'quack:localhost'
-
-statement ok con1
-call quack_serve({server}, token='asdf');
+include test/template/quack_setup.test_template
 
 statement ok con2
 attach {server} as d (token 'asdf');
@@ -86,7 +77,4 @@ delete from d.items where id = 1 returning *;
 statement ok con2
 detach d;
 
-statement ok con1
-call quack_stop({server});
-
-endloop
+include test/template/quack_teardown.test_template

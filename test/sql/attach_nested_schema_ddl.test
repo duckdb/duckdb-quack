@@ -71,7 +71,7 @@ insert into memory.main.local_src select * from range(2000) t(i);
 query II
 explain insert into s1.child.t select * from memory.main.local_src
 ----
-physical_plan	<REGEX>:.*Rpc Insert.*
+physical_plan	<REGEX>:.*Quack Insert.*
 
 statement ok
 insert into s1.child.t select * from memory.main.local_src;
@@ -82,6 +82,11 @@ select count(*), sum(i) from s1.child.t
 2000	1999000
 
 # CTAS in a nested schema
+query II
+explain create table s1.child.ctas as select i * 2 as d from memory.main.local_src
+----
+physical_plan	<REGEX>:.*Quack Create Table As.*
+
 statement ok
 create table s1.child.ctas as select i * 2 as d from memory.main.local_src;
 

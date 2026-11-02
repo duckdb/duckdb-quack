@@ -32,7 +32,9 @@ false
 
 # add a second server, verify count and ordering-agnostic content
 statement ok quack_db:quack_server_con
-FROM quack_serve('quack:127.0.0.1:9495', token='abcd');
+set variable second_listen_uri = (select concat('''', listen_uri, '''') from quack_serve('quack:127.0.0.1:0', token='abcd'));
+
+set variable second_server <variable:quack_server_con:second_listen_uri>
 
 query I quack_db:quack_server_con
 SELECT count(*) FROM quack_server_list();
@@ -40,7 +42,7 @@ SELECT count(*) FROM quack_server_list();
 2
 
 statement ok quack_db:quack_server_con
-CALL quack_stop('quack:127.0.0.1:9495');
+CALL quack_stop({second_server});
 
 include test/template/quack_teardown.test_template
 
