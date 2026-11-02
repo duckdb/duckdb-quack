@@ -112,8 +112,8 @@ static unique_ptr<Catalog> QuackAttach(optional_ptr<StorageExtensionInfo> storag
 		                              name);
 	}
 	// the options the core did not consume are ours; the parser lower-cases their names
-	static const unordered_set<string> KNOWN_OPTIONS {"token",           "secret",    "disable_ssl",
-	                                                  "ssl_fingerprint", "client_id", "heartbeat_timeout"};
+	static const unordered_set<string> KNOWN_OPTIONS {
+	    "token", "secret", "disable_ssl", "ssl_fingerprint", "client_id", "heartbeat_timeout", "schema"};
 	for (auto &entry : attach_options.options) {
 		if (KNOWN_OPTIONS.find(entry.first) == KNOWN_OPTIONS.end()) {
 			throw BinderException("Unrecognized option for attach \"%s\"", entry.first);
