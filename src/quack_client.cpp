@@ -12,6 +12,7 @@
 
 #include "quack_ssl_key_generator.hpp"
 
+#include "quack_affinity.hpp"
 #include "quack_client.hpp"
 #include "quack_secret.hpp"
 #include "quack_session_state.hpp"
@@ -127,6 +128,9 @@ string HttpsQuackClient::PostRawLocked(const_data_ptr_t data, idx_t size) {
 	auto &http_util = HTTPUtil::Get(db);
 	auto request_url = uri.Http() + "/quack";
 	HTTPHeaders headers = extra_headers;
+	if (affinity) {
+		affinity->AddRequestHeaders(headers, Timestamp::GetCurrentTimestamp());
+	}
 	PostRequestInfo post_request(request_url, headers, *http_params, data, size);
 	unique_ptr<HTTPResponse> response;
 	try {
@@ -134,6 +138,10 @@ string HttpsQuackClient::PostRawLocked(const_data_ptr_t data, idx_t size) {
 	} catch (std::exception &ex) {
 		ErrorData error(ex);
 		throw IOException("Failed to send message: %s", error.Message());
+	}
+	// any response that arrived, also non-200 one: an ingress may set cookies on a 503
+	if (response && affinity && response->headers.HasHeader("Set-Cookie")) {
+		affinity->Absorb(response->headers.GetHeaderValues("Set-Cookie"), Timestamp::GetCurrentTimestamp());
 	}
 	if (!response || !response->Success()) {
 		string error = response ? response->GetError() : "no response";
@@ -253,7 +261,15 @@ void PinnedHttpsQuackClient::PrepareTeardownRequest() {
 }
 
 string PinnedHttpsQuackClient::PostRawLocked(const_data_ptr_t data, idx_t size) {
-	auto result = https_client->Post("/quack", const_char_ptr_cast(data), size, "application/vnd.duckdb");
+	duckdb_httplib_openssl::Headers headers;
+	if (affinity) {
+		HTTPHeaders affinity_headers;
+		affinity->AddRequestHeaders(affinity_headers, Timestamp::GetCurrentTimestamp());
+		for (auto &header : affinity_headers) {
+			headers.emplace(header.first, header.second);
+		}
+	}
+	auto result = https_client->Post("/quack", headers, const_char_ptr_cast(data), size, "application/vnd.duckdb");
 	if (!result) {
 		auto error = result.error();
 		if (error == duckdb_httplib_openssl::Error::SSLServerVerification) {
@@ -263,6 +279,15 @@ string PinnedHttpsQuackClient::PostRawLocked(const_data_ptr_t data, idx_t size) 
 		}
 		throw IOException("Failed to send message: %s error for HTTP POST to '%s/quack'",
 		                  duckdb_httplib_openssl::to_string(error), uri.Http());
+	}
+	// any response that arrived, also non-200 one
+	if (affinity) {
+		vector<string> set_cookie_values;
+		auto set_cookie_count = result->get_header_value_count("Set-Cookie");
+		for (idx_t i = 0; i < set_cookie_count; i++) {
+			set_cookie_values.push_back(result->get_header_value("Set-Cookie", "", i));
+		}
+		affinity->Absorb(set_cookie_values, Timestamp::GetCurrentTimestamp());
 	}
 	if (result->status != 200) {
 		throw IOException("Failed to send message: HTTP %d for HTTP POST to '%s/quack'", result->status, uri.Http());
@@ -315,10 +340,11 @@ unique_ptr<QuackClient> QuackClient::GetClient(ClientContext &context, const Qua
 	return GetClient(*context.db, uri);
 }
 
-QuackClientConnection::QuackClientConnection(DatabaseInstance &db_p, unique_ptr<QuackClient> client_p, QuackUri uri_p,
+QuackClientConnection::QuackClientConnection(DatabaseInstance &db_p, unique_ptr<QuackClient> client_p,
+                                             shared_ptr<QuackConnectionAffinity> affinity_p, QuackUri uri_p,
                                              string connection_id_p, idx_t heartbeat_timeout_seconds_p,
                                              idx_t max_connections_cached_p)
-    : db(db_p), uri(std::move(uri_p)), connection_id(std::move(connection_id_p)),
+    : db(db_p), uri(std::move(uri_p)), connection_id(std::move(connection_id_p)), affinity(std::move(affinity_p)),
       heartbeat_timeout_seconds(heartbeat_timeout_seconds_p), max_connections_cached(max_connections_cached_p) {
 	if (client_p) {
 		StoreClient(std::move(client_p));
@@ -433,6 +459,11 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 	// open a HTTP client to the server
 	auto client = QuackClient::GetClient(context, server_uri);
 
+	// The connection's affinity starts with the handshake: the ingress sets its cookie on this response.
+	// The request itself goes out bare (empty jar, no id), so a new connection is placed freely.
+	auto affinity = make_shared_ptr<QuackConnectionAffinity>();
+	client->SetAffinity(affinity);
+
 	// submit the connection request
 	auto connection_request_response = client->Request<ConnectionResponseMessage>(
 	    context, make_uniq<ConnectionRequestMessage>(token, std::move(client_id), heartbeat_timeout_seconds));
@@ -445,12 +476,13 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 	ValidateHeartbeatTimeout(accepted_heartbeat_timeout_seconds);
 	// success! we got a connection id
 	auto connection_id = connection_request_response->ConnectionId();
+	affinity->SetConnectionId(connection_id);
 	// Cache at most one client per async send slot: pending SEND_DATA tasks can check out far more
 	// clients than ever POST concurrently, and each cached client pins a server connection slot.
 	idx_t pool_size = MaxValue<idx_t>(1, (idx_t)TaskScheduler::GetScheduler(context).NumberOfAsyncThreads());
 	auto connection =
-	    make_shared_ptr<QuackClientConnection>(*context.db, std::move(client), server_uri, std::move(connection_id),
-	                                           accepted_heartbeat_timeout_seconds, pool_size);
+	    make_shared_ptr<QuackClientConnection>(*context.db, std::move(client), std::move(affinity), server_uri,
+	                                           std::move(connection_id), accepted_heartbeat_timeout_seconds, pool_size);
 	connection->StartHeartbeat();
 	return connection;
 }
@@ -466,6 +498,7 @@ unique_ptr<QuackClient> QuackClientConnection::TakeClient(optional_ptr<ClientCon
 	}
 	if (!result) {
 		result = QuackClient::GetClient(db, uri);
+		result->SetAffinity(affinity);
 	}
 	result->SetRequestLogger(context ? context->logger : nullptr);
 	return result;
