@@ -138,16 +138,22 @@ void SslKeyGenerator::GenerateSslKeys(const std::string &cert_filename, const st
 		ASN1_INTEGER_set(X509_get_serialNumber(cert.get()), 1);
 		X509_gmtime_adj(X509_get_notBefore(cert.get()), 0);
 		X509_gmtime_adj(X509_get_notAfter(cert.get()), cert_days_valid * 24 * 3600);
-		X509_name_st *name = X509_get_subject_name(cert.get());
+		// OpenSSL 4 returns a const X509_NAME from X509_get_subject_name(),
+		// so build the name separately and set it as subject and issuer
+		std::unique_ptr<X509_NAME, void (*)(X509_NAME *)> name {X509_NAME_new(), X509_NAME_free};
+		if (!name) {
+			throw std::runtime_error("Error creating certificate name");
+		}
 
 		const unsigned char common_name[] = "localhost";
 
 		// TODO do we need this other stuff?
-		// X509_NAME_add_entry_by_txt(name, "C", MBSTRING_ASC, country, -1, -1, 0);
-		// X509_NAME_add_entry_by_txt(name, "O", MBSTRING_ASC, company, -1, -1, 0);
-		X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, common_name, -1, -1, 0);
+		// X509_NAME_add_entry_by_txt(name.get(), "C", MBSTRING_ASC, country, -1, -1, 0);
+		// X509_NAME_add_entry_by_txt(name.get(), "O", MBSTRING_ASC, company, -1, -1, 0);
+		X509_NAME_add_entry_by_txt(name.get(), "CN", MBSTRING_ASC, common_name, -1, -1, 0);
 
-		if (X509_set_issuer_name(cert.get(), name) != 1 || X509_set_pubkey(cert.get(), rsa.get()) != 1 ||
+		if (X509_set_subject_name(cert.get(), name.get()) != 1 ||
+		    X509_set_issuer_name(cert.get(), name.get()) != 1 || X509_set_pubkey(cert.get(), rsa.get()) != 1 ||
 		    X509_sign(cert.get(), rsa.get(), EVP_sha256()) == 0) {
 			throw std::runtime_error("Error creating certificate");
 		}
