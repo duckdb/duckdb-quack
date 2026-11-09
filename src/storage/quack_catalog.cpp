@@ -5,6 +5,8 @@
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/secret/secret.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
+#include "duckdb/catalog/standard_entry.hpp"
+#include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/parser/sql_statement.hpp"
@@ -81,7 +83,8 @@ optional_ptr<SchemaCatalogEntry> QuackCatalog::LookupSchema(CatalogTransaction t
 	auto &context = transaction.GetContext();
 	auto schema_path = GetSchemaPath(schema_lookup);
 	auto schema = FindSchema(context, schema_path);
-	if (!schema && !schema_path.empty() && !NamesDatabase(context, schema_path) && ReloadOnMiss(context)) {
+	if (!schema && !schema_path.empty() && !NamesDatabase(context, schema_path) &&
+	    !SystemHoldsSchema(context, schema_path) && ReloadOnMiss(context)) {
 		schema = FindSchema(context, schema_path);
 	}
 	if (!schema && !schema_path.empty() && if_not_found == OnEntryNotFound::THROW_EXCEPTION) {
@@ -112,6 +115,60 @@ bool QuackCatalog::NamesDatabase(ClientContext &context, const vector<Identifier
 	// the binder tries a lone name as a schema of the default catalog before it tries it as a database: USE
 	// of this catalog while it is the default looks for a schema named like it on every run
 	return schema_path.size() == 1 && DatabaseManager::Get(context).GetDatabase(context, schema_path[0]);
+}
+
+static string OidKey(CatalogEntry &entry) {
+	// tables and views share one namespace in a schema; schemas are keyed by their whole path
+	vector<Identifier> path;
+	string kind;
+	if (entry.type == CatalogType::SCHEMA_ENTRY) {
+		kind = "s";
+		path = entry.Cast<SchemaCatalogEntry>().GetSchemaPath();
+	} else {
+		kind = "t";
+		path = entry.Cast<StandardEntry>().schema.GetSchemaPath();
+		path.push_back(entry.name);
+	}
+	string key = kind;
+	for (auto &part : path) {
+		key += '\x1f';
+		key += StringUtil::Lower(part.GetIdentifierName());
+	}
+	return key;
+}
+
+void QuackCatalog::KeepOid(CatalogEntry &entry) {
+	if (entry.type != CatalogType::SCHEMA_ENTRY && entry.type != CatalogType::TABLE_ENTRY &&
+	    entry.type != CatalogType::VIEW_ENTRY) {
+		return;
+	}
+	auto key = OidKey(entry);
+	lock_guard<mutex> guard(oid_lock);
+	auto kept = kept_oids.find(key);
+	if (kept != kept_oids.end()) {
+		entry.oid = kept->second;
+		return;
+	}
+	kept_oids.emplace(std::move(key), entry.oid);
+}
+
+bool QuackCatalog::SystemHoldsSchema(ClientContext &context, const vector<Identifier> &schema_path) {
+	if (schema_path.size() != 1) {
+		return false;
+	}
+	auto &system = Catalog::GetSystemCatalog(context);
+	return system.GetSchema(context, schema_path[0], OnEntryNotFound::RETURN_NULL) != nullptr;
+}
+
+bool QuackCatalog::SystemHoldsTable(ClientContext &context, const string &name) {
+	auto &system = Catalog::GetSystemCatalog(context);
+	for (auto schema : {DEFAULT_SCHEMA, "pg_catalog"}) {
+		if (system.GetEntry(context, CatalogType::TABLE_ENTRY, Identifier(schema), Identifier(name),
+		                    OnEntryNotFound::RETURN_NULL)) {
+			return true;
+		}
+	}
+	return false;
 }
 
 bool QuackCatalog::ReloadOnMiss(ClientContext &context) {
@@ -279,7 +336,9 @@ optional_ptr<CatalogEntry> QuackCatalog::CreateSchema(CatalogTransaction transac
 	if (existing && info.on_conflict != OnCreateConflict::REPLACE_ON_CONFLICT) {
 		return existing;
 	}
-	return quack_transaction.Retain(make_uniq<QuackSchemaCatalogEntry>(*this, info, parent.get()));
+	auto schema = make_uniq<QuackSchemaCatalogEntry>(*this, info, parent.get());
+	KeepOid(*schema);
+	return quack_transaction.Retain(std::move(schema));
 }
 
 //! Report a schema and every schema nested inside it
