@@ -3,6 +3,7 @@
 #include <cstdlib>
 
 #include "duckdb/catalog/default/default_table_functions.hpp"
+#include "duckdb/common/limits.hpp"
 #include "duckdb/common/types/uuid.hpp"
 #include "duckdb/logging/log_manager.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -44,6 +45,18 @@ static void ValidateControlTimeoutSetting(ClientContext &, SetScope, Value &para
 		throw InvalidInputException("quack_control_timeout cannot be null");
 	}
 	QuackClient::ValidateControlTimeout(parameter.GetValue<idx_t>());
+}
+
+static void ValidateHttpTimeoutSetting(ClientContext &, SetScope, Value &parameter) {
+	if (parameter.IsNull()) {
+		throw InvalidInputException("quack_http_timeout cannot be null");
+	}
+	// Socket polling converts these seconds to signed 32-bit milliseconds.
+	const auto maximum = NumericCast<idx_t>(NumericLimits<int32_t>::Maximum() / 1000);
+	const auto timeout = parameter.GetValue<idx_t>();
+	if (timeout == 0 || timeout > maximum) {
+		throw InvalidInputException("quack_http_timeout must be between 1 and %llu seconds", maximum);
+	}
 }
 
 static unique_ptr<BaseSecret> CreateQuackSecretFromConfig(ClientContext &, CreateSecretInput &input) {
@@ -216,8 +229,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    SetScope::GLOBAL);
 
 	config.AddExtensionOption("quack_http_timeout", "Seconds a client waits for the server to answer one request",
-	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_HTTP_TIMEOUT_DEFAULT), nullptr,
-	                          SetScope::GLOBAL);
+	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_HTTP_TIMEOUT_DEFAULT),
+	                          ValidateHttpTimeoutSetting, SetScope::GLOBAL);
 	config.AddExtensionOption("quack_server_keep_alive_timeout",
 	                          "Seconds an idle keep-alive connection is kept open by the RPC server",
 	                          LogicalType::UBIGINT, Value::UBIGINT(300), nullptr, SetScope::GLOBAL);
