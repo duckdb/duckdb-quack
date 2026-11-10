@@ -81,13 +81,15 @@ unique_ptr<GlobalSinkState> QuackInsert::GetGlobalSinkState(ClientContext &conte
 
 	// inline_rows = 0, because the statement waits for our batches and has no row to answer with. The
 	// scan registers the stream while it binds, so PREPARE must land before the first batch.
+	// Own cancellation before PREPARE: the server may start waiting for batches even when the
+	// caller is interrupted before receiving its response.
+	auto emitter = MakeQuackSendDataEmitter(context, *table_entry, std::move(stream_id), query_uuid, debug_delay_ms,
+	                                        debug_duplicate_sends, debug_drop_batch);
 	auto client_wrapper = quack_catalog.GetClientConnection()->GetClient(context);
 	auto prepare = make_uniq<PrepareRequestMessage>(quack_catalog.GetConnectionId(), sql, query_uuid);
 	prepare->SetInlineRows(optional_idx(0));
 	client_wrapper->GetClient().Request<PrepareResponseMessage>(context, std::move(prepare));
 
-	auto emitter = MakeQuackSendDataEmitter(context, *table_entry, std::move(stream_id), query_uuid, debug_delay_ms,
-	                                        debug_duplicate_sends, debug_drop_batch);
 	return MakeQuackRebalancerGlobalState(context, types, order_mode, std::move(emitter));
 }
 
