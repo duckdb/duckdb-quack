@@ -12,6 +12,6 @@ duckdb_extension_load(autocomplete)
 if("httpfs" IN_LIST CORE_EXTENSIONS)
     duckdb_extension_load(httpfs
         GIT_URL https://github.com/duckdb/duckdb-httpfs
-        GIT_TAG 60b69a2aa02b3b6bc8d5cce29fbb6125830c6687
+        GIT_TAG 7b186077bb232b05549be494b1583c5b0b1ad4ec
     )
 endif()
