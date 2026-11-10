@@ -82,7 +82,10 @@ WITH RECURSIVE schema_tree AS (
 	WHERE parent_schema_oid IS NULL
 )";
 	if (!schema_filter.empty()) {
-		query += StringUtil::Format("AND schema_name = %s\n", SQLString(schema_filter));
+		// Identifiers fold ASCII letters only; SQL lower() would also conflate distinct Unicode names.
+		query += StringUtil::Format(
+		    "AND translate(schema_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = %s\n",
+		    SQLString(StringUtil::Lower(schema_filter)));
 	}
 	query += R"(
 	UNION ALL
