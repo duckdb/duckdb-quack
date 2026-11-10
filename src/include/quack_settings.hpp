@@ -28,6 +28,8 @@ idx_t QuackGetUBigintSetting(DatabaseInstance &db, const char *name, idx_t defau
 
 //! Seconds a client waits for the server to answer one request.
 idx_t QuackHttpTimeout(DatabaseInstance &db);
+//! Validate both SQL settings and values supplied directly through database configuration.
+void QuackValidateHttpTimeout(idx_t timeout);
 //! Control requests have their own shorter timeout, capped by the HTTP timeout.
 idx_t QuackControlTimeout(DatabaseInstance &db);
 

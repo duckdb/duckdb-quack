@@ -51,12 +51,7 @@ static void ValidateHttpTimeoutSetting(ClientContext &, SetScope, Value &paramet
 	if (parameter.IsNull()) {
 		throw InvalidInputException("quack_http_timeout cannot be null");
 	}
-	// Socket polling converts these seconds to signed 32-bit milliseconds.
-	const auto maximum = NumericCast<idx_t>(NumericLimits<int32_t>::Maximum() / 1000);
-	const auto timeout = parameter.GetValue<idx_t>();
-	if (timeout == 0 || timeout > maximum) {
-		throw InvalidInputException("quack_http_timeout must be between 1 and %llu seconds", maximum);
-	}
+	QuackValidateHttpTimeout(parameter.GetValue<idx_t>());
 }
 
 static unique_ptr<BaseSecret> CreateQuackSecretFromConfig(ClientContext &, CreateSecretInput &input) {

@@ -1,5 +1,7 @@
 #include "quack_settings.hpp"
 
+#include "duckdb/common/exception.hpp"
+#include "duckdb/common/limits.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
@@ -29,7 +31,17 @@ idx_t QuackControlTimeout(DatabaseInstance &db) {
 }
 
 idx_t QuackHttpTimeout(DatabaseInstance &db) {
-	return MaxValue<idx_t>(1, QuackGetUBigintSetting(db, "quack_http_timeout", QUACK_HTTP_TIMEOUT_DEFAULT));
+	const auto timeout = QuackGetUBigintSetting(db, "quack_http_timeout", QUACK_HTTP_TIMEOUT_DEFAULT);
+	QuackValidateHttpTimeout(timeout);
+	return timeout;
+}
+
+void QuackValidateHttpTimeout(idx_t timeout) {
+	// Socket polling converts these seconds to signed 32-bit milliseconds.
+	const auto maximum = NumericCast<idx_t>(NumericLimits<int32_t>::Maximum() / 1000);
+	if (timeout == 0 || timeout > maximum) {
+		throw InvalidInputException("quack_http_timeout must be between 1 and %llu seconds", maximum);
+	}
 }
 
 idx_t QuackServerStreamBufferBytes(DatabaseInstance &db) {
