@@ -141,19 +141,18 @@ create table big_src as select i from range(200000) t(i);
 statement ok
 set enable_logging = true; set logging_storage = 'memory'; set logging_level = 'debug';
 
-# The first batch already hits the existing key. The server refuses the sends after that, so the
-# client does not load all ~100 batches. The delay keeps the sends slower than the server's
-# failure, so the early stop is deterministic.
-statement ok
-set quack_debug_send_delay_ms=5;
+# Keep the server from accepting the entire upload before it executes the first batch.
+# That batch hits the existing key and subsequent sends must see the failure.
+statement ok quack_db:quack_server_con
+SET GLOBAL quack_server_stream_buffer_bytes=16384;
 
 statement error
 insert into rpc.keyed select i from big_src;
 ----
 Duplicate key
 
-statement ok
-reset quack_debug_send_delay_ms;
+statement ok quack_db:quack_server_con
+RESET GLOBAL quack_server_stream_buffer_bytes;
 
 query II
 select count(*) filter (where message like '%ERROR_RESPONSE%') > 0,
