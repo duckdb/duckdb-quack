@@ -288,8 +288,20 @@ unique_ptr<GlobalTableFunctionState> QuackScanInitGlobal(ClientContext &context,
 		auto client_wrapper = client_connection.GetClient(context);
 		auto &client = client_wrapper->GetClient();
 		query_uuid = UUID::GenerateRandomUUID();
-		auto response_message = client.Request<PrepareResponseMessage>(
-		    context, make_uniq<PrepareRequestMessage>(client_connection.ConnectionId(), query, query_uuid));
+		unique_ptr<PrepareResponseMessage> response_message;
+		try {
+			response_message = client.Request<PrepareResponseMessage>(
+			    context, make_uniq<PrepareRequestMessage>(client_connection.ConnectionId(), query, query_uuid));
+		} catch (...) {
+			// This execution owns a fresh UUID that is not in the reusable bind data. The server
+			// may already hold its result even if the PREPARE response was interrupted.
+			try {
+				client.Request<SuccessResponse>(
+				    context, make_uniq<CancelRequestMessage>(client_connection.ConnectionId(), query_uuid));
+			} catch (...) { // best effort; preserve the original PREPARE error
+			}
+			throw;
+		}
 		needs_more_fetch = response_message->NeedsMoreFetch();
 		// fetch the result
 		for (auto &chunk_ref : response_message->MutableResults()) {
@@ -311,6 +323,7 @@ unique_ptr<GlobalTableFunctionState> QuackScanInitGlobal(ClientContext &context,
 		// start pipelining FETCH requests on the ASYNC pool before the first scan call
 		global_state->fetcher = make_shared_ptr<QuackFetcher>(context, *bind_data.client_connection, query_uuid,
 		                                                      QuackFetcher::GetReadAheadDepth(context));
+		global_state->fetcher->Start(context);
 	}
 	return std::move(global_state);
 }

@@ -197,7 +197,7 @@ HttpQuackServer::HttpQuackServer(ClientContext &context_p, const QuackUri &uri_p
 		if (cert_file.empty()) {
 			auto &fs = FileSystem::GetFileSystem(context_p);
 			auto certificate_directory =
-			    SslKeyGenerator::GetDefaultCertificateDirectory(fs, ClientData::Get(context_p).file_opener.get());
+			    SslKeyGenerator::GetDefaultCertificateDirectory(fs, context_p.GetContext().TryGetFileOpener().get());
 			cert_file = SslKeyGenerator::GetDefaultCertificateFile(fs, certificate_directory);
 			key_file = SslKeyGenerator::GetDefaultPrivateKeyFile(fs, certificate_directory);
 			if (!fs.FileExists(cert_file) || !fs.FileExists(key_file)) {

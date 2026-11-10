@@ -1,0 +1,34 @@
+# name: test/sql/quack_http_timeout.test
+# description: quack_http_timeout bounds how long a client waits for the server to answer, on both transports
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok
+SET quack_http_timeout=1;
+
+statement error
+FROM quack_query({server}, 'SELECT sleep_ms(3000)', token='asdf')
+----
+Failed to send message
+
+statement ok
+set variable srv = (select {'uri': listen_uri} from quack_serve('quack:localhost:0', disable_ssl => false, token => 'ssltoken', ssl_cert_file => 'test/certs/server.pem', ssl_key_file => 'test/certs/private_key.pem'));
+
+statement error
+from quack_query(getvariable('srv').uri, 'select sleep_ms(3000)', token => 'ssltoken', ssl_fingerprint => '2B:31:F0:0A:44:D3:E8:D0:5B:82:C4:0A:31:3D:EC:F2:31:01:1E:0A:3A:37:73:6B:50:99:BC:99:84:37:BC:EA');
+----
+Failed to send message
+
+statement ok
+call quack_stop(getvariable('srv').uri);
+
+statement ok
+RESET quack_http_timeout;
+
+query I
+FROM quack_query({server}, 'SELECT 42', token='asdf')
+----
+42
+
+include test/template/quack_teardown.test_template
