@@ -4,6 +4,9 @@
 
 require quack
 
+statement ok
+LOAD quack;
+
 query I
 SELECT current_setting('quack_control_timeout');
 ----
