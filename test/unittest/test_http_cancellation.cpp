@@ -22,7 +22,7 @@ public:
 	using QuackServer::QuackServer;
 };
 
-enum class CancelRequest { COMMIT, PREPARE_STREAM, SEND, TERMINAL, FETCH };
+enum class CancelRequest { COMMIT, PREPARE_STREAM, PREPARE_SCAN, SEND, TERMINAL, FETCH };
 
 class LoopbackHTTPUtil : public HTTPUtil {
 public:
@@ -41,9 +41,17 @@ public:
 		    message->Cast<PrepareRequestMessage>().Query() == "ROLLBACK") {
 			rollbacks++;
 		}
+		if (message->Type() == MessageType::CANCEL_REQUEST &&
+		    message->Cast<CancelRequestMessage>().query_uuid == interrupted_query_uuid) {
+			cancelled_target++;
+		}
 		input.Rewind();
 		auto response = server.HandleMessage(input);
 		if (armed.load() && Matches(*message) && armed.exchange(false)) {
+			if (message->Type() == MessageType::PREPARE_REQUEST) {
+				interrupted_query_uuid = message->Cast<PrepareRequestMessage>().QueryUUID();
+				interrupted_connection_id = message->ConnectionId();
+			}
 			triggered = true;
 			had_caller = bool(request.interrupt_context);
 			caller->Interrupt();
@@ -69,6 +77,9 @@ public:
 		case CancelRequest::PREPARE_STREAM:
 			return message.Type() == MessageType::PREPARE_REQUEST &&
 			       StringUtil::Contains(message.Cast<PrepareRequestMessage>().Query(), "scan_data_from_quack_client");
+		case CancelRequest::PREPARE_SCAN:
+			return message.Type() == MessageType::PREPARE_REQUEST &&
+			       StringUtil::Contains(message.Cast<PrepareRequestMessage>().Query(), "items");
 		case CancelRequest::SEND:
 			return message.Type() == MessageType::SEND_DATA_REQUEST &&
 			       !message.Cast<SendDataRequestMessage>().TotalBatches().IsValid();
@@ -90,6 +101,9 @@ public:
 	atomic<bool> triggered {false};
 	atomic<bool> had_caller {false};
 	atomic<idx_t> rollbacks {0};
+	atomic<idx_t> cancelled_target {0};
+	hugeint_t interrupted_query_uuid = 0;
+	string interrupted_connection_id;
 };
 
 unique_ptr<QueryResult> QueryOk(Connection &con, const string &sql) {
@@ -131,6 +145,7 @@ TEST_CASE("Quack cancellation preserves transaction finalization and connection 
 	QueryOk(con, "CREATE TABLE source AS SELECT i FROM range(10000) t(i)");
 	string statement;
 	bool interrupted = false;
+	bool check_prepare_cleanup = false;
 	idx_t expected_rows = 0;
 	SECTION("explicit commit") {
 		QueryOk(con, "BEGIN");
@@ -148,6 +163,22 @@ TEST_CASE("Quack cancellation preserves transaction finalization and connection 
 		http->target = CancelRequest::PREPARE_STREAM;
 		statement = "CREATE TABLE remote.aborted AS SELECT i FROM source";
 		interrupted = true;
+	}
+	SECTION("autocommit INSERT cancels an interrupted prepare") {
+		http->target = CancelRequest::PREPARE_STREAM;
+		statement = "INSERT INTO remote.items SELECT i FROM source";
+		interrupted = true;
+		check_prepare_cleanup = true;
+	}
+	SECTION("catalog scan cancels an interrupted prepare") {
+		QueryOk(con, "SET disabled_optimizers='remote_pushdown'");
+		QueryOk(server_con, "INSERT INTO items SELECT i FROM range(10000) t(i)");
+		QueryOk(server_con, "SET quack_prepare_inline_rows=0");
+		http->target = CancelRequest::PREPARE_SCAN;
+		statement = "SELECT * FROM remote.items";
+		expected_rows = 10000;
+		interrupted = true;
+		check_prepare_cleanup = true;
 	}
 	SECTION("async upload") {
 		http->target = CancelRequest::SEND;
@@ -174,8 +205,18 @@ TEST_CASE("Quack cancellation preserves transaction finalization and connection 
 		INFO((result->HasError() ? result->GetError() : string()));
 		REQUIRE_FALSE(result->HasError());
 	}
+	if (check_prepare_cleanup) {
+		// Check before another client request can supersede the abandoned server statement.
+		CHECK(http->cancelled_target >= 1);
+		auto connection = server.GetConnection(http->interrupted_connection_id);
+		REQUIRE(connection);
+		CHECK(connection->query_state == QuackQueryState::CANCELLED);
+		annotated_lock_guard<annotated_mutex> guard(connection->statement.lock);
+		CHECK_FALSE(connection->statement.stream);
+		CHECK_FALSE(connection->statement.thread.joinable());
+	}
 	CHECK(Scalar(con, "SELECT count(*) FROM remote.items") == NumericCast<int64_t>(expected_rows));
-	if (http->target == CancelRequest::PREPARE_STREAM) {
+	if (http->target == CancelRequest::PREPARE_STREAM && !check_prepare_cleanup) {
 		CHECK(http->rollbacks == 1);
 		CHECK(Scalar(server_con, "SELECT count(*) FROM duckdb_tables() WHERE table_name='aborted'") == 0);
 	}
