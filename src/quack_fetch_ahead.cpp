@@ -127,7 +127,7 @@ idx_t QuackFetcher::GetReadAheadDepth(ClientContext &context) {
 QuackFetcher::QuackFetcher(ClientContext &context, QuackClientConnection &connection, hugeint_t query_uuid,
                            idx_t depth_p)
     : context(context), depth(MaxValue<idx_t>(depth_p, 1)) {
-	queue = make_uniq<ManagedAsyncTaskQueue>(context, depth);
+	queue = make_uniq<ManagedAsyncTaskQueue>(context.GetContext(), depth);
 	if (!queue->IsAsync()) {
 		// Register runs the POST inline on the scan thread; deeper pipelining is impossible.
 		depth = 1;
@@ -141,7 +141,7 @@ QuackFetcher::QuackFetcher(ClientContext &context, QuackClientConnection &connec
 
 	this->query_uuid = query_uuid;
 	connection_id = connection.ConnectionId();
-	logger = context.logger;
+	logger = context.GetContext().GetLoggerPtr();
 	// Read once: the async tasks read it together, and it belongs to this query.
 	client_query_id = QuackActiveClientQueryId(context);
 

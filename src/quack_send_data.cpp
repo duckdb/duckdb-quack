@@ -152,7 +152,7 @@ public:
 	    : context(context.shared_from_this()), table(table_p), stream_id(std::move(stream_id_p)),
 	      query_uuid(query_uuid_p), debug_delay_ms(debug_delay_ms_p), debug_duplicate_sends(debug_duplicate_sends_p),
 	      debug_drop_batch(debug_drop_batch_p) {
-		queue = make_uniq<ManagedAsyncTaskQueue>(context);
+		queue = make_uniq<ManagedAsyncTaskQueue>(context.GetContext());
 	}
 
 	~QuackSendDataEmitter() override {
@@ -212,13 +212,13 @@ public:
 		auto client_wrapper = quack_catalog.GetClientConnection()->GetClient(context);
 		queue->Register(make_uniq<QuackSendDataTask>(context, std::move(client_wrapper), std::move(prepared->payload),
 		                                             body_start, body_size, connection_id, client_query_id,
-		                                             context.logger, debug_delay_ms),
+		                                             context.GetContext().GetLoggerPtr(), debug_delay_ms),
 		                body_size);
 		if (duplicate) {
 			auto retry_wrapper = quack_catalog.GetClientConnection()->GetClient(context);
 			queue->Register(make_uniq<QuackSendDataTask>(context, std::move(retry_wrapper), std::move(duplicate), 0,
 			                                             body_size, std::move(connection_id), client_query_id,
-			                                             context.logger, debug_delay_ms),
+			                                             context.GetContext().GetLoggerPtr(), debug_delay_ms),
 			                body_size);
 		}
 		queue->ApplyBackpressure();

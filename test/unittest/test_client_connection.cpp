@@ -134,11 +134,11 @@ TEST_CASE("Quack control requests reinitialize the transport with the current lo
 	db.instance->config.SetHTTPUtil(http);
 	HttpsQuackClient client(*db.instance, QuackUri("quack://localhost:1"));
 
-	client.SetRequestLogger(con.context->logger);
+	client.SetRequestLogger(con.context->GetContext().GetLoggerPtr());
 	REQUIRE(client.Request<SuccessResponse>(
 	    *con.context, make_uniq<PrepareRequestMessage>("test-session", "SELECT 1", hugeint_t(1))));
 	REQUIRE(http->state.loggers.size() == 1);
-	CHECK(http->state.loggers.back() == con.context->logger);
+	CHECK(http->state.loggers.back() == con.context->GetContext().GetLoggerPtr());
 	CHECK(http->state.clients_created == 1);
 
 	client.SetRequestLogger(nullptr);
@@ -147,7 +147,7 @@ TEST_CASE("Quack control requests reinitialize the transport with the current lo
 	CHECK_FALSE(http->state.loggers.back());
 	CHECK(http->state.clients_created == 1);
 
-	client.SetRequestLogger(con.context->logger);
+	client.SetRequestLogger(con.context->GetContext().GetLoggerPtr());
 	http->state.throw_on_initialize = true;
 	CHECK_THROWS_AS(client.Request<SuccessResponse>(
 	                    *con.context, make_uniq<PrepareRequestMessage>("test-session", "SELECT 1", hugeint_t(2))),
@@ -157,7 +157,7 @@ TEST_CASE("Quack control requests reinitialize the transport with the current lo
 	    *con.context, make_uniq<PrepareRequestMessage>("test-session", "SELECT 1", hugeint_t(3))));
 	CHECK(http->state.clients_created == 2);
 	REQUIRE(http->state.loggers.size() == 4);
-	CHECK(http->state.loggers.back() == con.context->logger);
+	CHECK(http->state.loggers.back() == con.context->GetContext().GetLoggerPtr());
 }
 
 TEST_CASE("Quack HTTP requests preserve interruption and leave cleanup runnable", "[quack]") {
