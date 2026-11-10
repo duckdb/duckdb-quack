@@ -475,7 +475,7 @@ unique_ptr<QuackClient> QuackClientConnection::TakeClient(optional_ptr<ClientCon
 	if (!result) {
 		result = QuackClient::GetClient(db, uri);
 	}
-	result->SetRequestLogger(context ? context->logger : nullptr);
+	result->SetRequestLogger(context ? context->GetContext().GetLoggerPtr() : nullptr);
 	return result;
 }
 
