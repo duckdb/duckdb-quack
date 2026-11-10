@@ -4,8 +4,10 @@
 #include "duckdb_static_extension.h"
 #include "duckdb/common/serializer/binary_deserializer.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/config.hpp"
 #include "duckdb/storage/object_cache.hpp"
 #include "quack_client.hpp"
+#include "quack_settings.hpp"
 
 #include <condition_variable>
 #include <future>
@@ -184,6 +186,19 @@ private:
 };
 
 } // namespace
+
+TEST_CASE("Quack validates HTTP timeouts supplied through database configuration", "[quack][control_timeout]") {
+	const auto timeout = GENERATE(idx_t(0), idx_t(2147484), idx_t(1) << 63);
+	CAPTURE(timeout);
+	DuckDB db(nullptr);
+	db.LoadStaticExtension(duckdb_extension_quack_describe);
+	Connection con(db);
+	db.instance->config.SetOptionByName("quack_http_timeout", Value::UBIGINT(timeout));
+	CHECK_THROWS_AS(QuackHttpTimeout(*db.instance), InvalidInputException);
+	CHECK_FALSE(con.Query("SELECT 1")->HasError());
+	db.instance->config.SetOptionByName("quack_http_timeout", Value::UBIGINT(2));
+	CHECK(QuackHttpTimeout(*db.instance) == 2);
+}
 
 TEST_CASE("Quack control requests time out independently of their caller", "[quack][control_timeout]") {
 	const auto transport = GENERATE(0, 1, 2, 3);
