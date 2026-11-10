@@ -195,9 +195,30 @@ TEST_CASE("Quack validates HTTP timeouts supplied through database configuration
 	Connection con(db);
 	db.instance->config.SetOptionByName("quack_http_timeout", Value::UBIGINT(timeout));
 	CHECK_THROWS_AS(QuackHttpTimeout(*db.instance), InvalidInputException);
+	CHECK(QuackControlTimeout(*db.instance) == (timeout == 0 ? 1 : 2));
 	CHECK_FALSE(con.Query("SELECT 1")->HasError());
 	db.instance->config.SetOptionByName("quack_http_timeout", Value::UBIGINT(2));
 	CHECK(QuackHttpTimeout(*db.instance) == 2);
+}
+
+TEST_CASE("Quack cleanup remains available with an invalid configured data timeout", "[quack][control_timeout]") {
+	const auto transport = GENERATE(0, 1, 2, 3);
+	const auto timeout = GENERATE(idx_t(0), idx_t(2147484), idx_t(1) << 63);
+	CAPTURE(transport, timeout);
+	ControlServer server(transport == 1 || transport == 3, transport >= 2);
+	auto client = QuackClient::GetClient(*server.db.instance, *server.uri);
+	server.db.instance->config.SetOptionByName("quack_http_timeout", Value::UBIGINT(timeout));
+	for (auto type : {MessageType::HEARTBEAT_REQUEST, MessageType::CANCEL_REQUEST, MessageType::DISCONNECT_MESSAGE}) {
+		REQUIRE_NOTHROW(client->Request<SuccessResponse>(*server.con.context, ControlMessage(type)));
+	}
+	CHECK_THROWS_AS(
+	    client->Request<SuccessResponse>(
+	        *server.con.context, make_uniq<PrepareRequestMessage>("control-test-session", "SELECT 1", hugeint_t(42))),
+	    InvalidInputException);
+	CHECK_FALSE(server.con.Query("SELECT 1")->HasError());
+	server.db.instance->config.SetOptionByName("quack_http_timeout", Value::UBIGINT(2));
+	REQUIRE_NOTHROW(client->Request<SuccessResponse>(
+	    *server.con.context, make_uniq<PrepareRequestMessage>("control-test-session", "SELECT 1", hugeint_t(42))));
 }
 
 TEST_CASE("Quack control requests time out independently of their caller", "[quack][control_timeout]") {
