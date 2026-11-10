@@ -300,7 +300,7 @@ PinnedHttpsQuackClient::~PinnedHttpsQuackClient() {
 }
 
 void PinnedHttpsQuackClient::ConfigureTimeouts(optional_idx deadline) {
-	auto seconds = NumericCast<time_t>(QuackHttpTimeout(db));
+	time_t seconds = 0;
 	time_t microseconds = 0;
 	if (deadline.IsValid()) {
 		const auto now = RequestClockMillis();
@@ -309,6 +309,7 @@ void PinnedHttpsQuackClient::ConfigureTimeouts(optional_idx deadline) {
 		microseconds = NumericCast<time_t>((remaining % 1000) * 1000);
 		https_client->set_max_timeout(NumericCast<time_t>(remaining));
 	} else {
+		seconds = NumericCast<time_t>(QuackHttpTimeout(db));
 		https_client->set_max_timeout(0);
 	}
 	https_client->set_connection_timeout(seconds, microseconds);

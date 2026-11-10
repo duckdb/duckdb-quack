@@ -24,10 +24,18 @@ idx_t QuackGetUBigintSetting(DatabaseInstance &db, const char *name, idx_t defau
 	return default_value;
 }
 
+static idx_t MaximumHttpTimeout() {
+	// Socket polling converts these seconds to signed 32-bit milliseconds.
+	return NumericCast<idx_t>(NumericLimits<int32_t>::Maximum() / 1000);
+}
+
 idx_t QuackControlTimeout(DatabaseInstance &db) {
-	return MinValue<idx_t>(
-	    QuackHttpTimeout(db),
-	    MaxValue<idx_t>(1, QuackGetUBigintSetting(db, "quack_control_timeout", QUACK_CONTROL_TIMEOUT_DEFAULT)));
+	// A bad programmatic data timeout must not prevent cancellation, heartbeats or disconnect.
+	const auto http_timeout = MinValue<idx_t>(
+	    MaximumHttpTimeout(),
+	    MaxValue<idx_t>(1, QuackGetUBigintSetting(db, "quack_http_timeout", QUACK_HTTP_TIMEOUT_DEFAULT)));
+	return MinValue<idx_t>(http_timeout, MaxValue<idx_t>(1, QuackGetUBigintSetting(db, "quack_control_timeout",
+	                                                                               QUACK_CONTROL_TIMEOUT_DEFAULT)));
 }
 
 idx_t QuackHttpTimeout(DatabaseInstance &db) {
@@ -37,8 +45,7 @@ idx_t QuackHttpTimeout(DatabaseInstance &db) {
 }
 
 void QuackValidateHttpTimeout(idx_t timeout) {
-	// Socket polling converts these seconds to signed 32-bit milliseconds.
-	const auto maximum = NumericCast<idx_t>(NumericLimits<int32_t>::Maximum() / 1000);
+	const auto maximum = MaximumHttpTimeout();
 	if (timeout == 0 || timeout > maximum) {
 		throw InvalidInputException("quack_http_timeout must be between 1 and %llu seconds", maximum);
 	}
