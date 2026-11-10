@@ -12,9 +12,16 @@
 namespace duckdb {
 
 struct ClearCacheFunctionData : public TableFunctionData {
-	bool finished = false;
 	string catalog_name;
 };
+
+struct ClearCacheGlobalState : public GlobalTableFunctionState {
+	bool finished = false;
+};
+
+unique_ptr<GlobalTableFunctionState> ClearCacheInit(ClientContext &, TableFunctionInitInput &) {
+	return make_uniq<ClearCacheGlobalState>();
+}
 
 unique_ptr<FunctionData> ClearCacheBind(ClientContext &context, TableFunctionBindInput &input,
                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
@@ -45,8 +52,9 @@ void ClearQuackCache(ClientContext &context, const string &catalog_name) {
 }
 
 void ClearCacheFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
-	auto &data = data_p.bind_data->CastNoConst<ClearCacheFunctionData>();
-	if (data.finished) {
+	auto &data = data_p.bind_data->Cast<ClearCacheFunctionData>();
+	auto &state = data_p.global_state->Cast<ClearCacheGlobalState>();
+	if (state.finished) {
 		return;
 	}
 	if (data.catalog_name.empty()) {
@@ -56,13 +64,14 @@ void ClearCacheFunction(ClientContext &context, TableFunctionInput &data_p, Data
 	}
 	output.data[0].SetValue(0, Value::BOOLEAN(true));
 	output.SetChildCardinality(1);
-	data.finished = true;
+	state.finished = true;
 }
 
 TableFunctionSet QuackClearCacheFunction::GetFunction() {
 	TableFunctionSet set("quack_clear_cache");
-	set.AddFunction(TableFunction("quack_clear_cache", {}, ClearCacheFunction, ClearCacheBind));
-	set.AddFunction(TableFunction("quack_clear_cache", {LogicalType::VARCHAR}, ClearCacheFunction, ClearCacheBind));
+	set.AddFunction(TableFunction("quack_clear_cache", {}, ClearCacheFunction, ClearCacheBind, ClearCacheInit));
+	set.AddFunction(
+	    TableFunction("quack_clear_cache", {LogicalType::VARCHAR}, ClearCacheFunction, ClearCacheBind, ClearCacheInit));
 	return set;
 }
 
