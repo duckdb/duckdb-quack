@@ -104,6 +104,26 @@ CREATE TABLE remote.hello2 AS FROM VALUES ('world2') v(s);
 FROM hello2;
 ```
 
+### Selecting a schema and refreshing its catalog
+
+Use the `schema` attachment option to load one top-level schema and its descendants
+from each remote catalog. The option follows DuckDB's identifier matching rules:
+ASCII letters are case-insensitive, while non-ASCII letters remain distinct.
+
+```sql
+ATTACH 'quack:localhost' AS scoped (schema 'wanted');
+CALL quack_clear_cache('scoped');
+```
+
+The optional catalog argument refreshes only that Quack attachment. Calling
+`quack_clear_cache()` without an argument refreshes every attached Quack catalog.
+Schema scoping limits catalog visibility and local DDL; explicit remote SQL remains
+available, so it does not provide server authorization.
+Scoped attachments support local creation and deletion of schemas, tables and
+views. Other DDL, such as `ALTER TABLE` or `CREATE SEQUENCE`, currently requires
+explicit remote SQL through `quack_query()`; whole-statement DDL pushdown is
+disabled so it cannot bypass the selected schema tree.
+
 ## Development
 
 ### Managing dependencies

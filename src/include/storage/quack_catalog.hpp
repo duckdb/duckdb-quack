@@ -23,7 +23,7 @@ class QuackClientConnection;
 class QuackCatalog : public Catalog {
 public:
 	explicit QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri_p, ClientContext &context,
-	                      const string &token, string client_id, idx_t heartbeat_timeout_seconds);
+	                      const string &token, string client_id, idx_t heartbeat_timeout_seconds, string schema_filter);
 	~QuackCatalog() override;
 
 public:
@@ -33,6 +33,7 @@ public:
 	static QuackCatalog &GetQuackCatalog(ClientContext &context, Value &catalog_name);
 	static bool IsQuackScan(const string &name);
 	bool SupportsPushdown(const TableRef &ref) override;
+	bool SupportsPushdown(const SQLStatement &statement) override;
 	void Initialize(bool load_builtin) override;
 
 	optional_ptr<CatalogEntry> CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) override;
@@ -83,6 +84,9 @@ public:
 	shared_ptr<QuackClientConnection> GetClientConnection();
 
 	void Refresh(ClientContext &context);
+	const string &GetSchemaFilter() const {
+		return schema_filter;
+	}
 	void Invalidate();
 	void InvalidateIfChangedSince(idx_t version);
 	idx_t InvalidatedVersion();
@@ -101,6 +105,7 @@ private:
 
 private:
 	shared_ptr<QuackClientConnection> client_connection;
+	string schema_filter;
 	mutex snapshot_lock;
 	std::condition_variable snapshot_loaded;
 	shared_ptr<QuackSchemaSet> snapshot;
