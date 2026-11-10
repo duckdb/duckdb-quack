@@ -396,7 +396,7 @@ string QuackServer::CreateNewConnection(const string &connection_id, const strin
 	auto &connection_context = *new_connection->duckdb_connection->context;
 	// scan_data_from_quack_client registers its streams here, and SEND_DATA finds them by connection.
 	connection_context.GetContext().GetRegisteredState().Insert(QuackSessionState::KEY,
-	                                                          make_shared_ptr<QuackSessionState>(connection_id));
+	                                                            make_shared_ptr<QuackSessionState>(connection_id));
 	ClientConfig::GetConfig(connection_context).enable_progress_bar = false;
 	// new_connection->duckdb_connection->context->config.streaming_buffer_size = 10 * 1000000; // 10 MB
 	active_connections[connection_id] = std::move(new_connection);
