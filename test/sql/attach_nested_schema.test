@@ -108,7 +108,7 @@ explain select count(*) from s1.mid
 ----
 physical_plan	<REGEX>:.*Quack Query By Name.*
 
-# --- schema tree changes on the server are picked up by a cache refresh
+# --- schema tree changes on the server are found without a refresh: a missed lookup reloads the catalog
 statement ok quack_db:quack_server_con
 create schema s1.child.fresh;
 
@@ -117,14 +117,6 @@ create table s1.child.fresh_t(i int);
 
 statement ok quack_db:quack_server_con
 insert into s1.child.fresh_t values (7);
-
-statement error
-from s1.child.fresh_t
-----
-<REGEX>:.*fresh_t.*
-
-statement ok
-call quack_clear_cache()
 
 query I
 from s1.child.fresh_t

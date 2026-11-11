@@ -1,0 +1,42 @@
+# name: test/sql/use_catalog_no_reload.test
+# description: USE of the attached catalog while it is the default does not reload the catalog
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+statement ok
+create table rpc.t as select range::INT i from range(3)
+
+statement ok
+USE rpc
+
+query I
+select sum(i) from t
+----
+3
+
+statement ok quack_db:quack_server_con
+CALL enable_logging('Quack');
+
+statement ok quack_db:quack_server_con
+CALL truncate_duckdb_logs();
+
+# the binder looks for a schema "rpc" in rpc before it takes rpc as the database
+statement ok
+USE rpc
+
+statement ok
+USE rpc
+
+query I
+select sum(i) from t
+----
+3
+
+query I quack_db:quack_server_con
+select count(*) from duckdb_logs_parsed('Quack') where message_type = 'PREPARE_REQUEST' and query like '%duckdb_schemas()%'
+----
+0

@@ -86,6 +86,24 @@ public:
 	void Invalidate();
 	void InvalidateIfChangedSince(idx_t version);
 	idx_t InvalidatedVersion();
+	//! A name the cached catalog lacks may have been created on the server after it was loaded: reload the
+	//! catalog, at most once per transaction. Returns whether it did, so the lookup can be tried again
+	bool ReloadOnMiss(ClientContext &context);
+	//! Whether "schema_path" is a lone name of an attached database: the binder's probe before it reads the
+	//! name as a database, not a schema created on the server since the catalog was loaded
+	static bool NamesDatabase(ClientContext &context, const vector<Identifier> &schema_path);
+	//! Whether the system catalog holds a schema at "schema_path" (pg_catalog, information_schema): the binder
+	//! looks for it in the default catalog first, and that miss is no schema made on the server
+	static bool SystemHoldsSchema(ClientContext &context, const vector<Identifier> &schema_path);
+	//! Whether the system catalog holds a table or view named "name" where an unqualified name falls back to
+	//! (pg_attribute, duckdb_settings...): the miss in the default catalog that comes first is no new table
+	static bool SystemHoldsTable(ClientContext &context, const string &name);
+	//! Give "entry" the oid an entry of its kind, schema path and name got before, or remember its own. A reload
+	//! builds every entry again, and DuckDB hands each new one a fresh oid: a client that read an oid in one
+	//! statement (SQLAlchemy's reflection, pg_attribute.attrelid) would not find it in the next
+	void KeepOid(CatalogEntry &entry);
+	//! The schema at "schema_path", or nullptr
+	optional_ptr<SchemaCatalogEntry> FindSchema(ClientContext &context, const vector<Identifier> &schema_path);
 
 private:
 	void DropSchema(ClientContext &context, DropInfo &info) override;
@@ -107,6 +125,9 @@ private:
 	idx_t invalidated_version = 0;
 	idx_t loaded_version = 0;
 	optional_ptr<ClientContext> loading_context;
+	mutex oid_lock;
+	//! The oid each entry was first given, by its kind, schema path and name (see KeepOid)
+	unordered_map<string, idx_t> kept_oids;
 };
 
 } // namespace duckdb

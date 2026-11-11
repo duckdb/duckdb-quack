@@ -1,0 +1,56 @@
+# name: test/sql/catalog_oids_survive_reload.test
+# description: a table, view and schema keep their oid when the attached catalog is loaded again
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+statement ok
+create table rpc.t as select range::INT i from range(3)
+
+statement ok
+create view rpc.v as select i from rpc.t
+
+statement ok
+create table memory.seen as
+select table_name as name, table_oid as oid, schema_oid from duckdb_tables() where database_name = 'rpc'
+union all
+select view_name, view_oid, schema_oid from duckdb_views() where database_name = 'rpc' and not internal
+
+statement ok
+CALL quack_clear_cache()
+
+query II
+select name, count(*) from memory.seen s
+join (
+	select table_name as name, table_oid as oid, schema_oid from duckdb_tables() where database_name = 'rpc'
+	union all
+	select view_name, view_oid, schema_oid from duckdb_views() where database_name = 'rpc' and not internal
+) d using (name, oid, schema_oid)
+group by name order by name
+----
+t	1
+v	1
+
+# what SQLAlchemy does: the oid in one statement, the columns by it in the next, a reload between them
+statement ok
+CALL quack_clear_cache()
+
+query I
+select count(*) from pg_catalog.pg_attribute where attrelid = (select oid from memory.seen where name = 't')
+----
+1
+
+# a table made on the server after the attach gets an oid of its own, not one of the others
+statement ok
+call system.main.quack_query_by_name('rpc', 'CREATE TABLE late AS SELECT 7 AS v;')
+
+statement ok
+CALL quack_clear_cache()
+
+query I
+select count(*) from duckdb_tables() d join memory.seen s on d.table_oid = s.oid where d.database_name = 'rpc' and d.table_name = 'late'
+----
+0

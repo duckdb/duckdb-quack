@@ -54,6 +54,15 @@ optional_ptr<CatalogEntry> QuackTransaction::Retain(unique_ptr<CatalogEntry> ent
 	return retained_entries.back().get();
 }
 
+bool QuackTransaction::TakeMissReload() {
+	lock_guard<mutex> guard(retained_lock);
+	if (reloaded_on_miss) {
+		return false;
+	}
+	reloaded_on_miss = true;
+	return true;
+}
+
 QuackTransaction &QuackTransaction::Get(ClientContext &context, Catalog &catalog) {
 	return Transaction::Get(context, catalog).Cast<QuackTransaction>();
 }
