@@ -26,6 +26,8 @@ class DatabaseInstance;
 struct QuackResultStream;
 class ErrorData;
 
+struct QuackRequestLogRecord;
+
 enum class QuackQueryState : uint8_t { IDLE, ACTIVE, FINISHED, CANCELLED };
 
 //! The stream the connection's active query fills, one at a time. The query runs on a background
@@ -172,9 +174,12 @@ public:
 	}
 
 protected:
-	//! Handle one request, turning any exception raised along the way into an ErrorResponse
-	unique_ptr<QuackMessage> HandleMessage(MemoryStream &read_stream);
-	unique_ptr<QuackMessage> DispatchMessage(MemoryStream &read_stream);
+	//! Handle one request, turning any exception raised along the way into an ErrorResponse, and write its
+	//! Quack log row. `client_address` is the caller's IP address as the transport saw it.
+	unique_ptr<QuackMessage> HandleMessage(MemoryStream &read_stream, const string &client_address);
+	//! Decode and answer one request. Fills `record`, when given, with what the log row needs as far as it got.
+	unique_ptr<QuackMessage> DispatchMessage(DatabaseInstance &db, MemoryStream &read_stream,
+	                                         optional_ptr<QuackRequestLogRecord> record);
 	//! Drops caches idle past quack_result_ttl
 	void SweepExpiredCaches(DatabaseInstance &db);
 	//! Give `connection` its expiry-queue slot when its cache is created; caller must hold connection.lock.

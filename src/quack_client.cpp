@@ -111,9 +111,9 @@ void QuackClient::LogRequest(Logger &logger, MessageType request_type, const str
 	if (!logger.ShouldLog(QuackLogType::NAME, QuackLogType::LEVEL)) {
 		return;
 	}
-	// client_id_hash is a server-side identifier (never sent back to the client), so it is empty here.
+	// client_id_hash and client_address are server-side fields, so they are empty here.
 	auto msg = QuackLogType::ConstructLogMessage(request_type, connection_id, string(), client_query_id, query,
-	                                             uri.Http(), duration_ms, response_type, error);
+	                                             uri.Http(), duration_ms, response_type, error, string());
 	logger.WriteLog(QuackLogType::NAME, QuackLogType::LEVEL, msg);
 }
 

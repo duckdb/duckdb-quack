@@ -508,14 +508,54 @@ bool MessageRequiresConnection(MessageType type) {
 	}
 }
 
-unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
+//! What a request's Quack log row records: filled in by DispatchMessage as far as it got before it answered.
+//! It is an out-parameter rather than part of the result because it must survive an exception thrown while
+//! decoding or handling the request.
+struct QuackRequestLogRecord {
+	//! INVALID until the header has been decoded
+	MessageType message_type = MessageType::INVALID;
+	string connection_id;
+	string client_id_hash;
+	optional_idx client_query_id;
+	string query;
+};
+
+//! Writes the request's Quack log row. Never throws: logging must not change the response.
+static void WriteRequestLog(DatabaseInstance &db, const QuackRequestLogRecord &record, const string &client_address,
+                            int64_t duration_ms, QuackMessage &response) {
+	try {
+		string error;
+		if (response.Type() == MessageType::ERROR_RESPONSE) {
+			error = response.Cast<ErrorResponse>().ErrorMessage();
+		}
+		auto msg = QuackLogType::ConstructLogMessage(record.message_type, record.connection_id, record.client_id_hash,
+		                                             record.client_query_id, record.query, "", duration_ms,
+		                                             response.Type(), error, client_address);
+		Logger::Get(db).WriteLog(QuackLogType::NAME, QuackLogType::LEVEL, msg);
+	} catch (...) {
+	}
+}
+
+unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream, const string &client_address) {
+	// Logged here rather than in DispatchMessage so that every request gets a row while the database is open,
+	// including those DispatchMessage turns away early (an unsupported type, an unknown connection id, an
+	// expired lease, an invalidated database) and those that fail to decode.
+	auto db = db_ptr.lock();
+	bool should_log = db && Logger::Get(*db).ShouldLog(QuackLogType::NAME, QuackLogType::LEVEL);
+	int64_t start_time = should_log ? QuackNowMillis() : 0;
+
+	QuackRequestLogRecord record;
 	unique_ptr<QuackMessage> response;
 	try {
-		response = DispatchMessage(read_stream);
+		if (!db) {
+			response = make_uniq<ErrorResponse>("Database was closed");
+		} else {
+			response = DispatchMessage(*db, read_stream, should_log ? &record : nullptr);
+		}
 	} catch (std::exception &ex) {
 		// Letting this escape to httplib would make it an HTTP 500, which the client can only report as a
-		// transport failure ("Failed to send message"). Exceptions from HANDLING a message are caught below,
-		// where they can still be logged; this catches the ones from decoding it.
+		// transport failure ("Failed to send message"). Exceptions from HANDLING a message are caught in
+		// DispatchMessage; this catches the ones from decoding it.
 		response = make_uniq<ErrorResponse>(ErrorData(ex));
 	} catch (...) {
 		response = make_uniq<ErrorResponse>("Unknown error while handling request");
@@ -523,39 +563,35 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
 	if (response->Type() == MessageType::ERROR_RESPONSE) {
 		// tell the client whether we are still usable - ask the database rather than guess from the exception
 		// type, it is the one that decides it has been invalidated
-		auto db = db_ptr.lock();
 		response->Cast<ErrorResponse>().SetMustInvalidate(!db || ValidChecker::IsInvalidated(*db));
+	}
+	if (should_log) {
+		WriteRequestLog(*db, record, client_address, QuackNowMillis() - start_time, *response);
 	}
 	return response;
 }
 
 // main switcheroo happens here
-unique_ptr<QuackMessage> QuackServer::DispatchMessage(MemoryStream &read_stream) {
-	auto db = db_ptr.lock();
-	if (!db) {
-		return make_uniq<ErrorResponse>("Database was closed");
-	}
-	if (ValidChecker::IsInvalidated(*db)) {
+unique_ptr<QuackMessage> QuackServer::DispatchMessage(DatabaseInstance &db, MemoryStream &read_stream,
+                                                      optional_ptr<QuackRequestLogRecord> record) {
+	if (ValidChecker::IsInvalidated(db)) {
 		// bail out before touching the database: the authentication query cannot run either, so a client
 		// reconnecting to an invalidated server would otherwise be told its token was rejected
 		return make_uniq<ErrorResponse>("The server database has been invalidated and the server must be "
 		                                "restarted before it can be used again. Original error: \"%s\"",
-		                                ValidChecker::Get(*db).InvalidatedMessage());
+		                                ValidChecker::Get(db).InvalidatedMessage());
 	}
-	auto &logger = Logger::Get(*db);
-	bool should_log = logger.ShouldLog(QuackLogType::NAME, QuackLogType::LEVEL);
-
-	int64_t start_time = 0;
-	if (should_log) {
-		start_time = QuackNowMillis();
-	}
-
 	// start deserializing the message
 	read_stream.Rewind();
 	BinaryDeserializer deserializer(read_stream);
 
 	// first read the header
 	auto header = QuackMessage::DeserializeHeader(deserializer);
+	if (record) {
+		record->message_type = header.type;
+		record->connection_id = header.connection_id;
+		record->client_query_id = header.client_query_id;
+	}
 
 	// validate if the server can handle this type of message - the server cannot handle all message types
 	if (!ServerSupportsMessage(header.type)) {
@@ -570,12 +606,18 @@ unique_ptr<QuackMessage> QuackServer::DispatchMessage(MemoryStream &read_stream)
 		if (!connection) {
 			return make_uniq<ErrorResponse>("Invalid connection id");
 		}
+		if (record) {
+			record->client_id_hash = connection->client_id_hash;
+		}
 	}
 
-	SweepExpiredCaches(*db);
+	SweepExpiredCaches(db);
 
 	// now deserialize the actual message, and any raw chunk blob that follows it
 	auto received_message = QuackMessage::DeserializeMessage(deserializer, header);
+	if (record) {
+		record->query = ExtractQuery(*received_message);
+	}
 	if (connection) {
 		// Only supported, structurally valid messages for an existing session renew its lease.
 		if (!RenewConnectionLease(header.connection_id, connection)) {
@@ -584,25 +626,12 @@ unique_ptr<QuackMessage> QuackServer::DispatchMessage(MemoryStream &read_stream)
 	}
 
 	// an exception raised while handling the message becomes the response, so it reaches the client with the
-	// type it was raised with (and still shows up in the log below)
+	// type it was raised with (and still shows up in the log HandleMessage writes)
 	unique_ptr<QuackMessage> response;
 	try {
-		response = HandleMessageInternal(*db, *received_message, connection);
+		response = HandleMessageInternal(db, *received_message, connection);
 	} catch (std::exception &ex) {
 		response = make_uniq<ErrorResponse>(ErrorData(ex));
-	}
-
-	if (should_log) {
-		auto duration_ms = QuackNowMillis() - start_time;
-		string error;
-		if (response->Type() == MessageType::ERROR_RESPONSE) {
-			error = response->Cast<ErrorResponse>().ErrorMessage();
-		}
-		auto client_id_hash = connection ? connection->client_id_hash : string();
-		auto msg = QuackLogType::ConstructLogMessage(header.type, header.connection_id, client_id_hash,
-		                                             header.client_query_id, ExtractQuery(*received_message), "",
-		                                             duration_ms, response->Type(), error);
-		logger.WriteLog(QuackLogType::NAME, QuackLogType::LEVEL, msg);
 	}
 
 	return response;

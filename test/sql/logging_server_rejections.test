@@ -1,0 +1,94 @@
+# name: test/sql/logging_server_rejections.test
+# description: the server writes a Quack log row for every request, including those it turns away before handling, with the caller's address
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok quack_db:quack_server_con
+CALL enable_logging('Quack');
+
+statement ok
+CALL enable_logging('Quack');
+
+statement ok
+ATTACH {server} AS r (token 'asdf');
+
+query I
+FROM quack_query_by_name('r', 'SELECT 42');
+----
+42
+
+# an accepted login records where it came from
+query I quack_db:quack_server_con
+SELECT count(*) > 0 FROM duckdb_logs_parsed('Quack')
+WHERE message_type = 'CONNECTION_REQUEST' AND response_type = 'CONNECTION_RESPONSE'
+  AND (client_address LIKE '%127.0.0.1' OR client_address = '::1');
+----
+true
+
+# --- a refused login ---
+
+statement error
+FROM quack_query({server}, 'SELECT 1', token => 'wrong-token');
+----
+Authentication failed
+
+query I quack_db:quack_server_con
+SELECT count(*) FROM duckdb_logs_parsed('Quack')
+WHERE message_type = 'CONNECTION_REQUEST' AND response_type = 'ERROR_RESPONSE'
+  AND error LIKE '%Authentication failed' AND (client_address LIKE '%127.0.0.1' OR client_address = '::1');
+----
+1
+
+# --- a request on a connection id the server does not know ---
+# A restarted server has no sessions, so the attached client's next request carries an id it never issued.
+# Stopping the server also ends its keep-alive connections, so that request reaches the new server.
+
+statement ok quack_db:quack_server_con
+CALL quack_stop({server});
+
+# quack_stop tears the server down asynchronously; wait for the listening socket to close before rebinding it.
+sleep 2 seconds
+
+query I quack_db:quack_server_con
+SELECT listen_uri = getvariable('actual_listen_uri') FROM quack_serve({server}, token = 'asdf');
+----
+true
+
+statement error
+FROM quack_query_by_name('r', 'SELECT 42');
+----
+Invalid connection id
+
+# Before, this request left no row: DispatchMessage returned before it wrote one.
+query I quack_db:quack_server_con
+SELECT count(*) > 0 FROM duckdb_logs_parsed('Quack')
+WHERE message_type = 'PREPARE_REQUEST' AND response_type = 'ERROR_RESPONSE'
+  AND error LIKE '%Invalid connection id' AND quack_connection_id != ''
+  AND client_id_hash IS NULL AND query IS NULL AND (client_address LIKE '%127.0.0.1' OR client_address = '::1');
+----
+true
+
+# every server row has an address, and no client row does
+query I quack_db:quack_server_con
+SELECT count(*) FROM duckdb_logs_parsed('Quack') WHERE client_address IS NULL;
+----
+0
+
+query I
+SELECT count(*) > 0 FROM duckdb_logs_parsed('Quack') WHERE server IS NOT NULL;
+----
+true
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('Quack') WHERE client_address IS NOT NULL;
+----
+0
+
+statement ok
+DETACH r;
+
+statement ok
+CALL disable_logging();
+
+include test/template/quack_teardown.test_template
