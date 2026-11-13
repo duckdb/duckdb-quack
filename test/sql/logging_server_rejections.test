@@ -26,6 +26,22 @@ WHERE message_type = 'CONNECTION_REQUEST' AND response_type = 'CONNECTION_RESPON
 ----
 true
 
+# a NUL in a logged field is escaped: the logger takes the row as a C string, so the NUL would end it early
+query I
+FROM quack_query_by_name('r', 'SELECT 42 -- ' || chr(0) || ' tail');
+----
+42
+
+query I quack_db:quack_server_con
+SELECT query FROM duckdb_logs_parsed('Quack') WHERE message_type = 'PREPARE_REQUEST' AND query LIKE 'SELECT 42 --%';
+----
+SELECT 42 -- \0 tail
+
+query I
+SELECT query FROM duckdb_logs_parsed('Quack') WHERE message_type = 'PREPARE_REQUEST' AND query LIKE 'SELECT 42 --%';
+----
+SELECT 42 -- \0 tail
+
 # --- a refused login ---
 
 statement error
@@ -64,7 +80,7 @@ Invalid connection id
 query I quack_db:quack_server_con
 SELECT count(*) > 0 FROM duckdb_logs_parsed('Quack')
 WHERE message_type = 'PREPARE_REQUEST' AND response_type = 'ERROR_RESPONSE'
-  AND error LIKE '%Invalid connection id' AND quack_connection_id != ''
+  AND error LIKE '%Invalid connection id' AND quack_connection_id IS NOT NULL
   AND client_id_hash IS NULL AND query IS NULL AND (client_address LIKE '%127.0.0.1' OR client_address = '::1');
 ----
 true

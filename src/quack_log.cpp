@@ -4,8 +4,6 @@
 
 namespace duckdb {
 
-//! A request's type, or UNKNOWN(<byte>) for a value the message enum does not name. The server logs requests
-//! before it validates them, so the type byte can be anything.
 static Value LogMessageType(MessageType type) {
 	try {
 		return Value(MessageTypeToString(type));
@@ -14,18 +12,19 @@ static Value LogMessageType(MessageType type) {
 	}
 }
 
-//! `text` as a log value: NULL when empty, cut to `max_bytes` (with the original length noted) when given, and
-//! with invalid UTF-8 replaced. The server logs request fields before it authenticates or validates them.
 static Value LogText(const string &text, idx_t max_bytes = 0) {
 	if (text.empty()) {
 		return Value();
 	}
-	string result = text;
-	if (max_bytes > 0 && result.size() > max_bytes) {
-		result = result.substr(0, max_bytes) + StringUtil::Format("...(%llu bytes)", text.size());
-	}
+	bool truncated = max_bytes > 0 && text.size() > max_bytes;
+	string result = truncated ? text.substr(0, max_bytes) : text;
 	if (!Utf8Proc::IsValid(result.c_str(), result.size())) {
 		Utf8Proc::MakeValid(&result[0], result.size());
+	}
+	// The logger takes the message as a C string, so a NUL would end it early.
+	result = StringUtil::Replace(result, string(1, '\0'), "\\0");
+	if (truncated) {
+		result += StringUtil::Format("...(%llu bytes)", text.size());
 	}
 	return Value(result);
 }
@@ -53,8 +52,7 @@ string QuackLogType::ConstructLogMessage(MessageType request_type, const string 
                                          MessageType response_type, const string &error, const string &client_address) {
 	child_list_t<Value> child_list = {
 	    {"message_type", LogMessageType(request_type)},
-	    // Not LogText: an empty id is logged as '' rather than NULL, as it always was.
-	    {"quack_connection_id", connection_id.empty() ? Value("") : LogText(connection_id, MAX_CONNECTION_ID_BYTES)},
+	    {"quack_connection_id", LogText(connection_id, MAX_CONNECTION_ID_BYTES)},
 	    {"client_id_hash", LogText(client_id_hash)},
 	    {"client_query_id", client_query_id.IsValid() ? Value::UBIGINT(client_query_id.GetIndex()) : Value()},
 	    {"query", LogText(query)},
