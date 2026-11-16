@@ -25,6 +25,7 @@
 #include "quack_scan.hpp"
 #include "quack_scan_from_client.hpp"
 #include "quack_secret.hpp"
+#include "quack_session_state.hpp"
 #include "quack_cancel.hpp"
 #include "quack_startstop.hpp"
 #include "quack_storage.hpp"
@@ -99,6 +100,10 @@ static void QuackAuthToken(const DataChunk &args, ExpressionState &state, Vector
 
 static void QuackDummyAuthorization(const DataChunk &args, ExpressionState &, Vector &result) {
 	result.SetValue(0, args.GetValue(1, 0)); // choose life
+}
+
+static void QuackPrincipalFunc(const DataChunk &args, ExpressionState &state, Vector &result) {
+	result.Reference(QuackPrincipalState::Get(state.GetContext()), count_t(args.size()));
 }
 
 static void QuackConnectionIdFunc(const DataChunk &args, ExpressionState &state, Vector &result) {
@@ -272,6 +277,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    LogicalType::VARCHAR, QuackDummyAuthorization);
 	rpc_authorization.SetVolatile();
 	loader.RegisterFunction(rpc_authorization);
+
+	// the principal the authentication callback returned for the session, NULL outside one
+	ScalarFunction quack_principal("quack_principal", {}, LogicalType::VARCHAR, QuackPrincipalFunc);
+	quack_principal.SetVolatile();
+	loader.RegisterFunction(quack_principal);
 
 	ScalarFunction quack_connection_id("quack_connection_id", {LogicalType::VARCHAR}, LogicalType::VARCHAR,
 	                                   QuackConnectionIdFunc);
