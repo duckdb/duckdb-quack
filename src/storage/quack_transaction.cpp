@@ -54,6 +54,22 @@ optional_ptr<CatalogEntry> QuackTransaction::Retain(unique_ptr<CatalogEntry> ent
 	return retained_entries.back().get();
 }
 
+void QuackTransaction::MarkCatalogChanged() {
+	lock_guard<mutex> guard(retained_lock);
+	catalog_changed = true;
+	own_snapshot.reset();
+}
+
+shared_ptr<QuackSchemaSet> QuackTransaction::OwnSnapshot() {
+	lock_guard<mutex> guard(retained_lock);
+	return own_snapshot;
+}
+
+void QuackTransaction::SetOwnSnapshot(shared_ptr<QuackSchemaSet> snapshot) {
+	lock_guard<mutex> guard(retained_lock);
+	own_snapshot = std::move(snapshot);
+}
+
 QuackTransaction &QuackTransaction::Get(ClientContext &context, Catalog &catalog) {
 	return Transaction::Get(context, catalog).Cast<QuackTransaction>();
 }

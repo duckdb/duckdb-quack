@@ -187,7 +187,7 @@ optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateTable(CatalogTransacti
 
 	auto &quack_transaction = QuackTransaction::Get(transaction);
 	quack_transaction.Query(create_table_info->ToString());
-	ParentCatalog().Cast<QuackCatalog>().Invalidate();
+	quack_transaction.MarkCatalogChanged();
 	auto existing = tables->GetEntry(create_table_info->GetQualifiedName().Name().GetIdentifierName());
 	if (existing && info.Base().on_conflict != OnCreateConflict::REPLACE_ON_CONFLICT) {
 		return existing;
@@ -204,7 +204,7 @@ optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateView(CatalogTransactio
 	// create the view verbatim in the serer
 	auto &quack_transaction = QuackTransaction::Get(transaction);
 	quack_transaction.Query(create_view_info->ToString());
-	ParentCatalog().Cast<QuackCatalog>().Invalidate();
+	quack_transaction.MarkCatalogChanged();
 
 	// locally, override the query with a remote procedure call to ensure the view is evaluated remotely
 	info.sql = QuackViewCatalogEntry::CreateViewSQL(ParentCatalog().GetName().GetIdentifierName(), remote_name);
@@ -255,7 +255,7 @@ void QuackSchemaCatalogEntry::DropEntry(ClientContext &context, DropInfo &info_p
 	}
 	auto &transaction = QuackTransaction::Get(context, ParentCatalog());
 	transaction.Query(drop_info->ToString());
-	ParentCatalog().Cast<QuackCatalog>().Invalidate();
+	transaction.MarkCatalogChanged();
 }
 void QuackSchemaCatalogEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 	throw NotImplementedException("Alter not implemented yet, Alter!");
