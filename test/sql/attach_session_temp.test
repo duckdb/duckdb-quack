@@ -1,0 +1,94 @@
+# name: test/sql/attach_session_temp.test
+# description: the server's temp catalog is reachable as <alias>.temp.main, each connection seeing its own session's
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+statement ok
+create table rpc.t(i INT)
+
+statement ok
+insert into rpc.t values (1)
+
+statement ok con1
+create table rpc.temp.main.s as select 2 as i
+
+statement ok con2
+create table rpc.temp.main.s as select 3 as i
+
+query I con1
+from rpc.temp.main.s
+----
+2
+
+query I con2
+from rpc.temp.main.s
+----
+3
+
+# a remote table and a temp one in one statement: pushed down whole
+statement ok con1
+merge into rpc.t using rpc.temp.main.s as s on t.i = s.i when not matched then insert values (s.i)
+
+query I con1
+select i from rpc.t order by i
+----
+1
+2
+
+statement ok con1
+create view rpc.temp.main.v as select i * 10 as i from rpc.temp.main.s
+
+query I con1
+from rpc.temp.main.v
+----
+20
+
+statement ok con1
+drop view rpc.temp.main.v
+
+statement ok con1
+drop table rpc.temp.main.s
+
+statement error con1
+from rpc.temp.main.s
+----
+does not exist
+
+query I con2
+from rpc.temp.main.s
+----
+3
+
+# what a rolled back transaction made in temp is gone with it
+statement ok con2
+BEGIN
+
+statement ok con2
+create table rpc.temp.main.gone as select 4 as i
+
+query I con2
+from rpc.temp.main.gone
+----
+4
+
+statement ok con2
+ROLLBACK
+
+statement error con2
+from rpc.temp.main.gone
+----
+does not exist
+
+# made on the server directly, seen once the catalog is refreshed
+statement ok con2
+from quack_query_by_name('rpc', 'create temp table direct as select 5 as i', refresh_catalog := true)
+
+query I con2
+from rpc.temp.main.direct
+----
+5
+

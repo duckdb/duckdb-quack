@@ -22,6 +22,7 @@ public:
 	explicit QuackTableSet(QuackSchemaCatalogEntry &parent);
 
 	static string GetLoadQuery();
+	static string GetTempLoadQuery();
 
 private:
 	QuackSchemaCatalogEntry &schema;

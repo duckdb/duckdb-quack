@@ -97,6 +97,18 @@ QuackTableSet::QuackTableSet(QuackSchemaCatalogEntry &parent)
     : QuackCatalogSet(parent.ParentCatalog().Cast<QuackCatalog>()), schema(parent) {
 }
 
+string QuackTableSet::GetTempLoadQuery() {
+	return R"(
+SELECT schema_oid, sql, 'table'
+FROM duckdb_tables()
+WHERE database_name = 'temp'
+UNION ALL
+SELECT schema_oid, view_name, 'view'
+FROM duckdb_views()
+WHERE database_name = 'temp'
+	)";
+}
+
 string QuackTableSet::GetLoadQuery() {
 	// the schema is identified by its oid - the name alone is ambiguous once schemas can be nested or live in
 	// different catalogs on the server
@@ -112,7 +124,7 @@ FROM duckdb_views()
 TableFunction QuackTableCatalogEntry::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data_p) {
 	auto &quack_catalog = catalog.Cast<QuackCatalog>();
 	auto bind_data = make_uniq<QuackScanBindData>();
-	bind_data->client_connection = quack_catalog.GetClientConnection();
+	bind_data->client_connection = quack_catalog.GetClientConnection(context);
 	// the scan runs on the server: refer to the table the way the server sees it
 	bind_data->qualified_table_name = schema.Cast<QuackSchemaCatalogEntry>().GetRemoteName(name);
 	for (auto &col : GetColumns().Physical()) {

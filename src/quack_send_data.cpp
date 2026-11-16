@@ -94,7 +94,7 @@ public:
 	                             idx_t size_hint)
 	    : stream_id(stream_id_p) {
 		auto &quack_catalog = table.catalog.Cast<QuackCatalog>();
-		connection_id = quack_catalog.GetConnectionId();
+		connection_id = quack_catalog.GetConnectionId(context);
 		// Fail before the first batch when the ids cannot fit. 64 covers the fixed fields at max width.
 		if (64 + connection_id.size() + stream_id.size() > QUACK_PAYLOAD_HEADER_BYTES) {
 			throw InternalException("SEND_DATA header does not fit its reserved space");
@@ -166,8 +166,9 @@ public:
 		try {
 			if (auto live = context.lock()) {
 				auto &quack_catalog = table.catalog.Cast<QuackCatalog>();
-				auto client_wrapper = quack_catalog.GetClientConnection()->GetClient(*live);
-				auto cancel = make_uniq<CancelRequestMessage>(quack_catalog.GetConnectionId(), query_uuid);
+				auto connection = quack_catalog.GetClientConnection(*live);
+				auto client_wrapper = connection->GetClient(*live);
+				auto cancel = make_uniq<CancelRequestMessage>(connection->ConnectionId(), query_uuid);
 				client_wrapper->GetClient().Request<SuccessResponse>(*live, std::move(cancel));
 			}
 		} catch (...) { // NOLINT: best effort
@@ -207,13 +208,13 @@ public:
 
 		auto connection_id = prepared->connection_id;
 		auto client_query_id = prepared->client_query_id;
-		auto client_wrapper = quack_catalog.GetClientConnection()->GetClient(context);
+		auto client_wrapper = quack_catalog.GetClientConnection(context)->GetClient(context);
 		queue->Register(make_uniq<QuackSendDataTask>(std::move(client_wrapper), std::move(prepared->payload),
 		                                             body_start, body_size, connection_id, client_query_id,
 		                                             context.logger, debug_delay_ms),
 		                body_size);
 		if (duplicate) {
-			auto retry_wrapper = quack_catalog.GetClientConnection()->GetClient(context);
+			auto retry_wrapper = quack_catalog.GetClientConnection(context)->GetClient(context);
 			queue->Register(make_uniq<QuackSendDataTask>(std::move(retry_wrapper), std::move(duplicate), 0, body_size,
 			                                             std::move(connection_id), client_query_id, context.logger,
 			                                             debug_delay_ms),
@@ -229,18 +230,19 @@ public:
 		queue.reset();
 
 		auto &quack_catalog = table.catalog.Cast<QuackCatalog>();
-		auto client_wrapper = quack_catalog.GetClientConnection()->GetClient(context);
+		auto connection = quack_catalog.GetClientConnection(context);
+		auto client_wrapper = connection->GetClient(context);
 		auto &client = client_wrapper->GetClient();
 
 		// The terminal message is an ordinary SEND_DATA with no chunks. It closes the stream against the
 		// batch count, so a lost batch fails the statement.
-		auto terminal = make_uniq<SendDataRequestMessage>(quack_catalog.GetConnectionId(), stream_id);
+		auto terminal = make_uniq<SendDataRequestMessage>(connection->ConnectionId(), stream_id);
 		terminal->SetTotalBatches(total_batches);
 		client.Request<SendDataResponseMessage>(context, std::move(terminal));
 
 		// The statement's result is one row: the rows it changed. Fetch it like any result, so a
 		// failure after the last batch surfaces here too.
-		auto fetch = make_uniq<FetchRequestMessage>(quack_catalog.GetConnectionId(), query_uuid, 1, 1);
+		auto fetch = make_uniq<FetchRequestMessage>(connection->ConnectionId(), query_uuid, 1, 1);
 		auto response = client.Request<FetchResponseMessage>(context, std::move(fetch));
 		for (auto &chunk : response->MutableResults()) {
 			if (chunk->size() > 0 && chunk->ColumnCount() > 0) {

@@ -15,6 +15,7 @@
 
 namespace duckdb {
 class QuackClientConnection;
+class QuackSchemaSet;
 struct QuackClientWrapper;
 
 //! The active query's id, for log correlation. Invalid when no query runs (e.g. transaction start).
@@ -145,6 +146,11 @@ public:
 		return server_invalidated;
 	}
 
+	//! The server's temp catalog as this connection's session holds it: empty until looked up, and again after
+	//! this session may have changed it
+	shared_ptr<QuackSchemaSet> TempSchemas() const;
+	void SetTempSchemas(shared_ptr<QuackSchemaSet> schemas) const;
+
 private:
 	friend class QuackClient;
 
@@ -163,6 +169,7 @@ private:
 	//! connection slot, so an unbounded cache would let one attach starve the server's budget.
 	idx_t max_connections_cached;
 	mutable vector<unique_ptr<QuackClient>> cached_clients;
+	mutable shared_ptr<QuackSchemaSet> temp_schemas;
 
 	QuackPeriodicWorker heartbeat;
 };

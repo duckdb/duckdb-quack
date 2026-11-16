@@ -72,9 +72,9 @@ QuackSchemaSet::QuackSchemaSet(ClientContext &context, QuackCatalog &catalog, co
 	}
 }
 
-string QuackSchemaSet::GetLoadQuery() {
-	// walk the (possibly nested) schema tree of every catalog the server has attached, so that each schema is
-	// reported with its full path - e.g. a schema "child" nested in "s1" comes back as ['s1', 'child']
+//! Walk the (possibly nested) schema tree of the server's catalogs, so that each schema is reported with its
+//! full path - e.g. a schema "child" nested in "s1" comes back as ['s1', 'child']
+static string SchemaTreeQuery(const string &filter) {
 	return R"(
 WITH RECURSIVE schema_tree AS (
 	SELECT oid, database_name, [schema_name] AS schema_path
@@ -87,9 +87,19 @@ WITH RECURSIVE schema_tree AS (
 )
 SELECT oid, database_name, schema_path, current_database()
 FROM schema_tree
-WHERE database_name NOT IN ('system', 'temp')
+WHERE )" + filter +
+	       R"(
 ORDER BY (database_name = current_database()) DESC, database_name, length(schema_path), schema_path
 	)";
+}
+
+string QuackSchemaSet::GetLoadQuery() {
+	// temp is the server session's own, so it is loaded per connection (QuackCatalog::GetTempSchemas)
+	return SchemaTreeQuery("database_name NOT IN ('system', 'temp')");
+}
+
+string QuackSchemaSet::GetTempLoadQuery() {
+	return SchemaTreeQuery("database_name = 'temp'");
 }
 
 QuackSchemaCatalogEntry::QuackSchemaCatalogEntry(Catalog &catalog_p, CreateSchemaInfo &info_p,
@@ -126,6 +136,11 @@ unique_ptr<CreateInfo> QuackSchemaCatalogEntry::GetInfo() const {
 
 QualifiedName QuackSchemaCatalogEntry::GetRemoteName(const Identifier &entry_name) const {
 	return QualifiedName(GetSchemaPath(), entry_name);
+}
+
+bool QuackSchemaCatalogEntry::InTemp() const {
+	auto path = GetSchemaPath();
+	return path.size() > 1 && StringUtil::CIEquals(path[0].GetIdentifierName(), TEMP_CATALOG);
 }
 
 optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::LookupEntry(CatalogTransaction transaction,
@@ -184,10 +199,12 @@ optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateTable(CatalogTransacti
                                                                 BoundCreateTableInfo &info) {
 	auto create_table_info = info.Base().Copy();
 	create_table_info->SetQualifiedName(GetRemoteName(create_table_info->GetQualifiedName().Name()));
+	// the server takes a table in its temp catalog only as a TEMP one
+	create_table_info->temporary = InTemp();
 
 	auto &quack_transaction = QuackTransaction::Get(transaction);
 	quack_transaction.Query(create_table_info->ToString());
-	ParentCatalog().Cast<QuackCatalog>().Invalidate();
+	ParentCatalog().Cast<QuackCatalog>().Invalidate(transaction.GetContext());
 	auto existing = tables->GetEntry(create_table_info->GetQualifiedName().Name().GetIdentifierName());
 	if (existing && info.Base().on_conflict != OnCreateConflict::REPLACE_ON_CONFLICT) {
 		return existing;
@@ -200,11 +217,12 @@ optional_ptr<CatalogEntry> QuackSchemaCatalogEntry::CreateView(CatalogTransactio
 	auto create_view_info = info.Copy();
 	auto remote_name = GetRemoteName(create_view_info->GetQualifiedName().Name());
 	create_view_info->SetQualifiedName(remote_name);
+	create_view_info->temporary = InTemp();
 
 	// create the view verbatim in the serer
 	auto &quack_transaction = QuackTransaction::Get(transaction);
 	quack_transaction.Query(create_view_info->ToString());
-	ParentCatalog().Cast<QuackCatalog>().Invalidate();
+	ParentCatalog().Cast<QuackCatalog>().Invalidate(transaction.GetContext());
 
 	// locally, override the query with a remote procedure call to ensure the view is evaluated remotely
 	info.sql = QuackViewCatalogEntry::CreateViewSQL(ParentCatalog().GetName().GetIdentifierName(), remote_name);
@@ -255,7 +273,7 @@ void QuackSchemaCatalogEntry::DropEntry(ClientContext &context, DropInfo &info_p
 	}
 	auto &transaction = QuackTransaction::Get(context, ParentCatalog());
 	transaction.Query(drop_info->ToString());
-	ParentCatalog().Cast<QuackCatalog>().Invalidate();
+	ParentCatalog().Cast<QuackCatalog>().Invalidate(context);
 }
 void QuackSchemaCatalogEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 	throw NotImplementedException("Alter not implemented yet, Alter!");

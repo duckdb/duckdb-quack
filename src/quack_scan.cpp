@@ -123,7 +123,7 @@ static unique_ptr<FunctionData> QuackScanBindCatalogName(ClientContext &context,
 	// TODO some of this stuff below is duplicated af
 	auto query = input.inputs[1].GetValue<string>();
 	auto bind_data = make_uniq<QuackScanBindData>();
-	bind_data->client_connection = catalog.GetClientConnection();
+	bind_data->client_connection = catalog.GetClientConnection(context);
 	auto client_wrapper = bind_data->client_connection->GetClient(context);
 	auto &client = client_wrapper->GetClient();
 	bind_data->query_uuid = UUID::GenerateRandomUUID();
@@ -143,8 +143,14 @@ static unique_ptr<FunctionData> QuackScanBindCatalogName(ClientContext &context,
 	bind_data->query_uuid = bind_response->QueryUUID();
 	if (refresh_catalog) {
 		// the query was a statement pushed down by the RemotePushdownOptimizer - the server has already
-		// executed it (PREPARE runs the query), so our snapshot of the remote catalog is out of date
-		catalog.Invalidate();
+		// executed it (PREPARE runs the query), so our snapshot of the remote catalog is out of date: for this
+		// transaction alone when the statement ran in it, for everyone when it committed on its own
+		if (use_transaction) {
+			catalog.Invalidate(context);
+		} else {
+			catalog.Invalidate();
+			catalog.ForgetTemp(context);
+		}
 	}
 	return bind_data;
 }
