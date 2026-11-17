@@ -1,4 +1,5 @@
 #include "storage/quack_catalog_set.hpp"
+#include "storage/quack_catalog.hpp"
 
 #include "duckdb/catalog/catalog_entry.hpp"
 #include "duckdb/common/helper.hpp"
@@ -31,6 +32,7 @@ vector<reference<CatalogEntry>> QuackCatalogSet::GetAllCatalogEntries() {
 }
 
 optional_ptr<CatalogEntry> QuackCatalogSet::CreateEntry(unique_ptr<CatalogEntry> entry, OnCreateConflict on_conflict) {
+	catalog.KeepOid(*entry);
 	lock_guard<mutex> l(entry_lock);
 	auto &entry_name = entry->name;
 	if (on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT) {

@@ -41,6 +41,9 @@ public:
 	void Retain(shared_ptr<QuackSchemaSet> snapshot);
 	optional_ptr<CatalogEntry> Retain(unique_ptr<CatalogEntry> entry);
 
+	//! True the first time it is asked in this transaction: a lookup that missed may reload the catalog once
+	bool TakeMissReload();
+
 private:
 	QuackCatalog &quack_catalog;
 	QuackTransactionState transaction_state;
@@ -48,6 +51,7 @@ private:
 	mutex retained_lock;
 	vector<shared_ptr<QuackSchemaSet>> retained_snapshots;
 	vector<unique_ptr<CatalogEntry>> retained_entries;
+	bool reloaded_on_miss = false;
 };
 
 } // namespace duckdb
