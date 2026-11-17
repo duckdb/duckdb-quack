@@ -30,6 +30,9 @@ public:
 	string GetCatalogType() override {
 		return "quack";
 	}
+	bool SupportsNestedSchemas() const override {
+		return true;
+	}
 	static QuackCatalog &GetQuackCatalog(ClientContext &context, Value &catalog_name);
 	static bool IsQuackScan(const string &name);
 	bool SupportsPushdown(const TableRef &ref) override;
