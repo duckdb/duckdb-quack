@@ -313,7 +313,7 @@ static void QuackGenerateKeysFun(ClientContext &context, TableFunctionInput &dat
 	auto certificate_directory = bind_data.certificate_directory;
 	if (certificate_directory.empty()) {
 		certificate_directory =
-		    SslKeyGenerator::GetDefaultCertificateDirectory(fs, ClientData::Get(context).file_opener.get());
+		    SslKeyGenerator::GetDefaultCertificateDirectory(fs, context.GetContext().TryGetFileOpener().get());
 	} else if (!fs.DirectoryExists(certificate_directory)) {
 		fs.CreateDirectoriesRecursive(certificate_directory);
 	}

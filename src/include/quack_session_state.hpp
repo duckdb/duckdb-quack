@@ -28,7 +28,7 @@ public:
 
 	//! Null for any context that the quack server does not own.
 	static shared_ptr<QuackSessionState> Get(ClientContext &context) {
-		return context.registered_state->Get<QuackSessionState>(KEY);
+		return context.GetContext().GetRegisteredState().Get<QuackSessionState>(KEY);
 	}
 
 	//! The id the client uses to address this session, as returned to it by the connection handshake.
