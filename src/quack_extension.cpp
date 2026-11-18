@@ -3,6 +3,7 @@
 #include <cstdlib>
 
 #include "duckdb/catalog/default/default_table_functions.hpp"
+#include "duckdb/common/limits.hpp"
 #include "duckdb/common/types/uuid.hpp"
 #include "duckdb/logging/log_manager.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -37,6 +38,20 @@ static void ValidateHeartbeatTimeoutSetting(ClientContext &, SetScope, Value &pa
 		throw InvalidInputException("heartbeat_timeout cannot be null");
 	}
 	QuackClient::ValidateHeartbeatTimeout(parameter.GetValue<idx_t>());
+}
+
+static void ValidateControlTimeoutSetting(ClientContext &, SetScope, Value &parameter) {
+	if (parameter.IsNull()) {
+		throw InvalidInputException("quack_control_timeout cannot be null");
+	}
+	QuackClient::ValidateControlTimeout(parameter.GetValue<idx_t>());
+}
+
+static void ValidateHttpTimeoutSetting(ClientContext &, SetScope, Value &parameter) {
+	if (parameter.IsNull()) {
+		throw InvalidInputException("quack_http_timeout cannot be null");
+	}
+	QuackValidateHttpTimeout(parameter.GetValue<idx_t>());
 }
 
 static unique_ptr<BaseSecret> CreateQuackSecretFromConfig(ClientContext &, CreateSecretInput &input) {
@@ -202,6 +217,15 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "Maximum concurrent connections the RPC server accepts; beyond this new "
 	                          "connections are refused",
 	                          LogicalType::UBIGINT, Value::UBIGINT(1024), nullptr, SetScope::GLOBAL);
+	config.AddExtensionOption(
+	    "quack_control_timeout",
+	    "Seconds allowed for heartbeat, cancel and disconnect requests, capped by quack_http_timeout",
+	    LogicalType::UBIGINT, Value::UBIGINT(QUACK_CONTROL_TIMEOUT_DEFAULT), ValidateControlTimeoutSetting,
+	    SetScope::GLOBAL);
+
+	config.AddExtensionOption("quack_http_timeout", "Seconds a client waits for the server to answer one request",
+	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_HTTP_TIMEOUT_DEFAULT),
+	                          ValidateHttpTimeoutSetting, SetScope::GLOBAL);
 	config.AddExtensionOption("quack_server_keep_alive_timeout",
 	                          "Seconds an idle keep-alive connection is kept open by the RPC server",
 	                          LogicalType::UBIGINT, Value::UBIGINT(300), nullptr, SetScope::GLOBAL);

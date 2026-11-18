@@ -1,0 +1,57 @@
+# name: test/sql/http_timeout_setting.test
+# description: HTTP timeouts fit transport seconds and socket-polling milliseconds
+# group: [sql]
+
+require quack
+
+statement ok
+LOAD quack;
+
+statement error
+SET quack_http_timeout=18446744073709551615;
+----
+quack_http_timeout must be between 1 and 2147483 seconds
+
+statement error
+SET quack_http_timeout=2147484;
+----
+quack_http_timeout must be between 1 and 2147483 seconds
+
+statement error
+SET quack_http_timeout=9223372036854775808;
+----
+quack_http_timeout must be between 1 and 2147483 seconds
+
+statement error
+SET quack_http_timeout=0;
+----
+quack_http_timeout must be between 1 and 2147483 seconds
+
+statement error
+SET quack_http_timeout=NULL;
+----
+quack_http_timeout cannot be null
+
+query I
+SELECT current_setting('quack_http_timeout');
+----
+86400
+
+statement ok
+SET quack_http_timeout=2147483;
+
+query I
+SELECT current_setting('quack_http_timeout');
+----
+2147483
+
+statement ok
+SET quack_http_timeout=1;
+
+statement ok
+RESET quack_http_timeout;
+
+query I
+SELECT current_setting('quack_http_timeout');
+----
+86400

@@ -1,5 +1,7 @@
 #include "quack_settings.hpp"
 
+#include "duckdb/common/exception.hpp"
+#include "duckdb/common/limits.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
@@ -20,6 +22,33 @@ idx_t QuackGetUBigintSetting(DatabaseInstance &db, const char *name, idx_t defau
 		return val.GetValue<uint64_t>();
 	}
 	return default_value;
+}
+
+static idx_t MaximumHttpTimeout() {
+	// Socket polling converts these seconds to signed 32-bit milliseconds.
+	return NumericCast<idx_t>(NumericLimits<int32_t>::Maximum() / 1000);
+}
+
+idx_t QuackControlTimeout(DatabaseInstance &db) {
+	// A bad programmatic data timeout must not prevent cancellation, heartbeats or disconnect.
+	const auto http_timeout = MinValue<idx_t>(
+	    MaximumHttpTimeout(),
+	    MaxValue<idx_t>(1, QuackGetUBigintSetting(db, "quack_http_timeout", QUACK_HTTP_TIMEOUT_DEFAULT)));
+	return MinValue<idx_t>(http_timeout, MaxValue<idx_t>(1, QuackGetUBigintSetting(db, "quack_control_timeout",
+	                                                                               QUACK_CONTROL_TIMEOUT_DEFAULT)));
+}
+
+idx_t QuackHttpTimeout(DatabaseInstance &db) {
+	const auto timeout = QuackGetUBigintSetting(db, "quack_http_timeout", QUACK_HTTP_TIMEOUT_DEFAULT);
+	QuackValidateHttpTimeout(timeout);
+	return timeout;
+}
+
+void QuackValidateHttpTimeout(idx_t timeout) {
+	const auto maximum = MaximumHttpTimeout();
+	if (timeout == 0 || timeout > maximum) {
+		throw InvalidInputException("quack_http_timeout must be between 1 and %llu seconds", maximum);
+	}
 }
 
 idx_t QuackServerStreamBufferBytes(DatabaseInstance &db) {
