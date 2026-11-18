@@ -55,13 +55,9 @@ static void LoadExtraHttpHeaders(optional_ptr<ClientContext> context, DatabaseIn
 }
 
 void QuackClientConnection::CancelQuery(hugeint_t query_uuid) {
-	lock_guard<mutex> guard(lock);
-	if (cached_clients.empty()) {
-		return;
-	}
-	// get a cached client, if any
-	auto &client = cached_clients.back();
+	auto client = TakeClient(nullptr);
 	client->Request<SuccessResponse>(nullptr, make_uniq<CancelRequestMessage>(connection_id, query_uuid));
+	StoreClient(std::move(client));
 }
 
 QuackClient::QuackClient(DatabaseInstance &db_p, const QuackUri &uri_p) : db(db_p), uri(uri_p) {
