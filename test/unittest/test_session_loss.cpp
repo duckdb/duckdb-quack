@@ -54,7 +54,7 @@ public:
 			cv.notify_all();
 		}
 		input.Rewind();
-		auto response = server.HandleMessage(input);
+		auto response = server.HandleMessage(input, "127.0.0.1");
 		if (fail_next.exchange(false)) {
 			// Lose the response after the server renewed the lease. This tests transport retry without
 			// racing two heartbeat intervals against the short lease used by the expiry test.
@@ -170,7 +170,7 @@ TEST_CASE("Lost-session metadata is compatible with the existing error wire layo
 	HeartbeatRequestMessage request(id);
 	MemoryStream input(Allocator::DefaultAllocator());
 	request.ToMemoryStream(input);
-	auto response = fixture.server->HandleMessage(input);
+	auto response = fixture.server->HandleMessage(input, "127.0.0.1");
 	REQUIRE(response->Type() == MessageType::ERROR_RESPONSE);
 	MemoryStream output(Allocator::DefaultAllocator());
 	response->ToMemoryStream(output);

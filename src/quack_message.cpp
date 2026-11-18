@@ -77,6 +77,8 @@ MessageType EnumUtil::FromString<MessageType>(const char *value) {
 template <>
 const char *EnumUtil::ToChars<MessageType>(MessageType value) {
 	switch (value) {
+	case MessageType::INVALID:
+		return "INVALID";
 	case MessageType::CONNECTION_REQUEST:
 		return "CONNECTION_REQUEST";
 	case MessageType::CONNECTION_RESPONSE:
