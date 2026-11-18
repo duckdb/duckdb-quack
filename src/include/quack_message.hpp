@@ -615,6 +615,8 @@ private:
 namespace QuackErrorInfo {
 //! The type the SERVER raised, when it was too severe to rethrow as-is (see ErrorResponse::FromWire)
 constexpr const char *ORIGINAL_EXCEPTION_TYPE = "original_exception_type";
+//! SHA-256 of the session the server no longer has. Relayed errors must not kill a different session.
+constexpr const char *LOST_SESSION_ID_HASH = "quack_lost_session_id_hash";
 } // namespace QuackErrorInfo
 
 //! An error raised while handling a request. Type and extra info travel with the message, so the client
@@ -640,6 +642,9 @@ public:
 	string ExceptionTypeName() const;
 	//! The extra info minus the entries that only mean something in the process that raised the error
 	unordered_map<string, string> TransferableExtraInfo() const;
+	//! Session loss uses the existing extra-info map, so older peers can still decode the response.
+	static unique_ptr<ErrorResponse> LostSession(const string &connection_id, const string &message);
+	bool IsLostSession(const string &connection_id) const;
 
 	//! Whether the SENDER's database is now invalidated, i.e. the receiver should stop using this connection.
 	//! A bare flag rather than the sender's identity: a server behind a proxy does not know the address it is
