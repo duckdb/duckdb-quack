@@ -171,6 +171,15 @@ public:
 		return inline_rows;
 	}
 
+	//! The client's quack_query_tag when it sent the statement; empty if it set none. The server
+	//! exposes it to the authorization function and to the statement as the same setting.
+	void SetQueryTag(string query_tag_p) {
+		query_tag = std::move(query_tag_p);
+	}
+	const string &QueryTag() const {
+		return query_tag;
+	}
+
 public:
 	const string &Query() const {
 		return sql_query;
@@ -192,6 +201,7 @@ private:
 	string sql_query;
 	hugeint_t query_uuid;
 	optional_idx inline_rows;
+	string query_tag;
 };
 
 class PrepareResponseMessage : public QuackMessage {
