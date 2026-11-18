@@ -125,7 +125,8 @@ TableFunction QuackTableCatalogEntry::GetScanFunction(ClientContext &context, un
 }
 
 unique_ptr<BaseStatistics> QuackTableCatalogEntry::GetStatistics(ClientContext &context, column_t column_id) {
-	throw NotImplementedException("GetStatistics not implemented yet");
+	// the statistics live on the server - unknown here, so the optimizer assumes nothing
+	return nullptr;
 }
 
 TableStorageInfo QuackTableCatalogEntry::GetStorageInfo(ClientContext &context) {
