@@ -1,6 +1,6 @@
 [submodule "duckdb"]
 	path = duckdb
-	url = https://github.com/duckdb/duckdb
+	url = https://github.com/jdctinuiti/duckdb
 	branch = main
 [submodule "extension-ci-tools"]
 	path = extension-ci-tools
