@@ -15,6 +15,7 @@
 #include "quack_client.hpp"
 #include "quack_secret.hpp"
 #include "quack_session_state.hpp"
+#include "quack_settings.hpp"
 #include "quack_uri.hpp"
 
 namespace duckdb {
@@ -154,7 +155,7 @@ void HttpsQuackClient::EnsureHttpParams(optional_ptr<ClientContext> context) {
 		// Resolve EXTRA_HTTP_HEADERS from the quack secret once; reused for every request on this client.
 		LoadExtraHttpHeaders(context, db, uri, extra_headers);
 	}
-	http_params->timeout = HTTP_TIMEOUT_SECONDS;
+	http_params->timeout = QuackHttpTimeout(db);
 	http_params->retries = 0;
 	// http_params is cached across checkouts; re-scope its logger each request so a context-less
 	// teardown on a pooled client never logs under a prior query's scope.
@@ -231,15 +232,11 @@ PinnedHttpsQuackClient::PinnedHttpsQuackClient(DatabaseInstance &db, const Quack
 	});
 	https_client->set_keep_alive(true);
 	https_client->set_tcp_nodelay(true);
-	// Same knob the httpfs transport honors, so a caller that raised http_timeout for long requests
-	// gets the same bound here (seconds).
-	Value timeout_val;
-	if (db.TryGetCurrentSetting("http_timeout", timeout_val) && !timeout_val.IsNull()) {
-		auto timeout_seconds = NumericCast<time_t>(timeout_val.GetValue<uint64_t>());
-		https_client->set_connection_timeout(timeout_seconds, 0);
-		https_client->set_read_timeout(timeout_seconds, 0);
-		https_client->set_write_timeout(timeout_seconds, 0);
-	}
+	// Same bound as the httpfs transport (seconds).
+	auto timeout_seconds = NumericCast<time_t>(QuackHttpTimeout(db));
+	https_client->set_connection_timeout(timeout_seconds, 0);
+	https_client->set_read_timeout(timeout_seconds, 0);
+	https_client->set_write_timeout(timeout_seconds, 0);
 }
 
 PinnedHttpsQuackClient::~PinnedHttpsQuackClient() {
