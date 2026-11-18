@@ -1,0 +1,77 @@
+# name: test/sql/clear_cache_prepared.test
+# description: every execution of a prepared cache refresh reloads its catalogs
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok
+attach {server} as rpc (token 'asdf');
+
+statement ok
+attach {server} as rpc2 (token 'asdf');
+
+statement ok
+prepare refresh_one as select "Success"::integer from quack_clear_cache('rpc');
+
+query I
+execute refresh_one;
+----
+1
+
+statement ok quack_db:quack_server_con
+create table prepared_refresh_t1 as values (42);
+
+query I
+execute refresh_one;
+----
+1
+
+query I
+select col0 from rpc.prepared_refresh_t1;
+----
+42
+
+statement error
+select * from rpc2.prepared_refresh_t1;
+----
+Table with name prepared_refresh_t1 does not exist
+
+statement ok
+prepare refresh_all as select "Success"::integer from quack_clear_cache();
+
+query I
+execute refresh_all;
+----
+1
+
+statement ok quack_db:quack_server_con
+create table prepared_refresh_t2 as values (43);
+
+query I
+execute refresh_all;
+----
+1
+
+query I
+select col0 from rpc.prepared_refresh_t2;
+----
+43
+
+query I
+select col0 from rpc2.prepared_refresh_t2;
+----
+43
+
+statement ok
+deallocate refresh_one;
+
+statement ok
+deallocate refresh_all;
+
+statement ok
+detach rpc;
+
+statement ok
+detach rpc2;
+
+include test/template/quack_teardown.test_template
