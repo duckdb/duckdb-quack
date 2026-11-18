@@ -16,6 +16,9 @@ class QuackLogType : public LogType {
 public:
 	static constexpr const char *NAME = "Quack";
 	static constexpr LogLevel LEVEL = LogLevel::LOG_DEBUG;
+	//! A logged connection id is cut to this length. The server logs the id a request carries before it checks
+	//! it, so an unknown id can be any size; an id the server issued is 32 hex characters.
+	static constexpr idx_t MAX_CONNECTION_ID_BYTES = 64;
 
 	QuackLogType();
 
@@ -23,7 +26,7 @@ public:
 	static string ConstructLogMessage(MessageType request_type, const string &connection_id,
 	                                  const string &client_id_hash, optional_idx client_query_id, const string &query,
 	                                  const string &server_uri, int64_t duration_ms, MessageType response_type,
-	                                  const string &error);
+	                                  const string &error, const string &client_address);
 };
 
 } // namespace duckdb

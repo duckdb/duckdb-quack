@@ -247,7 +247,7 @@ HttpQuackServer::HttpQuackServer(ClientContext &context_p, const QuackUri &uri_p
 		res.status = 204;
 	});
 
-	server->Post("/quack", [&](const duckdb_httplib_openssl::Request &, duckdb_httplib_openssl::Response &res,
+	server->Post("/quack", [&](const duckdb_httplib_openssl::Request &req, duckdb_httplib_openssl::Response &res,
 	                           const duckdb_httplib_openssl::ContentReader &content_reader) {
 		res.set_header("Access-Control-Allow-Origin", "*");
 		MemoryStream stream;
@@ -255,7 +255,7 @@ HttpQuackServer::HttpQuackServer(ClientContext &context_p, const QuackUri &uri_p
 			stream.WriteData((data_ptr_t)data, data_length);
 			return true;
 		});
-		auto response = HandleMessage(stream);
+		auto response = HandleMessage(stream, req.remote_addr);
 		auto raw = response->RawPayload();
 		if (raw) {
 			// Already serialized: httplib sends the bytes with no copy. The shared_ptr keeps them alive.

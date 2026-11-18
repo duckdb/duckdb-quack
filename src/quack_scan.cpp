@@ -475,7 +475,7 @@ InsertionOrderPreservingMap<string> QuackScanToString(TableFunctionToStringInput
 	return result;
 }
 
-void QuackScanSerialize(Serializer &serializer, const optional_ptr<FunctionData> bind_data,
+void QuackScanSerialize(Serializer &serializer, const optional_ptr<const FunctionData> bind_data,
                         const BoundTableFunction &function) {
 	throw NotImplementedException("Quack scans cannot be serialized (yet?)");
 }

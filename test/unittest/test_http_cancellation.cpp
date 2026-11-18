@@ -46,7 +46,7 @@ public:
 			cancelled_target++;
 		}
 		input.Rewind();
-		auto response = server.HandleMessage(input);
+		auto response = server.HandleMessage(input, "127.0.0.1");
 		if (armed.load() && Matches(*message) && armed.exchange(false)) {
 			if (message->Type() == MessageType::PREPARE_REQUEST) {
 				interrupted_query_uuid = message->Cast<PrepareRequestMessage>().QueryUUID();
