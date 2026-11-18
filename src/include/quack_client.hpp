@@ -51,7 +51,8 @@ public:
 
 	//! POST already-serialized request bytes and return the raw response body, throwing on transport failure.
 	//! Lets an async sender serialize on a producer thread and perform the blocking POST from the ASYNC pool;
-	//! pass context=nullptr when called off the execution thread (parameters fall back to the database).
+	//! context is borrowed only for interruption/deadline checks and must outlive the request. Parameters are
+	//! resolved from the database, without reading query-local settings from an async thread.
 	virtual string PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size) = 0;
 
 	//! Best-effort teardown hint: bound the transport for subsequent (final DisconnectMessage) requests so a
@@ -192,7 +193,7 @@ private:
 	unique_ptr<QuackMessage> RequestInternal(optional_ptr<ClientContext> context,
 	                                         unique_ptr<QuackMessage> request_message) override;
 	//! POST bytes assuming request_mutex is already held.
-	string PostRawLocked(const_data_ptr_t data, idx_t size);
+	string PostRawLocked(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size);
 	//! Lazily initialise http_params (context-aware) and attach request_logger; assumes request_mutex is held.
 	void EnsureHttpParams(optional_ptr<ClientContext> context);
 
