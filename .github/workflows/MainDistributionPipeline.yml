@@ -12,6 +12,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.base_ref || '' }}-${{ github.ref != 'refs/heads/main' && github.sha || '' }}
   cancel-in-progress: true
 
+permissions:
+  actions: read
+  contents: read
+  packages: read
+
 jobs:
   prepare:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
@@ -24,28 +29,28 @@ jobs:
         id: runners
         uses: duckdb/duckdb-ci/detect-runners@main
 
-  duckdb-stable-build:
+  build:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    name: Build extension binaries
+    name: Build extension
     needs: prepare
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
+    uses: duckdb/extension-ci-tools/.github/workflows/build.yml@main
     with:
-      ci_tools_version: main
-      extension_name: quack
+      groups: |
+        main:
+          config: extension_config.cmake
+          toolchain: main
       runners: ${{ needs.prepare.outputs.runners }}
-      # Export QUACK_CLIENT_ID so quack_default_client_id_env.test (require-env gated) runs instead of skipping.
-      test_config: '{"test_env_variables": {"QUACK_CLIENT_ID": "quack_env_client_id"}}'
 
-  duckdb-stable-deploy:
+  deploy:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    name: Deploy extension binaries
-    needs:
-      - duckdb-stable-build
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_deploy.yml@main
+    name: Deploy extension
+    needs: build
+    uses: duckdb/extension-ci-tools/.github/workflows/deploy.yml@main
     secrets: inherit
     with:
-      ci_tools_version: main
-      extension_name: quack
+      duckdb_version: ${{ needs.build.outputs.duckdb_version }}
+      duckdb_commit: ${{ needs.build.outputs.duckdb_commit }}
+      deploy_extensions: quack
       deploy_latest: ${{ startsWith(github.ref, 'refs/heads/v') || github.ref == 'refs/heads/main' }}
       deploy_versioned: ${{ startsWith(github.ref, 'refs/heads/v') || github.ref == 'refs/heads/main' }}
 

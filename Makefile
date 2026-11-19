@@ -11,3 +11,6 @@ DEFAULT_TEST_EXTENSION_DEPS=httpfs;
 # Include the Makefile from extension-ci-tools
 include extension-ci-tools/makefiles/duckdb_extension.Makefile
 include extension-ci-tools/makefiles/vcpkg.Makefile
+
+# Exercise the client-id environment test with each test runner.
+test_release test_debug: export QUACK_CLIENT_ID=quack_env_client_id
