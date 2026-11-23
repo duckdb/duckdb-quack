@@ -1,0 +1,22 @@
+# name: test/sql/attach_table_statistics.test
+# description: an attached table has no local statistics, so a plan mixing it with a local table still runs
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+statement ok
+create table rpc.t(i INT)
+
+statement ok
+insert into rpc.t values (1), (2), (NULL)
+
+statement ok
+create temp table affected as select 2 as i
+
+query I
+select i from rpc.t where exists (select 1 from affected where affected.i = t.i)
+----
+2
