@@ -192,6 +192,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "stressing out-of-order batch arrival on the server",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
 
+	config.AddExtensionOption("quack_debug_skip_heartbeats",
+	                          "DEBUG SETTING: clients stop sending heartbeats, so the server lets their sessions "
+	                          "expire after heartbeat_timeout",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(false), nullptr, SetScope::GLOBAL);
+
 	config.AddExtensionOption("quack_server_stream_buffer_bytes",
 	                          "Server-side per-stream byte budget, at most a quarter of memory_limit: FETCH counts "
 	                          "serialized payload bytes, INSERT counts decoded chunk allocations; 0 disables the limit",

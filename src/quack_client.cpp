@@ -347,6 +347,11 @@ void QuackClientConnection::StartHeartbeat() {
 
 //! A failed attempt is not terminal: the worker swallows the throw and retries next interval.
 void QuackClientConnection::SendHeartbeat() {
+	Value skip_heartbeats;
+	if (db.TryGetCurrentSetting("quack_debug_skip_heartbeats", skip_heartbeats) && !skip_heartbeats.IsNull() &&
+	    skip_heartbeats.GetValue<bool>()) {
+		return;
+	}
 	auto client = TakeClient(nullptr);
 	client->Request<SuccessResponse>(nullptr, make_uniq<HeartbeatRequestMessage>(connection_id));
 	StoreClient(std::move(client));
