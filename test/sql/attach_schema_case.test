@@ -1,0 +1,77 @@
+# name: test/sql/attach_schema_case.test
+# description: schema-scoped attach follows identifier case matching
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok quack_db:quack_server_con
+create schema "Wanted";
+
+statement ok quack_db:quack_server_con
+create table "Wanted".t as values (42);
+
+statement ok quack_db:quack_server_con
+create schema "Wanted"."Child";
+
+statement ok quack_db:quack_server_con
+create table "Wanted"."Child".t as values (43);
+
+statement ok
+attach {server} as scoped (token 'asdf', schema 'wAnTeD');
+
+query I
+select col0 from scoped.wanted.t;
+----
+42
+
+query I
+select col0 from scoped.WANTED.child.t;
+----
+43
+
+statement ok
+call quack_clear_cache('scoped');
+
+query I
+select col0 from scoped.wanted.child.t;
+----
+43
+
+statement ok
+detach scoped;
+
+# DuckDB treats these Unicode letters as distinct identifiers.
+statement ok quack_db:quack_server_con
+create schema "ÄWanted";
+
+statement ok quack_db:quack_server_con
+create schema "äWanted";
+
+statement ok quack_db:quack_server_con
+create table "ÄWanted".t as values (51);
+
+statement ok quack_db:quack_server_con
+create table "äWanted".t as values (52);
+
+statement ok
+attach {server} as scoped (token 'asdf', schema 'Äwanted');
+
+query I
+select col0 from scoped."ÄWANTED".t;
+----
+51
+
+query I
+select count(*) from duckdb_schemas() where database_name = 'scoped' and schema_name = 'äWanted';
+----
+0
+
+statement error
+select * from scoped."äWanted".t;
+----
+<REGEX>:.*äWanted.*
+
+statement ok
+detach scoped;
+
+include test/template/quack_teardown.test_template
