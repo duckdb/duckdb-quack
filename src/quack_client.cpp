@@ -88,6 +88,13 @@ void QuackClient::EncodeRequest(optional_ptr<ClientContext> context, QuackMessag
 		if (client_query_id.IsValid()) {
 			message.SetClientQueryId(client_query_id);
 		}
+		// The tag of the client's own statement, for every statement it sends on that one's behalf.
+		if (message.Type() == MessageType::PREPARE_REQUEST) {
+			Value tag;
+			if (context->TryGetCurrentSetting("quack_query_tag", tag) && !tag.IsNull()) {
+				message.Cast<PrepareRequestMessage>().SetQueryTag(tag.GetValue<string>());
+			}
+		}
 	}
 	message.ToMemoryStream(out);
 }
