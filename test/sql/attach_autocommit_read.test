@@ -1,0 +1,45 @@
+# name: test/sql/attach_autocommit_read.test
+# description: an auto-commit read of an attached catalog opens no server-side transaction; an explicit one does
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+statement ok
+create table rpc.t as select range::INT i from range(3)
+
+statement ok quack_db:quack_server_con
+CALL enable_logging('Quack');
+
+statement ok quack_db:quack_server_con
+CALL truncate_duckdb_logs();
+
+query I
+select sum(i) from rpc.t
+----
+3
+
+query I quack_db:quack_server_con
+select count(*) from duckdb_logs_parsed('Quack') where message_type = 'PREPARE_REQUEST' and query in ('BEGIN TRANSACTION', 'COMMIT')
+----
+0
+
+statement ok
+BEGIN
+
+query I
+select sum(i) from rpc.t
+----
+3
+
+statement ok
+COMMIT
+
+query I quack_db:quack_server_con
+select count(*) from duckdb_logs_parsed('Quack') where message_type = 'PREPARE_REQUEST' and query in ('BEGIN TRANSACTION', 'COMMIT')
+----
+2
+
+include test/template/quack_teardown.test_template
