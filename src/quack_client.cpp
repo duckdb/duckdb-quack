@@ -37,8 +37,10 @@ string GetUriPart(T ele) {
 static void LoadExtraHttpHeaders(optional_ptr<ClientContext> context, DatabaseInstance &db, const QuackUri &uri,
                                  HTTPHeaders &headers) {
 	auto &secret_manager = SecretManager::Get(db);
-	auto transaction = context ? CatalogTransaction::GetSystemCatalogTransaction(*context)
-	                           : CatalogTransaction::GetSystemTransaction(db);
+	// A COMMIT or ROLLBACK runs after its context let go of the transaction; it may open a client too.
+	auto transaction = context && context->transaction.HasActiveTransaction()
+	                       ? CatalogTransaction::GetSystemCatalogTransaction(*context)
+	                       : CatalogTransaction::GetSystemTransaction(db);
 	auto match = secret_manager.LookupSecret(transaction, uri.Uri(), "quack");
 	if (!match.HasMatch()) {
 		return;
