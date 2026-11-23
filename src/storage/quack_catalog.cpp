@@ -1,4 +1,6 @@
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/sql_identifier.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/database_manager.hpp"
@@ -30,15 +32,58 @@
 namespace duckdb {
 
 QuackCatalog::QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri, ClientContext &context,
-                           const string &token, string client_id, idx_t heartbeat_timeout_seconds)
-    : Catalog(db_p) {
+                           const string &token, string client_id, idx_t heartbeat_timeout_seconds,
+                           string remote_catalog_p)
+    : Catalog(db_p), remote_catalog(std::move(remote_catalog_p)) {
 	// connect to the server
 	client_connection =
 	    QuackClient::ConnectToServer(context, server_uri, token, std::move(client_id), heartbeat_timeout_seconds);
+	if (!remote_catalog.empty()) {
+		UseRemoteCatalog(context);
+	}
 
 	// load the entire catalog up-front
 	auto load_info = LoadCatalog(context);
 	snapshot = make_shared_ptr<QuackSchemaSet>(context, *this, load_info);
+}
+
+void QuackCatalog::UseRemoteCatalog(ClientContext &context) {
+	// look the catalog up first: USE of a name that is not a catalog would pick a schema of that name in the
+	// session's current catalog instead
+	auto catalogs = ExecuteCommandInternal(context, "SELECT database_name FROM duckdb_databases() WHERE database_name "
+	                                                "NOT IN ('system', 'temp') ORDER BY database_name");
+	string server_name;
+	vector<string> available;
+	for (auto &row : catalogs->Rows()) {
+		auto name = row.GetValue(0).ToString();
+		if (StringUtil::CIEquals(name, remote_catalog)) {
+			server_name = name;
+		}
+		available.push_back(std::move(name));
+	}
+	if (server_name.empty()) {
+		throw CatalogException(
+		    "Remote catalog \"%s\" does not exist on the server (remote_catalog). Server catalogs: %s", remote_catalog,
+		    StringUtil::Join(available, ", "));
+	}
+	// the server session keeps this for as long as the catalog is attached: the names this catalog sends (scans,
+	// pushed-down statements, DDL, quack_query_by_name) carry no catalog and resolve in it
+	ExecuteCommandInternal(context, "USE " + SQLIdentifier::ToString(server_name));
+	auto session = ExecuteCommandInternal(context, "SELECT current_database(), current_schema()");
+	for (auto &row : session->Rows()) {
+		if (!StringUtil::CIEquals(row.GetValue(0).ToString(), server_name)) {
+			throw InternalException("USE %s left the server session in catalog \"%s\"", server_name,
+			                        row.GetValue(0).ToString());
+		}
+		remote_default_schema = row.GetValue(1).ToString();
+	}
+}
+
+optional<Identifier> QuackCatalog::GetDefaultSchema() const {
+	if (remote_default_schema.empty()) {
+		return Catalog::GetDefaultSchema();
+	}
+	return Identifier(remote_default_schema);
 }
 
 QuackLoadCatalogData QuackCatalog::LoadCatalog(ClientContext &context) {

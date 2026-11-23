@@ -60,7 +60,13 @@ QuackSchemaSet::QuackSchemaSet(ClientContext &context, QuackCatalog &catalog, co
 		auto default_catalog = row.GetValue(3).GetValue<string>();
 
 		vector<Identifier> local_path;
-		if (!StringUtil::CIEquals(database_name, default_catalog)) {
+		auto in_default_catalog = StringUtil::CIEquals(database_name, default_catalog);
+		if (!in_default_catalog && !catalog.RemoteCatalog().empty()) {
+			// rooted at one server catalog (remote_catalog), which the server session now has as its default:
+			// the other server catalogs are not part of this one
+			continue;
+		}
+		if (!in_default_catalog) {
 			// a remote catalog other than the server's default one: expose the catalog itself as a schema that
 			// holds the catalog's schemas, so that schemas of the same name in different catalogs stay distinct
 			local_path.emplace_back(database_name);

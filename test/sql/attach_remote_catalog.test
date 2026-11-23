@@ -1,0 +1,209 @@
+# name: test/sql/attach_remote_catalog.test
+# description: remote_catalog roots an attached quack catalog at one catalog of the server
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+# --- the server's default catalog and a second one, with a schema of the same name in both
+statement ok quack_db:quack_server_con
+attach ':memory:' as other;
+
+statement ok quack_db:quack_server_con
+create schema shared;
+
+statement ok quack_db:quack_server_con
+create table shared.t(i int);
+
+statement ok quack_db:quack_server_con
+insert into shared.t values (1);
+
+statement ok quack_db:quack_server_con
+create schema other.shared;
+
+statement ok quack_db:quack_server_con
+create table other.shared.t(i int);
+
+statement ok quack_db:quack_server_con
+insert into other.shared.t values (2), (3);
+
+statement ok quack_db:quack_server_con
+create table other.main.only_there(i int);
+
+statement ok quack_db:quack_server_con
+insert into other.main.only_there values (4);
+
+statement ok
+create secret (type quack, token 'asdf')
+
+# --- the alias holds the schemas of that one server catalog, and nothing of the others
+statement ok
+attach {server} as rc (remote_catalog 'other')
+
+query II
+select schema_name, parent_schema from duckdb_schemas() where database_name='rc' order by all
+----
+main	NULL
+shared	NULL
+
+query I
+from rc.shared.t order by i
+----
+2
+3
+
+query I
+from rc.only_there
+----
+4
+
+query I
+select count(*) from duckdb_tables() where database_name='rc'
+----
+2
+
+# text sent to the server resolves in that catalog too
+query I
+from rc.query('select current_database()')
+----
+other
+
+# --- without the option nothing changes: the server's default catalog, the others nested in it
+statement ok
+attach {server} as rpc
+
+query II
+select schema_name, parent_schema from duckdb_schemas() where database_name='rpc' order by all
+----
+main	other
+main	NULL
+other	NULL
+shared	other
+shared	NULL
+
+# both attachments in one query
+query II
+select a.i, b.i from rpc.shared.t a, rc.shared.t b order by all
+----
+1	2
+1	3
+
+# --- USE: the server catalog's default schema
+statement ok
+use rc
+
+query I
+select current_schema()
+----
+main
+
+query I
+from only_there
+----
+4
+
+query I
+from shared.t order by i
+----
+2
+3
+
+statement ok
+use memory
+
+# --- DDL lands in that catalog on the server
+statement ok
+create table rc.shared.made_here as select 5 as i
+
+query I quack_db:quack_server_con
+from other.shared.made_here
+----
+5
+
+query I quack_db:quack_server_con
+select count(*) from duckdb_tables() where database_name='memory' and table_name='made_here'
+----
+0
+
+statement ok
+drop table rc.shared.made_here
+
+# the drop reloads the catalog on its next use
+query I
+select count(*) from duckdb_tables() where database_name='rc'
+----
+2
+
+# --- quack_clear_cache reloads only that catalog's schemas
+statement ok quack_db:quack_server_con
+create schema other.later;
+
+statement ok quack_db:quack_server_con
+create table other.later.t as select 6 as i;
+
+statement ok quack_db:quack_server_con
+create schema later_in_default;
+
+statement error
+from rc.later.t
+----
+does not exist
+
+statement ok
+CALL quack_clear_cache()
+
+query I
+from rc.later.t
+----
+6
+
+query II
+select schema_name, parent_schema from duckdb_schemas() where database_name='rc' order by all
+----
+later	NULL
+main	NULL
+shared	NULL
+
+# --- the name is matched without regard to case
+statement ok
+attach {server} as rc_upper (remote_catalog 'OTHER')
+
+query I
+from rc_upper.shared.t order by i
+----
+2
+3
+
+# --- a name that is not a server catalog fails the ATTACH, also when it is a schema of the default catalog
+statement error
+attach {server} as missing (remote_catalog 'nope')
+----
+Remote catalog "nope" does not exist on the server
+
+statement error
+attach {server} as missing (remote_catalog 'shared')
+----
+Remote catalog "shared" does not exist on the server
+
+statement error
+attach {server} as missing (remote_catalog '')
+----
+remote_catalog cannot be NULL or empty
+
+query I
+select count(*) from duckdb_databases() where database_name='missing'
+----
+0
+
+statement ok
+detach rc
+
+statement ok
+detach rc_upper
+
+statement ok
+detach rpc
+
+include test/template/quack_teardown.test_template
+
+statement ok quack_db:quack_server_con
+detach other;
